@@ -1,83 +1,98 @@
 import numpy as np
 
-def find_path_once(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, top_n):
-  """
-    Finds the path once given an output index and target layer, returning indices
-    of neurons in the previous layer that connect to the given output index.
 
-    Parameters:
-    - inprop_csc (scipy.sparse.csc_matrix): The connectivity matrix in Compressed Sparse Column format.
-    - steps_cpu (np.ndarray): The effective connectivity across layers.
-    - inidx (int): The input neuron index.
-    - outidx (int or np.ndarray): The output neuron index or indices.
-    - target_layer_number (int): The target layer number to examine. Must be >= 1. When target_layer_number = 1, we are looking at the direct synaptic connectivity.
-    - top_n (int): The number of top connections to consider based on connectivity.
+def find_path_once(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, top_n):
+    """
+    Finds the path once between input and output, of distance target_layer_number, returning indices
+    of neurons in the previous layer that connect the input with the output. 
+
+    Args: 
+      inprop_csc (scipy.sparse.csc_matrix): The connectivity matrix in Compressed Sparse Column format.
+      steps_cpu (list): A list of compressed connectivity matrices: one matrix for each compressed path length. 
+      inidx (int or np.ndarray): The input neuron index/indices.
+      outidx (int or np.ndarray): The output neuron index/indices.
+      target_layer_number (int): The target layer number to examine. Must be >= 1. When target_layer_number = 1, we are looking at the direct synaptic connectivity.
+      top_n (int): The number of top connections to consider based on direct connectivity from inprop_csc.
 
     Returns:
-    - np.ndarray: An array of neuron indices in the previous layer that have significant connectivity, connecting between the `inidx` and `outidx`.
+      np.ndarray: An array of neuron indices in the previous layer that have significant connectivity, connecting between the `inidx` and `outidx`.
     """
 
-  # first go back one step from the outidx, based on the direct connectivity matrix (inprop)
-  # .nonzero() returns row, column of the nonzero values
-  us = inprop_csc[:,outidx].nonzero()
-  # Extract the submatrix using non-zero row indices (us[0]) and outidx
-  submatrix = inprop_csc[us[0], :][:, outidx]
-  # in case outidx is more than one index, calculate the average of each row in the submatrix
-  row_averages = np.array(submatrix.mean(axis=1)).flatten()
-  # Find the indices of the top n averages
-  top_n_indices = np.argsort(row_averages)[-top_n:]
-  # Get the original row indices corresponding to these top n averages
-  top_n_row_indices = us[0][top_n_indices]
+    # first go back one step from the outidx, based on the direct connectivity matrix (inprop)
+    # .nonzero() returns row, column of the nonzero values
+    us = inprop_csc[:, outidx].nonzero()
+    # Extract the submatrix using non-zero row indices (us[0]) and outidx
+    submatrix = inprop_csc[us[0], :][:, outidx]
+    # in case outidx is more than one index, calculate the average of each row in the submatrix
+    row_averages = np.array(submatrix.mean(axis=1)).flatten()
+    # Find the indices of the top n averages
+    top_n_indices = np.argsort(row_averages)[-top_n:]
+    # Get the original row indices corresponding to these top n averages
+    top_n_row_indices = us[0][top_n_indices]
 
-  # then use the 'effective connectivity' from the input (across layers) to intersect the top_n_row_indices
-  colidx = steps_cpu[target_layer_number-1][inidx,:].nonzero()[1]
-  intersect = np.intersect1d(top_n_row_indices, colidx)
+    # then use the 'effective connectivity' from the input (across layers) to intersect the top_n_row_indices
+    # the next line gets the targets that receive non-zero compressed input from inidx
+    colidx = steps_cpu[target_layer_number-1][inidx, :].nonzero()[1]
+    intersect = np.intersect1d(top_n_row_indices, colidx)
 
-  return intersect
+    return intersect
+
 
 def find_path_iteratively(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, top_n):
-  """
-  Iteratively finds the path from an output index back to an input index across
-  multiple layers, using the `find_path_once` function to traverse each layer.
+    """
+    Iteratively finds the path from the specified output (outidx) back to the input (inidx) across
+    multiple layers, using the `find_path_once` function to traverse each layer.
 
-  Parameters:
-  - inprop_csc (scipy.sparse.csc_matrix): The connectivity matrix in Compressed Sparse Column format.
-  - steps_cpu (np.ndarray): The effective connectivity across layers.
-  - inidx (int or np.ndarray): The input neuron indices.
-  - outidx (int or np.ndarray): The output neuron indices to start the reverse path finding.
-  - target_layer_number (int): The number of layers to traverse backwards from the outidx.
-  - top_n (int): The number of top connections to consider at each layer based on average connectivity.
+    Args:
+      inprop_csc (scipy.sparse.csc_matrix): The direct connectivity matrix in Compressed Sparse Column format.
+      steps_cpu (np.ndarray): A list of compressed connectivity matrices: one matrix for each compressed path length. 
+      inidx (int or np.ndarray): The input neuron indices.
+      outidx (int or np.ndarray): The output neuron indices to start the reverse path finding.
+      target_layer_number (int): The number of layers to traverse backwards from the outidx.
+      top_n (int): The number of top connections to consider at each layer based on direct connectivity from inprop_csc.
 
-  Returns:
-  - list of np.ndarray: A list where each element is an array of neuron indices at each layer
-    that constitute a (multi-layered) path from the input index to the output index.
-  """
+    Returns:
+      list of np.ndarray: A list where each element is an array of neuron indices at each layer
+      that constitute a (multi-layered) path from the input index to the output index.
+    """
 
-  path_indices = []  # This will store the path data as a list of arrays
+    path_indices = []  # This will store the path data as a list of arrays
 
-  current_outidx = outidx
-  for layer in range(target_layer_number, 0, -1):
-      # Find the indices in the current layer that connect to the next layer
-      current_layer_indices = find_path_once(inprop_csc, steps_cpu, inidx, current_outidx, layer, top_n)
+    current_outidx = outidx
+    for layer in range(target_layer_number, 0, -1):
+        # Find the indices in the current layer that connect to the next layer
+        current_layer_indices = find_path_once(
+            inprop_csc, steps_cpu, inidx, current_outidx, layer, top_n)
 
-      # If no indices are found, break the loop as no path can be formed
-      if len(current_layer_indices) == 0:
-          break
+        # If no indices are found, break the loop as no path can be formed
+        if len(current_layer_indices) == 0:
+            break
 
-      # Store the current layer's indices
-      path_indices.insert(0, current_layer_indices)  # Prepend to maintain order from input to output
+        # Store the current layer's indices
+        # Prepend to maintain order from input to output
+        path_indices.insert(0, current_layer_indices)
 
-      # Update the outidx for the next iteration to move backwards through layers
-      current_outidx = current_layer_indices
+        # Update the outidx for the next iteration to move backwards through layers
+        current_outidx = current_layer_indices
 
-  return path_indices
+    return path_indices
+
 
 def get_ids(paths, idx_to_type_side, root_to_type_side):
-  types = [[idx_to_type_side[key] for key in array] for array in paths]
-  print(types)
+    """Get the root ids at each step of the path between previously specified input and output. 
 
-  # get the ids
-  for i, collection in enumerate(types):
-    print(str(i+1) + ' step away from input')
-    ids = [str(key) for key, v in root_to_type_side.items() if v in collection]
-    print(','.join(ids))
+    Args:
+        paths (list): A list of np.ndarray, each array contains the indices of neurons traversed for that path length. 
+        idx_to_type_side (dict): A dictionary that maps the indices to type_side.
+        root_to_type_side (dict): A dictionary that maps the root ids to type_side. 
+    """
+
+    types = [[idx_to_type_side[key] for key in array] for array in paths]
+    print(types)
+
+    # get the ids
+    for i, collection in enumerate(types):
+        print(str(i+1) + ' step away from input')
+        ids = [str(key)
+               for key, v in root_to_type_side.items() if v in collection]
+        print(','.join(ids))
