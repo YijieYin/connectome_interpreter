@@ -1,0 +1,2 @@
+# Documentation build dependencies
+Sphinx==7.2
