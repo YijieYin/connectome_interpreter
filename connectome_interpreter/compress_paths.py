@@ -1,5 +1,10 @@
+"""This module is about compressing the paths of different lengths (either taking into account the sign of connections or not), and looking at the result (`result_summary()`).
+"""
+
 import torch
 from tqdm import tqdm
+import pandas as pd
+import plotly.express as px
 
 from .utils import dynamic_representation, torch_sparse_where
 
@@ -201,3 +206,107 @@ def add_first_n_matrices(matrices, n):
         sum_matrix += matrices[i]
 
     return sum_matrix
+
+
+def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None):
+    """
+    Generates a summary of connections between different types of neurons, 
+    represented by their input and output indexes. The function calculates 
+    the total synaptic input from presynaptic neuron groups to an average neuron in each 
+    postsynaptic neuron group.
+
+    Args:
+        stepsn (scipy.sparse matrix): Sparse matrix representing the synaptic strengths 
+            between neurons.
+        inidx (numpy.ndarray): Array of indices representing the input (presynaptic) neurons, used to subset stepsn.
+        outidx (numpy.ndarray): Array of indices representing the output (postsynaptic) neurons.
+        inidx_map (dict): Mapping from indices to neuron groups for the input neurons.
+        outidx_map (dict, optional): Mapping from indices to neuron groups for the output neurons.
+            Defaults to None, in which case it is set to be the same as inidx_map.
+
+    Returns:
+        None: Displays a styled DataFrame as output, showing the average percentage input 
+            each postsynaptic neuron type receives from each presynaptic neuron type, 
+            with cell colors indicating the magnitude of input.
+    """
+    if outidx_map is None:
+        outidx_map = inidx_map
+    df = pd.DataFrame(data=stepsn[:, outidx][inidx, :].toarray(),
+                      # choose what to group by here
+                      index=[inidx_map[key] for key in inidx],
+                      columns=[outidx_map[key] for key in outidx])
+
+    # Sum across rows: presynaptic neuron is in the rows
+    # summing across neurons of the same type: total amount of input from that type for the postsynaptic neuron
+    summed_df = df.groupby(df.index).sum()
+
+    # Average across columns and transpose back
+    # averaging across columns of the same type:
+    # on average, a neuron of that type receives x% input from a presynaptic type
+    result_df = summed_df.T.groupby(level=0).mean().T
+    result_dp = result_df.style.background_gradient(cmap='Blues', vmin=result_df.min().min(),
+                                                    vmax=result_df.max().max())
+    display(result_dp)
+
+
+def contribution_by_path_lengths(steps, inidx, outidx, outidx_map):
+    """
+    Analyzes the contribution of presynaptic neurons to postsynaptic neuron groups across 
+    different path lengths. This function calculates and visualizes the average input 
+    received by a neuron in each postsynaptic neuron group from presynaptic ones, aggregated over specified 
+    path lengths.
+
+    Args:
+        steps (list of scipy.sparse matrices): List of sparse matrices, each representing 
+            synaptic strengths for a specific path length.
+        inidx (numpy.ndarray): Array of indices representing input (presynaptic) neurons.
+        outidx (numpy.ndarray): Array of indices representing output (postsynaptic) neurons.
+        outidx_map (dict): Mapping from indices to postsynaptic neuron groups.
+
+    Returns:
+        None: Displays a line plot with path lengths on the x-axis, the average input 
+            received on the y-axis, and lines differentiated by postsynaptic neuron groups.
+            The plot represents how different postsynaptic neuron groups are influenced by 
+            presynaptic neurons over various path lengths.
+
+    The function iterates through each path length (each 'step'), computes the sum of inputs 
+    from presynaptic to each postsynaptic neuron. It then calculates the average for each postsynaptic group. It then generates a plot showing the relationship between path lengths and synaptic input 
+    contribution for each postsynaptic neuron group.
+    """
+
+    rows = []
+    for step in steps:
+        df = pd.DataFrame(data=step[:, outidx][inidx, :].toarray(),
+                          # all input are grouped togehter.
+                          columns=[outidx_map[key] for key in outidx])
+
+        # Sum across rows: presynaptic neuron is in the rows
+        # summing across neurons of the same type: total amount of input from that type for the postsynaptic neuron
+        # this gives a dataframe of one column, where each row is a value from outidx_map
+        summed_df = df.sum().to_frame()
+
+        # Average across columns and transpose back
+        # averaging across columns of the same type:
+        # on average, a neuron of that type receives x% input from a presynaptic type
+        result_df = summed_df.groupby(level=0).mean().T
+        rows.append(result_df)
+
+    # first have a dataframe where: each row is a path length, each column is a postsynaptic cell type
+    # then pivot_wide to long
+    # index is the path length
+    # variable is postynaptic cell type
+    # value is y axis
+    contri = pd.concat(rows, ignore_index=True).melt(
+        ignore_index=False).reset_index()
+    contri.columns = ['path_length', 'postsynaptic_type', 'value']
+
+    fig = px.line(contri, x="path_length", y="value",
+                  color='postsynaptic_type')
+    fig.update_layout(
+        xaxis=dict(
+            tickmode='linear',
+            tick0=0,
+            dtick=1
+        )
+    )
+    fig.show()
