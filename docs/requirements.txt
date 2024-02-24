@@ -1,10 +1,10 @@
 # Documentation build dependencies
-Sphinx>7.2
+Sphinx>=7.2
 
 # Project dependencies 
-numpy>1.26
-pandas>2.1
-scipy>1.11
-torch>2.2
-tqdm>4.65
-plotly>5.19
+numpy>=1.26
+pandas>=2.1
+scipy>=1.11
+torch>=2.2
+tqdm>=4.65
+plotly>=5.19
