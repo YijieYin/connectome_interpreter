@@ -24,30 +24,30 @@ def find_path_once(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, to
     inidx = to_nparray(inidx)
     outidx = to_nparray(outidx)
 
+    # first go back one step from the outidx, based on the direct connectivity matrix (inprop)
+    # .nonzero() returns row, column of the nonzero values
+    us = inprop_csc[:, outidx].nonzero()
+    # Extract the submatrix using non-zero row indices (us[0]) and outidx
+    submatrix = inprop_csc[us[0], :][:, outidx]
+    # in case outidx is more than one index, calculate the average of each row in the submatrix
+    row_averages = np.array(submatrix.mean(axis=1)).flatten()
+    # Find the indices of the top n averages
+    top_n_indices = np.argsort(row_averages)[-top_n:]
+    # Get the original row indices corresponding to these top n averages
+    top_n_row_indices = us[0][top_n_indices]
+
     if target_layer_number == 1:
         # if the target layer is 1, we are looking at the direct synaptic connectivity
         # so we just need to find the indices of the non-zero values in the inprop_csc matrix
-        # that correspond to the outidx
-        return inprop_csc[:, outidx].nonzero()[0]
-    else:
-        # first go back one step from the outidx, based on the direct connectivity matrix (inprop)
-        # .nonzero() returns row, column of the nonzero values
-        us = inprop_csc[:, outidx].nonzero()
-        # Extract the submatrix using non-zero row indices (us[0]) and outidx
-        submatrix = inprop_csc[us[0], :][:, outidx]
-        # in case outidx is more than one index, calculate the average of each row in the submatrix
-        row_averages = np.array(submatrix.mean(axis=1)).flatten()
-        # Find the indices of the top n averages
-        top_n_indices = np.argsort(row_averages)[-top_n:]
-        # Get the original row indices corresponding to these top n averages
-        top_n_row_indices = us[0][top_n_indices]
+        # that correspond to the outidx, and intersect those with the inidx we are interested in.
+        return np.intersect1d(top_n_row_indices, inidx)
 
-        # then use the 'effective connectivity' from the input (across layers) to intersect the top_n_row_indices
-        # the next line gets the targets that receive non-zero compressed input from inidx
-        colidx = steps_cpu[target_layer_number-1][inidx, :].nonzero()[1]
-        intersect = np.intersect1d(top_n_row_indices, colidx)
+    # then use the 'effective connectivity' from the input (across layers) to intersect the top_n_row_indices
+    # the next line gets the targets that receive non-zero compressed input from inidx
+    colidx = steps_cpu[target_layer_number-1][inidx, :].nonzero()[1]
+    intersect = np.intersect1d(top_n_row_indices, colidx)
 
-        return intersect
+    return intersect
 
 
 def find_path_iteratively(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, top_n):
@@ -83,7 +83,7 @@ def find_path_iteratively(inprop_csc, steps_cpu, inidx, outidx, target_layer_num
         # If no indices are found, break the loop as no path can be formed
         if len(current_layer_indices) == 0:
             print(
-                'Cannot trace back to the input :( Try providing a bigger top_n value?')
+                'Cannot trace back to the input :(. Try providing a bigger top_n value?')
             break
 
         # Store the current layer's indices
