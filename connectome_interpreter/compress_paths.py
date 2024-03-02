@@ -6,7 +6,7 @@ from tqdm import tqdm
 import pandas as pd
 import plotly.express as px
 
-from .utils import dynamic_representation, torch_sparse_where
+from .utils import dynamic_representation, torch_sparse_where, to_nparray
 
 
 def compress_paths(inprop, step_number, threshold=0, output_threshold=1e-4):
@@ -218,7 +218,7 @@ def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None):
     Args:
         stepsn (scipy.sparse matrix): Sparse matrix representing the synaptic strengths 
             between neurons.
-        inidx (numpy.ndarray): Array of indices representing the input (presynaptic) neurons, used to subset stepsn.
+        inidx (numpy.ndarray): Array of indices representing the input (presynaptic) neurons, used to subset stepsn. nan values are removed.
         outidx (numpy.ndarray): Array of indices representing the output (postsynaptic) neurons.
         inidx_map (dict): Mapping from indices to neuron groups for the input neurons.
         outidx_map (dict, optional): Mapping from indices to neuron groups for the output neurons.
@@ -231,6 +231,11 @@ def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None):
     """
     if outidx_map is None:
         outidx_map = inidx_map
+
+    # remove nan values in inidx and outidx
+    inidx = to_nparray(inidx)
+    outidx = to_nparray(outidx)
+
     df = pd.DataFrame(data=stepsn[:, outidx][inidx, :].toarray(),
                       # choose what to group by here
                       index=[inidx_map[key] for key in inidx],
@@ -273,6 +278,10 @@ def contribution_by_path_lengths(steps, inidx, outidx, outidx_map):
     from presynaptic to each postsynaptic neuron. It then calculates the average for each postsynaptic group. It then generates a plot showing the relationship between path lengths and synaptic input 
     contribution for each postsynaptic neuron group.
     """
+
+    # remove nan values in inidx and outidx
+    inidx = to_nparray(inidx)
+    outidx = to_nparray(outidx)
 
     rows = []
     for step in steps:
