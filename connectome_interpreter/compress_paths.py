@@ -249,6 +249,8 @@ def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None):
     # averaging across columns of the same type:
     # on average, a neuron of that type receives x% input from a presynaptic type
     result_df = summed_df.T.groupby(level=0).mean().T
+    # sort result_df by the values in the first column, in descending order
+    result_df = result_df.sort_values(by=result_df.columns[0], ascending=False)
     result_dp = result_df.style.background_gradient(cmap='Blues', vmin=result_df.min().min(),
                                                     vmax=result_df.max().max())
     display(result_dp)
