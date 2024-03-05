@@ -2,6 +2,10 @@ import torch
 import pandas as pd
 import numpy as np
 from scipy.sparse import coo_matrix
+import random 
+import matplotlib.colors as mcl
+
+import nglscenes as ngl
 
 
 def dynamic_representation(tensor, density_threshold=0.2):
@@ -242,3 +246,100 @@ def to_nparray(input_data):
     cleaned_array = input_array[~pd.isna(input_array)]
 
     return cleaned_array
+
+def get_ngl_link(df, no_connection_invisible = True, colour_saturation = 0.4, scene = None):
+    """
+    Generates a Neuroglancer link with layers, corresponding to each column in the df. The function
+    processes a dataframe, adding colour information to each neuron,
+    and then creates layers in a Neuroglancer scene for visualization. Separate layers
+    are created for each column in the DataFrame, with unique segment colors based on
+    the values in the DataFrame.
+
+    Parameters:
+    - df (pandas.DataFrame): A DataFrame containing neuron metadata. The index should
+      contain neuron identifiers (root_ids), and columns should represent different
+      attributes or categories.
+    - no_connection_invisible (bool, optional): Whether to make invisible neurons that are not connected. Default to True (invisible). 
+    - colour_saturation (float, optional): The saturation of the colours. Default to 0.4.
+    - scene (ngl.Scene, optional): A Neuroglancer scene object from nglscenes package. You can read a scene from clipboard like `scene = Scene.from_clipboard()`. 
+
+    Returns:
+    - str: A URL to the generated Neuroglancer scene.
+
+    Notes:
+    - The function assumes that the 'scene1' variable is defined in the global scope and
+      is an instance of ngl.Scene.
+    - The function creates separate Neuroglancer layers for each column in the DataFrame,
+      using the column name as the layer name.
+    - The root_ids are colored based on the values in the DataFrame, with a color scale
+      ranging from white (minimum value) to a specified color (maximum value).
+    - The function relies on the Neuroglancer library for layer creation and scene manipulation.
+    """
+
+    try:
+        import nglscenes as ngl
+    except ImportError:
+        raise ImportError("To use this function, please install the niche package by running 'pip3 install git+https://github.com/schlegelp/nglscenes@main]'")
+    
+    # define a scene if not given: 
+    if scene == None: 
+        # Initialize a scene
+        scene = ngl.Scene()
+        scene['layout'] = '3d'
+        scene['position'] = [527216.1875, 208847.125, 84774.0625]
+        scene['projectionScale'] = 400000
+        scene['dimensions'] = {"x": [1e-9,"m"], "y": [1e-9,"m"], "z": [1e-9, "m"]}
+
+        # and another for FAFB mesh
+        fafb_layer = ngl.SegmentationLayer(source = 'precomputed://https://spine.itanna.io/files/eric/jfrc_mesh_test',
+                                          name = 'jfrc_mesh_test1')
+        fafb_layer['segments'] = ['1']
+        fafb_layer['objectAlpha'] = 0.17
+        fafb_layer['selectedAlpha'] = 0.55
+        fafb_layer['segmentColors'] = {'1':'#cacdd8'}
+        fafb_layer['colorSeed'] = 778769298
+        scene.add_layers(fafb_layer)
+
+        # and the neuropil layer with names
+        np_layer = ngl.SegmentationLayer(source = 'precomputed://gs://neuroglancer-fafb-data/elmr-data/FAFBNP.surf/mesh#type=mesh',
+                                        name = 'neuropil_regions_surface_named')
+        np_layer['segments'] = [str(num) for num in range(0, 79)]
+        np_layer['visible'] = False
+        np_layer['objectAlpha'] = 0.17
+        scene.add_layers(np_layer)
+
+
+    # Define a list of colors optimized for human perception on a dark background
+    colors = [
+        "#ff6b6b", "#f06595", "#cc5de8", "#845ef7", "#5c7cfa", "#339af0", "#22b8cf", "#20c997", "#51cf66", "#94d82d", "#fcc419",
+        "#4ecdc4", "#ffe66d", "#7bed9f", "#a9def9", "#e2c1f9", "#f694c1", "#ead5dc", "#c7f0bd", "#f0e5cf", "#ffc5a1",
+        "#ff8c94", "#ffaaa6", "#ffd3b5", "#dcedc1", "#a8e6cf", "#a6d0e4", "#c1beff", "#f5b0cb", "#ffcfdf", "#fde4cf", "#f1e3d3"
+    ]
+
+    # Normalize the values in the DataFrame
+    df_norm = (df - df.min().min()) / (df.max().max() - df.min().min())
+
+    scene['layout'] = '3d'
+
+    source = 'precomputed://gs://flywire_v141_m783'
+
+    for column in df.columns:
+        color = random.choice(colors)
+        cmap = mcl.LinearSegmentedColormap.from_list("custom_cmap", ["white", color])
+
+        df_group = df_norm[[column]]
+        if no_connection_invisible: 
+          df_group = df_group[df_group.iloc[:,0]>0]
+
+        layer = ngl.SegmentationLayer(source=source, name=str(column))
+
+        layer['segments'] = list(df_group.index.astype(str))
+        layer['segmentColors'] = {
+            # trick from Claud to make the colours more saturated 
+            str(root_id): mcl.to_hex(cmap(colour_saturation + (1-colour_saturation)*value.values[0]))
+            for root_id, value in df_group.iterrows()
+        }
+
+        scene.add_layers(layer)
+
+    return scene.url
