@@ -208,7 +208,7 @@ def add_first_n_matrices(matrices, n):
     return sum_matrix
 
 
-def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None):
+def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None, display_output = True):
     """
     Generates a summary of connections between different types of neurons, 
     represented by their input and output indexes. The function calculates 
@@ -223,11 +223,15 @@ def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None):
         inidx_map (dict): Mapping from indices to neuron groups for the input neurons.
         outidx_map (dict, optional): Mapping from indices to neuron groups for the output neurons.
             Defaults to None, in which case it is set to be the same as inidx_map.
+        display_output (bool, optional): Whether to display the output in a coloured dataframe. Defaults to True.
 
     Returns:
-        None: Displays a styled DataFrame as output, showing the average percentage input 
-            each postsynaptic neuron type receives from each presynaptic neuron type, 
-            with cell colors indicating the magnitude of input.
+        pd.DataFrame: A dataframe representing the summed synaptic input from presynaptic neuron groups 
+            to an average neuron in each postsynaptic neuron group. This dataframe is always returned, regardless of the
+            value of display_output.
+    
+    Displays:
+        If display_output is True, the function will display a styled version of the resulting dataframe.
     """
     if outidx_map is None:
         outidx_map = inidx_map
@@ -251,9 +255,11 @@ def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None):
     result_df = summed_df.T.groupby(level=0).mean().T
     # sort result_df by the values in the first column, in descending order
     result_df = result_df.sort_values(by=result_df.columns[0], ascending=False)
-    result_dp = result_df.style.background_gradient(cmap='Blues', vmin=result_df.min().min(),
-                                                    vmax=result_df.max().max())
-    display(result_dp)
+    if display_output:
+        result_dp = result_df.style.background_gradient(cmap='Blues', vmin=result_df.min().min(),
+                                                        vmax=result_df.max().max())
+        display(result_dp)
+    return result_df
 
 
 def contribution_by_path_lengths(steps, inidx, outidx, outidx_map):
