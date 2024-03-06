@@ -4,7 +4,7 @@ import pandas as pd
 from .utils import to_nparray
 
 
-def find_path_once(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, top_n):
+def find_path_once(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, top_n, threshold = 0):
     """
     Finds the path once between input and output, of distance target_layer_number, returning indices
     of neurons in the previous layer that connect the input with the output. This works by taking the top_n direct upstream partners of the outidx neurons, and intersect those with neurons 'effectively' connected (through steps_cpu) to the inidx neurons.
@@ -15,7 +15,8 @@ def find_path_once(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, to
       inidx (int or np.ndarray): The input neuron index/indices.
       outidx (int or np.ndarray): The output neuron index/indices.
       target_layer_number (int): The target layer number to examine. Must be >= 1. When target_layer_number = 1, we are looking at the direct synaptic connectivity.
-      top_n (int): The number of top connections to consider based on direct connectivity from inprop_csc.
+      top_n (int): The number of top connections to consider based on direct connectivity from inprop_csc. if top_n = -1, all connections are considered.
+      threshold (float, optional): The threshold for the average of the direct connectivity from inidx to outidx.
 
     Returns:
       np.ndarray: An array of neuron indices in the previous layer that have significant connectivity, connecting between the `inidx` and `outidx`.
@@ -24,33 +25,50 @@ def find_path_once(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, to
     inidx = to_nparray(inidx)
     outidx = to_nparray(outidx)
 
-    # first go back one step from the outidx, based on the direct connectivity matrix (inprop)
-    # .nonzero() returns row, column of the nonzero values
-    us = inprop_csc[:, outidx].nonzero()
-    # Extract the submatrix using non-zero row indices (us[0]) and outidx
-    submatrix = inprop_csc[us[0], :][:, outidx]
-    # in case outidx is more than one index, calculate the average of each row in the submatrix
-    row_averages = np.array(submatrix.mean(axis=1)).flatten()
-    # Find the indices of the top n averages
-    top_n_indices = np.argsort(row_averages)[-top_n:]
-    # Get the original row indices corresponding to these top n averages
-    top_n_row_indices = us[0][top_n_indices]
-
     if target_layer_number == 1:
         # if the target layer is 1, we are looking at the direct synaptic connectivity
         # so we just need to find the indices of the non-zero values in the inprop_csc matrix
         # that correspond to the outidx, and intersect those with the inidx we are interested in.
-        return np.intersect1d(top_n_row_indices, inidx)
+        colidx = inidx
+    else: 
+        # first get the neurons that effectively connect to inidx, at layer number target_layer_number - 1. 
+        # for example, in the ORN->PN->KC case, target_layer_number = 2 for the KCs. top_n_row_indices are indices of the PNs that connect to the KCs. So in this case we should use direct connectivity to get the ORNs. 
+        # so when target_layer_number == 2, we should use steps_cpu[0] (direct connectivity), that is, target_layer_number-2. 
+        # subtract 1 for getting top_n_row_indices below which is going one step upstream; and another for 0-based indexing. 
+        # the next line gets the targets that receive non-zero compressed input from inidx
+        # when target_layer_number >= 2. 
+        colidx = steps_cpu[target_layer_number-2][inidx, :].nonzero()[1]
 
-    # then use the 'effective connectivity' from the input (across layers) to intersect the top_n_row_indices
-    # the next line gets the targets that receive non-zero compressed input from inidx
-    colidx = steps_cpu[target_layer_number-1][inidx, :].nonzero()[1]
-    intersect = np.intersect1d(top_n_row_indices, colidx)
+    # then go back one step from the outidx, based on the direct connectivity matrix (inprop)
+    # .nonzero() returns row, column of the nonzero values
+    us = inprop_csc[:, outidx].nonzero()
+    # intersect the non-zero upstream neurons with those effectively connected across layers (colidx)
+    # these are still row indices of inprop 
+    intersect = np.intersect1d(us[0], colidx)
 
-    return intersect
+    submatrix = inprop_csc[intersect, :][:, outidx]
+    # in case outidx is more than one index, calculate the average of each row in the submatrix
+    row_averages = np.array(submatrix.mean(axis=1)).flatten()
+
+    # thresholding 
+    # these are indices of row_averages
+    thresholded_indices = np.where(row_averages >= threshold)[0]
+    thresholded_row_averages = row_averages[thresholded_indices]
+    # these are indices of intersect, which are indices of inprop_csc
+    thresholded_intersect = intersect[thresholded_indices]
+
+    # Find the indices (of thresholded_row_averages) of the top n averages
+    if top_n == -1:
+        top_n_indices = np.argsort(thresholded_row_averages)
+    else:
+        top_n_indices = np.argsort(thresholded_row_averages)[-top_n:]
+    # Get the original row indices corresponding to these top n averages
+    top_n_row_indices = thresholded_intersect[top_n_indices]
+
+    return top_n_row_indices
 
 
-def find_path_iteratively(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, top_n):
+def find_path_iteratively(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, top_n, threshold = 0):
     """
     Iteratively finds the path from the specified output (outidx) back to the input (inidx) across
     multiple layers, using the `find_path_once` function to traverse each layer. 
@@ -62,6 +80,7 @@ def find_path_iteratively(inprop_csc, steps_cpu, inidx, outidx, target_layer_num
       outidx (int or np.ndarray): The output neuron indices to start the reverse path finding.
       target_layer_number (int): The number of layers to traverse backwards from the outidx. If target_layer_number = 1, we are looking at the direct synaptic connectivity.
       top_n (int): The number of top connections to consider at each layer based on direct connectivity from inprop_csc.
+      threshold (float, optional): The threshold for the average of the direct connectivity from inidx to outidx.
 
     Returns:
       list of np.ndarray: A list where each element is an array of neuron indices at each layer
@@ -78,7 +97,7 @@ def find_path_iteratively(inprop_csc, steps_cpu, inidx, outidx, target_layer_num
     for layer in range(target_layer_number, 0, -1):
         # Find the indices in the current layer that connect to the next layer
         current_layer_indices = find_path_once(
-            inprop_csc, steps_cpu, inidx, current_outidx, layer, top_n)
+            inprop_csc, steps_cpu, inidx, current_outidx, layer, top_n, threshold)
 
         # If no indices are found, break the loop as no path can be formed
         if len(current_layer_indices) == 0:
@@ -118,4 +137,4 @@ def get_ids(paths, idx_to_group, root_to_group):
         print(collection)
         ids = [str(key)
                for key, v in root_to_group.items() if v in collection]
-        print(','.join(ids))
+        print(','.join(set(ids)))
