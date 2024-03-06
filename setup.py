@@ -15,7 +15,13 @@ setup(
         'torch',
         'tqdm',
         'plotly',
+        'random',
+        'matplotlib',
+        'itertools',
     ],
+    extras_require={
+        'get_ngl_link': ['nglscenes'],
+    },
     # Optional metadata
     author='Yijie Yin',
     author_email='yy432@cam.ac.uk',
@@ -26,4 +32,4 @@ setup(
         'Documentation': 'https://connectome-interpreter.readthedocs.io/en/latest/',
     }
     # url='https://connectome-interpreter.readthedocs.io/en/latest/',  # Project home page
-)
+) 
