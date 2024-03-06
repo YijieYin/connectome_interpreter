@@ -4,6 +4,7 @@ import numpy as np
 from scipy.sparse import coo_matrix
 import random 
 import matplotlib.colors as mcl
+import itertools
 
 import nglscenes as ngl
 
@@ -128,21 +129,21 @@ def coo_to_el(coo):
 
     return all_el
 
-
-def modify_coo_matrix(coo, input_idx=None, output_idx=None, value=None, updates_df=None):
+def modify_coo_matrix(coo, input_idx=None, output_idx=None, value=None, updates_df=None, re_normalize=True):
     """
     Modify the values of a COO sparse matrix at specified indices.
 
     There are two modes of operation:
-    1. Single update mode: where `input_idx`, `output_idx`, and `value` are provided as individual arguments.
+    1. Single update mode: where `input_idx`, `output_idx`, and `value` are provided as individual arguments. In this case all combinations of input_idx and output_idx are updated. 
     2. Batch update mode: where `updates_df` is provided, a DataFrame with columns ['input_idx', 'output_idx', 'value'].
 
     Args:
       coo (coo_matrix): The COO sparse matrix to modify.
-      input_idx (int, optional): The row index for the single update mode.
-      output_idx (int, optional): The column index for the single update mode.
-      value (numeric, optional): The new value for the single update mode.
+      input_idx (int, list, numpy.ndarray, set, optional): Row indices for updates.
+      output_idx (int, list, numpy.ndarray, set, optional): Column indices for updates.
+      value (numeric, list, numpy.ndarray, optional): New values for updates. If it is a number, then it is used for all updates. Else, it needs to be of length len(input_idx) * len(output_idx).
       updates_df (DataFrame, optional): The DataFrame containing batch updates.
+      re_normalize (bool, optional): Whether to re-normalize the matrix after updating, such that all values in each column sum up to 1. Default to True.
 
     Note:
       In single update mode, `input_idx`, `output_idx`, and `value` must all be provided.
@@ -152,74 +153,61 @@ def modify_coo_matrix(coo, input_idx=None, output_idx=None, value=None, updates_
     Returns:
       coo_matrix: The updated COO sparse matrix.
     """
+    updated_cols = set()  # Track columns that are updated or added
     if input_idx is not None and output_idx is not None and value is not None:
-        # Single update mode
-        update_index = np.where((coo.row == input_idx)
-                                & (coo.col == output_idx))[0]
-        if update_index.size > 0:
-            coo.data[update_index] = value
-    elif updates_df is not None:
-        # Batch update mode
-        for idx, row in updates_df.iterrows():
-            update_index = np.where((coo.row == row['input_idx']) & (
-                coo.col == row['output_idx']))[0]
-            if update_index.size > 0:
-                coo.data[update_index] = row['value']
-    else:
-        # No valid update mode provided
-        raise ValueError(
-            "Invalid parameters: provide either single indices and value or an updates dataframe.")
+        # Convert sets to numpy arrays and ensure all inputs are numpy arrays
+        if isinstance(input_idx, set): input_idx = np.array(list(input_idx))
+        else: input_idx = np.atleast_1d(input_idx)
+        if isinstance(output_idx, set): output_idx = np.array(list(output_idx))
+        else: output_idx = np.atleast_1d(output_idx)
+        
+        value = np.atleast_1d(value)
 
+        # Ensure 'value' can be a single value or an array
+        value = np.full(len(input_idx) * len(output_idx), value[0]) if len(value) == 1 else value
+
+        # Adjust index to reflect combination of input_idx and output_idx
+        combination_index = 0
+
+        for i, j in itertools.product(input_idx, output_idx):
+            val = value[combination_index]
+            idx = np.where((coo.row == i) & (coo.col == j))[0]
+            if idx.size > 0:
+                coo.data[idx] = val
+            elif val != 0:  # Add new value if it doesn't exist
+                coo.row = np.append(coo.row, i)
+                coo.col = np.append(coo.col, j)
+                coo.data = np.append(coo.data, val)
+            updated_cols.add(j)
+            combination_index += 1  # Move to the next value for the next combination
+    
+    elif updates_df is not None:
+        for _, row in updates_df.iterrows():
+            i, j, val = row['input_idx'], row['output_idx'], row['value']
+            idx = np.where((coo.row == i) & (coo.col == j))[0]
+            if idx.size > 0:
+                coo.data[idx] = val
+            elif val != 0:
+                coo.row = np.append(coo.row, i)
+                coo.col = np.append(coo.col, j)
+                coo.data = np.append(coo.data, val)
+            updated_cols.add(j)
+    
     # Remove zero entries by reconstructing the matrix
     nonzero_indices = coo.data != 0
     coo = coo_matrix((coo.data[nonzero_indices], (coo.row[nonzero_indices],
                      coo.col[nonzero_indices])), shape=coo.shape)
+    
+    if re_normalize and updated_cols:
+        csr = coo.tocsr()  # Convert for efficient column operations
+        for col in updated_cols:
+            col_sum = np.sum(csr[:, col])
+            if col_sum != 0:
+                csr[:, col] /= col_sum
+        coo = csr.tocoo()  # Convert back to COO
+
     return coo
 
-
-def silence_connections(coo, input_idx, output_idx):
-    """
-    Sets the values of specified connections in a COO sparse matrix to zero, effectively "silencing" these connections.
-
-    Args:
-      coo (coo_matrix): The COO sparse matrix to modify.
-      input_idx (int, list, numpy.ndarray, set): Row indices of the connections to silence. Can be a single index or a collection of indices.
-      output_idx (int, list, numpy.ndarray, set): Column indices of the connections to silence. Can be a single index or a collection of indices.
-
-    Note:
-      `input_idx` and `output_idx` should be the same type and length if they are lists, arrays, or sets.
-      This function leverages `modify_coo_matrix` for applying updates.
-
-    Returns:
-      coo_matrix: The updated COO sparse matrix with specified connections silenced.
-    """
-    # Convert input_idx and output_idx to numpy arrays if they are not already
-    input_idx = np.array(list(input_idx)) if isinstance(
-        input_idx, (list, set)) else np.array([input_idx])
-    output_idx = np.array(list(output_idx)) if isinstance(
-        output_idx, (list, set)) else np.array([output_idx])
-
-    # Check if input_idx and output_idx are single values and create all combinations if they are arrays
-    if input_idx.size > 1 or output_idx.size > 1:
-        input_idx_combinations, output_idx_combinations = np.meshgrid(
-            input_idx, output_idx, indexing='ij')
-        input_idx_flattened = input_idx_combinations.ravel()
-        output_idx_flattened = output_idx_combinations.ravel()
-    else:
-        # If single values, just use them directly
-        input_idx_flattened = input_idx
-        output_idx_flattened = output_idx
-
-    # Create updates DataFrame with 'value' column set to 0 for silencing
-    updates_df = pd.DataFrame({
-        'input_idx': input_idx_flattened,
-        'output_idx': output_idx_flattened,
-        'value': 0
-    })
-
-    # Update the COO matrix using the modify_coo_matrix function
-    updated_coo = modify_coo_matrix(coo, updates_df=updates_df)
-    return updated_coo
 
 
 def to_nparray(input_data):
