@@ -2,11 +2,9 @@ import torch
 import pandas as pd
 import numpy as np
 from scipy.sparse import coo_matrix
-import random 
+import random
 import matplotlib.colors as mcl
 import itertools
-
-import nglscenes as ngl
 
 
 def dynamic_representation(tensor, density_threshold=0.2):
@@ -129,6 +127,7 @@ def coo_to_el(coo):
 
     return all_el
 
+
 def modify_coo_matrix(coo, input_idx=None, output_idx=None, value=None, updates_df=None, re_normalize=True):
     """
     Modify the values of a COO sparse matrix at specified indices.
@@ -156,15 +155,20 @@ def modify_coo_matrix(coo, input_idx=None, output_idx=None, value=None, updates_
     updated_cols = set()  # Track columns that are updated or added
     if input_idx is not None and output_idx is not None and value is not None:
         # Convert sets to numpy arrays and ensure all inputs are numpy arrays
-        if isinstance(input_idx, set): input_idx = np.array(list(input_idx))
-        else: input_idx = np.atleast_1d(input_idx)
-        if isinstance(output_idx, set): output_idx = np.array(list(output_idx))
-        else: output_idx = np.atleast_1d(output_idx)
-        
+        if isinstance(input_idx, set):
+            input_idx = np.array(list(input_idx))
+        else:
+            input_idx = np.atleast_1d(input_idx)
+        if isinstance(output_idx, set):
+            output_idx = np.array(list(output_idx))
+        else:
+            output_idx = np.atleast_1d(output_idx)
+
         value = np.atleast_1d(value)
 
         # Ensure 'value' can be a single value or an array
-        value = np.full(len(input_idx) * len(output_idx), value[0]) if len(value) == 1 else value
+        value = np.full(len(input_idx) * len(output_idx),
+                        value[0]) if len(value) == 1 else value
 
         # Adjust index to reflect combination of input_idx and output_idx
         combination_index = 0
@@ -180,7 +184,7 @@ def modify_coo_matrix(coo, input_idx=None, output_idx=None, value=None, updates_
                 coo.data = np.append(coo.data, val)
             updated_cols.add(j)
             combination_index += 1  # Move to the next value for the next combination
-    
+
     elif updates_df is not None:
         for _, row in updates_df.iterrows():
             i, j, val = row['input_idx'], row['output_idx'], row['value']
@@ -192,12 +196,12 @@ def modify_coo_matrix(coo, input_idx=None, output_idx=None, value=None, updates_
                 coo.col = np.append(coo.col, j)
                 coo.data = np.append(coo.data, val)
             updated_cols.add(j)
-    
+
     # Remove zero entries by reconstructing the matrix
     nonzero_indices = coo.data != 0
     coo = coo_matrix((coo.data[nonzero_indices], (coo.row[nonzero_indices],
                      coo.col[nonzero_indices])), shape=coo.shape)
-    
+
     if re_normalize and updated_cols:
         csr = coo.tocsr()  # Convert for efficient column operations
         for col in updated_cols:
@@ -207,7 +211,6 @@ def modify_coo_matrix(coo, input_idx=None, output_idx=None, value=None, updates_
         coo = csr.tocoo()  # Convert back to COO
 
     return coo
-
 
 
 def to_nparray(input_data):
@@ -235,7 +238,8 @@ def to_nparray(input_data):
 
     return cleaned_array
 
-def get_ngl_link(df, no_connection_invisible = True, colour_saturation = 0.4, scene = None):
+
+def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=None):
     """
     Generates a Neuroglancer link with layers, corresponding to each column in the df. The function
     processes a dataframe, adding colour information to each neuron,
@@ -243,59 +247,56 @@ def get_ngl_link(df, no_connection_invisible = True, colour_saturation = 0.4, sc
     are created for each column in the DataFrame, with unique segment colors based on
     the values in the DataFrame.
 
-    Parameters:
-    - df (pandas.DataFrame): A DataFrame containing neuron metadata. The index should
-      contain neuron identifiers (root_ids), and columns should represent different
+    Args:
+        df (pandas.DataFrame): A DataFrame containing neuron metadata. The index should contain neuron identifiers (root_ids), and columns should represent different
       attributes or categories.
-    - no_connection_invisible (bool, optional): Whether to make invisible neurons that are not connected. Default to True (invisible). 
-    - colour_saturation (float, optional): The saturation of the colours. Default to 0.4.
-    - scene (ngl.Scene, optional): A Neuroglancer scene object from nglscenes package. You can read a scene from clipboard like `scene = Scene.from_clipboard()`. 
+        no_connection_invisible (bool, optional): Whether to make invisible neurons that are not connected. Default to True (invisible). 
+        colour_saturation (float, optional): The saturation of the colours. Default to 0.4.
+        scene (ngl.Scene, optional): A Neuroglancer scene object from nglscenes package. You can read a scene from clipboard like `scene = Scene.from_clipboard()`. 
 
     Returns:
-    - str: A URL to the generated Neuroglancer scene.
+        str: A URL to the generated Neuroglancer scene.
 
-    Notes:
-    - The function assumes that the 'scene1' variable is defined in the global scope and
-      is an instance of ngl.Scene.
-    - The function creates separate Neuroglancer layers for each column in the DataFrame,
-      using the column name as the layer name.
-    - The root_ids are colored based on the values in the DataFrame, with a color scale
-      ranging from white (minimum value) to a specified color (maximum value).
-    - The function relies on the Neuroglancer library for layer creation and scene manipulation.
+    Note:
+        The function assumes that the 'scene1' variable is defined in the global scope and is an instance of ngl.Scene.
+        The function creates separate Neuroglancer layers for each column in the DataFrame, using the column name as the layer name.
+        The root_ids are colored based on the values in the DataFrame, with a color scale ranging from white (minimum value) to a specified color (maximum value).
+        The function relies on the Neuroglancer library for layer creation and scene manipulation.
     """
 
     try:
         import nglscenes as ngl
     except ImportError:
-        raise ImportError("To use this function, please install the niche package by running 'pip3 install git+https://github.com/schlegelp/nglscenes@main]'")
-    
-    # define a scene if not given: 
-    if scene == None: 
+        raise ImportError(
+            "To use this function, please install the package by running 'pip3 install git+https://github.com/schlegelp/nglscenes@main]'")
+
+    # define a scene if not given:
+    if scene == None:
         # Initialize a scene
         scene = ngl.Scene()
         scene['layout'] = '3d'
         scene['position'] = [527216.1875, 208847.125, 84774.0625]
         scene['projectionScale'] = 400000
-        scene['dimensions'] = {"x": [1e-9,"m"], "y": [1e-9,"m"], "z": [1e-9, "m"]}
+        scene['dimensions'] = {"x": [1e-9, "m"],
+                               "y": [1e-9, "m"], "z": [1e-9, "m"]}
 
         # and another for FAFB mesh
-        fafb_layer = ngl.SegmentationLayer(source = 'precomputed://https://spine.itanna.io/files/eric/jfrc_mesh_test',
-                                          name = 'jfrc_mesh_test1')
+        fafb_layer = ngl.SegmentationLayer(source='precomputed://https://spine.itanna.io/files/eric/jfrc_mesh_test',
+                                           name='jfrc_mesh_test1')
         fafb_layer['segments'] = ['1']
         fafb_layer['objectAlpha'] = 0.17
         fafb_layer['selectedAlpha'] = 0.55
-        fafb_layer['segmentColors'] = {'1':'#cacdd8'}
+        fafb_layer['segmentColors'] = {'1': '#cacdd8'}
         fafb_layer['colorSeed'] = 778769298
         scene.add_layers(fafb_layer)
 
         # and the neuropil layer with names
-        np_layer = ngl.SegmentationLayer(source = 'precomputed://gs://neuroglancer-fafb-data/elmr-data/FAFBNP.surf/mesh#type=mesh',
-                                        name = 'neuropil_regions_surface_named')
+        np_layer = ngl.SegmentationLayer(source='precomputed://gs://neuroglancer-fafb-data/elmr-data/FAFBNP.surf/mesh#type=mesh',
+                                         name='neuropil_regions_surface_named')
         np_layer['segments'] = [str(num) for num in range(0, 79)]
         np_layer['visible'] = False
         np_layer['objectAlpha'] = 0.17
         scene.add_layers(np_layer)
-
 
     # Define a list of colors optimized for human perception on a dark background
     colors = [
@@ -313,17 +314,18 @@ def get_ngl_link(df, no_connection_invisible = True, colour_saturation = 0.4, sc
 
     for column in df.columns:
         color = random.choice(colors)
-        cmap = mcl.LinearSegmentedColormap.from_list("custom_cmap", ["white", color])
+        cmap = mcl.LinearSegmentedColormap.from_list(
+            "custom_cmap", ["white", color])
 
         df_group = df_norm[[column]]
-        if no_connection_invisible: 
-          df_group = df_group[df_group.iloc[:,0]>0]
+        if no_connection_invisible:
+            df_group = df_group[df_group.iloc[:, 0] > 0]
 
         layer = ngl.SegmentationLayer(source=source, name=str(column))
 
         layer['segments'] = list(df_group.index.astype(str))
         layer['segmentColors'] = {
-            # trick from Claud to make the colours more saturated 
+            # trick from Claud to make the colours more saturated
             str(root_id): mcl.to_hex(cmap(colour_saturation + (1-colour_saturation)*value.values[0]))
             for root_id, value in df_group.iterrows()
         }
