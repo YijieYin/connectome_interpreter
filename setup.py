@@ -15,9 +15,7 @@ setup(
         'torch',
         'tqdm',
         'plotly',
-        'random',
         'matplotlib',
-        'itertools',
     ],
     extras_require={
         'get_ngl_link': ['nglscenes'],
