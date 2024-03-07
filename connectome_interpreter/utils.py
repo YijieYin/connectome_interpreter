@@ -239,7 +239,7 @@ def to_nparray(input_data):
     return cleaned_array
 
 
-def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=None):
+def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=None, normalise_within_column=True):
     """
     Generates a Neuroglancer link with layers, corresponding to each column in the df. The function
     processes a dataframe, adding colour information to each neuron,
@@ -253,6 +253,7 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
         no_connection_invisible (bool, optional): Whether to make invisible neurons that are not connected. Default to True (invisible). 
         colour_saturation (float, optional): The saturation of the colours. Default to 0.4.
         scene (ngl.Scene, optional): A Neuroglancer scene object from nglscenes package. You can read a scene from clipboard like `scene = Scene.from_clipboard()`. 
+        normalise_within_column (bool, optional): Whether to normalise the values within each column (the alternative is normalising by the min and max value in the entire dataframe). Default to True.
 
     Returns:
         str: A URL to the generated Neuroglancer scene.
@@ -299,14 +300,14 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
         scene.add_layers(np_layer)
 
     # Define a list of colors optimized for human perception on a dark background
-    colors = [
-        "#ff6b6b", "#f06595", "#cc5de8", "#845ef7", "#5c7cfa", "#339af0", "#22b8cf", "#20c997", "#51cf66", "#94d82d", "#fcc419",
-        "#4ecdc4", "#ffe66d", "#7bed9f", "#a9def9", "#e2c1f9", "#f694c1", "#ead5dc", "#c7f0bd", "#f0e5cf", "#ffc5a1",
-        "#ff8c94", "#ffaaa6", "#ffd3b5", "#dcedc1", "#a8e6cf", "#a6d0e4", "#c1beff", "#f5b0cb", "#ffcfdf", "#fde4cf", "#f1e3d3"
-    ]
+    colors = ['#ff6b6b', '#f06595', '#cc5de8', '#845ef7', '#5c7cfa', '#339af0', '#22b8cf', '#20c997', '#51cf66', '#94d82d', '#fcc419', '#4ecdc4',
+              '#ffe66d', '#7bed9f', '#a9def9', '#f694c1', '#c7f0bd', '#ffc5a1', '#ff8c94', '#ffaaa6', '#ffd3b5', '#a8e6cf', '#a6d0e4', '#c1beff', '#f5b0cb']
 
     # Normalize the values in the DataFrame
-    df_norm = (df - df.min().min()) / (df.max().max() - df.min().min())
+    if normalise_within_column:
+        df_norm = (df - df.min()) / (df.max() - df.min())
+    else:
+        df_norm = (df - df.min().min()) / (df.max().max() - df.min().min())
 
     scene['layout'] = '3d'
 
