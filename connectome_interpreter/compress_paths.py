@@ -208,7 +208,7 @@ def add_first_n_matrices(matrices, n):
     return sum_matrix
 
 
-def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None, display_output = True):
+def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None, display_output=True):
     """
     Generates a summary of connections between different types of neurons, 
     represented by their input and output indexes. The function calculates 
@@ -229,7 +229,7 @@ def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None, display_ou
         pd.DataFrame: A dataframe representing the summed synaptic input from presynaptic neuron groups 
             to an average neuron in each postsynaptic neuron group. This dataframe is always returned, regardless of the
             value of display_output.
-    
+
     Displays:
         If display_output is True, the function will display a styled version of the resulting dataframe.
     """
@@ -267,7 +267,7 @@ def contribution_by_path_lengths(steps, inidx, outidx, outidx_map):
     Analyzes the contribution of presynaptic neurons to postsynaptic neuron groups across 
     different path lengths. This function calculates and visualizes the average input 
     received by a neuron in each postsynaptic neuron group from presynaptic ones, aggregated over specified 
-    path lengths.
+    path lengths. Direct connections are in path_length 1.
 
     Args:
         steps (list of scipy.sparse matrices): List of sparse matrices, each representing 
@@ -322,7 +322,7 @@ def contribution_by_path_lengths(steps, inidx, outidx, outidx_map):
     fig.update_layout(
         xaxis=dict(
             tickmode='linear',
-            tick0=0,
+            tick0=1,
             dtick=1
         )
     )
