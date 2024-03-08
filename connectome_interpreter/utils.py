@@ -239,7 +239,7 @@ def to_nparray(input_data):
     return cleaned_array
 
 
-def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=None, normalise_within_column=True):
+def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=None, normalise_within_column=True, include_postsynaptic_neuron=False):
     """
     Generates a Neuroglancer link with layers, corresponding to each column in the df. The function
     processes a dataframe, adding colour information to each neuron,
@@ -254,6 +254,7 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
         colour_saturation (float, optional): The saturation of the colours. Default to 0.4.
         scene (ngl.Scene, optional): A Neuroglancer scene object from nglscenes package. You can read a scene from clipboard like `scene = Scene.from_clipboard()`. 
         normalise_within_column (bool, optional): Whether to normalise the values within each column (the alternative is normalising by the min and max value in the entire dataframe). Default to True.
+        include_postsynaptic_neuron (bool, optional): Whether to include the postsynaptic neuron (column names of `df`) in the visualisation. Default to False.
 
     Returns:
         str: A URL to the generated Neuroglancer scene.
@@ -330,6 +331,9 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
             str(root_id): mcl.to_hex(cmap(colour_saturation + (1-colour_saturation)*value.values[0]))
             for root_id, value in df_group.iterrows()
         }
+        if include_postsynaptic_neuron:
+            layer['segments'].append(str(df_group.columns[0]))
+            layer['segmentColors'][str(df_group.columns[0])] = '#43A7FF'
 
         scene.add_layers(layer)
 
