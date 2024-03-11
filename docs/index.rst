@@ -10,6 +10,7 @@ Welcome to Connectome Interpreter's documentation!
    :maxdepth: 2
    :caption: Contents:
 
+   modules/activation_maximisation
    modules/compress_paths
    modules/path_finding 
    modules/utils

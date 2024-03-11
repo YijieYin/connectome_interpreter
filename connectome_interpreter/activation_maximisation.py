@@ -33,10 +33,6 @@ class MultilayeredNetwork(nn.Module):
         num_layers (int, optional): The number of temporal layers to unroll the network through. 
             Defaults to 2.
         threshold (float, optional): The threshold for activation of neurons. Defaults to 0.01.
-
-    Methods:
-        forward(inthroughtime): Implements the forward pass of the multilayered network 
-            using sensory input through time.
     """
 
     def __init__(self, all_weights, sensory_indices, num_layers=2, threshold=0.01, tanh_steepness=5):
@@ -79,6 +75,7 @@ class MultilayeredNetwork(nn.Module):
         the activations. The final activations are stored in the `activations` attribute
         of the model, with each entry corresponding to the activations for a specific layer.
         """
+
         self.activations = []  # Clear activations list at each forward pass
 
         # Ensure the activation of the sensory inputs is less than 1
@@ -163,12 +160,12 @@ def activation_maximisation(
 
     Returns:
         A tuple containing:
-        - The optimized `input_tensor` as a numpy array.
-        - The output of the model after optimization as a numpy array.
-        - A list of input activation losses over iterations.
-        = A list of output activation losses over iterations. 
-        - A list of regularization losses over iterations.
-        - A list of input tensor snapshots taken during optimization.
+        The optimized `input_tensor` as a numpy array.
+        The output of the model after optimization as a numpy array.
+        A list of input activation losses over iterations.
+        A list of output activation losses over iterations. 
+        A list of regularization losses over iterations.
+        A list of input tensor snapshots taken during optimization.
 
     Raises:
         ImportError: If `wandb` is True and wandb is not installed.
