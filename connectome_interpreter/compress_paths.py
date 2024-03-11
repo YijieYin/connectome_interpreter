@@ -5,6 +5,7 @@ import torch
 from tqdm import tqdm
 import pandas as pd
 import plotly.express as px
+from scipy.sparse import issparse
 
 from .utils import dynamic_representation, torch_sparse_where, to_nparray
 
@@ -216,8 +217,8 @@ def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None, display_ou
     postsynaptic neuron group.
 
     Args:
-        stepsn (scipy.sparse matrix): Sparse matrix representing the synaptic strengths 
-            between neurons.
+        stepsn (scipy.sparse matrix or numpy.ndarray): Matrix representing the synaptic strengths 
+            between neurons, can be dense or sparse.
         inidx (numpy.ndarray): Array of indices representing the input (presynaptic) neurons, used to subset stepsn. nan values are removed.
         outidx (numpy.ndarray): Array of indices representing the output (postsynaptic) neurons.
         inidx_map (dict): Mapping from indices to neuron groups for the input neurons.
@@ -240,7 +241,13 @@ def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None, display_ou
     inidx = to_nparray(inidx)
     outidx = to_nparray(outidx)
 
-    df = pd.DataFrame(data=stepsn[:, outidx][inidx, :].toarray(),
+    if issparse(stepsn):
+        matrix = stepsn[:, outidx][inidx, :].toarray()
+    else:
+        matrix = stepsn[inidx, :][:, outidx]
+
+    # Create the dataframe
+    df = pd.DataFrame(data=matrix,
                       # choose what to group by here
                       index=[inidx_map[key] for key in inidx],
                       columns=[outidx_map[key] for key in outidx])
