@@ -1,10 +1,12 @@
+import random
+
 import torch
 import pandas as pd
 import numpy as np
-from scipy.sparse import coo_matrix
-import random
+from scipy.sparse import coo_matrix, csr_matrix, issparse
 import matplotlib.colors as mcl
-import itertools
+import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 
 def dynamic_representation(tensor, density_threshold=0.2):
@@ -128,19 +130,19 @@ def coo_to_el(coo):
     return all_el
 
 
-def modify_coo_matrix(coo, input_idx=None, output_idx=None, value=None, updates_df=None, re_normalize=True):
+def modify_coo_matrix(sparse_matrix, input_idx=None, output_idx=None, value=None, updates_df=None, re_normalize=True):
     """
-    Modify the values of a COO sparse matrix at specified indices.
+    Modify the values of a sparse matrix (either COO or CSR format) at specified indices.
 
     There are two modes of operation:
-    1. Single update mode: where `input_idx`, `output_idx`, and `value` are provided as individual arguments. In this case all combinations of input_idx and output_idx are updated. 
+    1. Single update mode: where `input_idx`, `output_idx`, and `value` are provided as individual arguments. In this case all combinations of input_idx and output_idx are updated.
     2. Batch update mode: where `updates_df` is provided, a DataFrame with columns ['input_idx', 'output_idx', 'value'].
 
     Args:
-      coo (coo_matrix): The COO sparse matrix to modify.
+      sparse_matrix (coo_matrix or csr_matrix): The sparse matrix to modify.
       input_idx (int, list, numpy.ndarray, set, optional): Row indices for updates.
       output_idx (int, list, numpy.ndarray, set, optional): Column indices for updates.
-      value (numeric, list, numpy.ndarray, optional): New values for updates. If it is a number, then it is used for all updates. Else, it needs to be of length len(input_idx) * len(output_idx).
+      value (numeric, list, numpy.ndarray, optional): New values for updates. If it is a number, then it is used for all updates. Else, it needs to be of length equal to the product of the lengths of input_idx and output_idx.
       updates_df (DataFrame, optional): The DataFrame containing batch updates.
       re_normalize (bool, optional): Whether to re-normalize the matrix after updating, such that all values in each column sum up to 1. Default to True.
 
@@ -150,93 +152,82 @@ def modify_coo_matrix(coo, input_idx=None, output_idx=None, value=None, updates_
       If both modes are provided, the function will prioritize the single update mode.
 
     Returns:
-      coo_matrix: The updated COO sparse matrix.
+      coo_matrix or csr_matrix: The updated sparse matrix, in the same format as the input.
     """
+    if not issparse(sparse_matrix):
+        raise TypeError("The provided matrix is not a sparse matrix.")
+
+    # Ensure we're working with CSR for efficiency, remember original format
+    original_format = sparse_matrix.getformat()
+    csr = sparse_matrix.tocsr() if original_format == 'coo' else sparse_matrix
+
     updated_cols = set()  # Track columns that are updated or added
+    print("Updating matrix...")
     if input_idx is not None and output_idx is not None and value is not None:
-        # Convert sets to numpy arrays and ensure all inputs are numpy arrays
-        if isinstance(input_idx, set):
-            input_idx = np.array(list(input_idx))
+        # Convert inputs to arrays and ensure compatibility
+        input_idx = to_nparray(input_idx)
+        output_idx = to_nparray(output_idx)
+        if np.isscalar(value) or (isinstance(value, np.ndarray) and value.size == 1):
+            value = np.full(len(input_idx) * len(output_idx), value)
+        elif len(value) == len(input_idx) * len(output_idx):
+            value = np.atleast_1d(value)
         else:
-            input_idx = np.atleast_1d(input_idx)
-        if isinstance(output_idx, set):
-            output_idx = np.array(list(output_idx))
-        else:
-            output_idx = np.atleast_1d(output_idx)
+            raise ValueError(
+                "The length of 'value' is incorrect. It should either be a single value or match the length of 'input_idx' * 'output_idx'.")
 
-        value = np.atleast_1d(value)
-
-        # Ensure 'value' can be a single value or an array
-        value = np.full(len(input_idx) * len(output_idx),
-                        value[0]) if len(value) == 1 else value
-
-        # Adjust index to reflect combination of input_idx and output_idx
-        combination_index = 0
-
-        for i, j in itertools.product(input_idx, output_idx):
-            val = value[combination_index]
-            idx = np.where((coo.row == i) & (coo.col == j))[0]
-            if idx.size > 0:
-                coo.data[idx] = val
-            elif val != 0:  # Add new value if it doesn't exist
-                coo.row = np.append(coo.row, i)
-                coo.col = np.append(coo.col, j)
-                coo.data = np.append(coo.data, val)
-            updated_cols.add(j)
-            combination_index += 1  # Move to the next value for the next combination
+        for (i, j, val) in tqdm(zip(np.repeat(input_idx, len(output_idx)),
+                                    np.tile(output_idx, len(input_idx)),
+                                    value)):
+            # Update the matrix, note the changes in indexing for csr
+            if csr[i, j] != 0:
+                csr[i, j] = val  # Efficient for CSR format
+                updated_cols.add(j)
 
     elif updates_df is not None:
-        for _, row in updates_df.iterrows():
+        # Batch updates from a DataFrame
+        for _, row in tqdm(updates_df.iterrows()):
             i, j, val = row['input_idx'], row['output_idx'], row['value']
-            idx = np.where((coo.row == i) & (coo.col == j))[0]
-            if idx.size > 0:
-                coo.data[idx] = val
-            elif val != 0:
-                coo.row = np.append(coo.row, i)
-                coo.col = np.append(coo.col, j)
-                coo.data = np.append(coo.data, val)
-            updated_cols.add(j)
-
-    # Remove zero entries by reconstructing the matrix
-    nonzero_indices = coo.data != 0
-    coo = coo_matrix((coo.data[nonzero_indices], (coo.row[nonzero_indices],
-                     coo.col[nonzero_indices])), shape=coo.shape)
+            if csr[i, j] != 0:
+                csr[i, j] = val  # Efficient for CSR format
+                updated_cols.add(j)
 
     if re_normalize and updated_cols:
-        csr = coo.tocsr()  # Convert for efficient column operations
+        print("Re-normalizing updated columns...")
+        # Normalize updated columns
         for col in updated_cols:
-            col_sum = np.sum(csr[:, col])
+            col_sum = csr[:, col].sum()
             if col_sum != 0:
                 csr[:, col] /= col_sum
-        coo = csr.tocoo()  # Convert back to COO
-
-    return coo
+    # remove 0 entries
+    csr.eliminate_zeros()
+    return csr.asformat(original_format)
 
 
 def to_nparray(input_data):
     """
-    Converts the input data into a numpy array, filtering out any NaN values. 
-    The input can be a single number, a list, a set, or a numpy array.
+    Converts the input data into a numpy array, filtering out any NaN values and duplicates. 
+    The input can be a single number, a list, a set, a numpy array, or a pandas Series.
 
     Args:
-        input_data: The input data to convert. Can be of type int, float, list, set, or numpy.ndarray.
+        input_data: The input data to convert. Can be of type int, float, list, set, numpy.ndarray, or pandas.Series.
 
     Returns:
-        numpy.ndarray: A numpy array created from the input data, with all NaN values removed.
+        numpy.ndarray: A unique numpy array created from the input data, with all NaN values removed.
     """
-    # First, ensure the input is in array form
+    # First, ensure the input is in array form and convert pd.Series to np.ndarray
     if isinstance(input_data, (int, float)):
         input_array = np.array([input_data])
-    elif isinstance(input_data, (list, set, np.ndarray)):
+    elif isinstance(input_data, (list, set, np.ndarray, pd.Series)):
         input_array = np.array(list(input_data))
     else:
         raise TypeError(
-            "Input data must be an int, float, list, set, or numpy.ndarray")
+            "Input data must be an int, float, list, set, numpy.ndarray, or pandas.Series")
 
     # Then, remove NaN values
     cleaned_array = input_array[~pd.isna(input_array)]
 
-    return cleaned_array
+    # Finally, return unique values
+    return np.unique(cleaned_array)
 
 
 def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=None, normalise_within_column=True, include_postsynaptic_neuron=False):
@@ -338,3 +329,80 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
         scene.add_layers(layer)
 
     return scene.url
+
+
+def top_n_activated(array, idx_map, model, sensory, n=None, threshold=None):
+    """
+    Identifies the top activated neurons for each column in the array, 
+    either by number (top n) or by a minimum activation threshold, or both.
+
+    Args:
+        array (np.ndarray): 2D array of neuron activations, where rows represent neurons 
+            and columns represent different conditions or time steps.
+        idx_map (dict): Mapping from neuron index to neuron identifier.
+        model: Model object containing `sensory_indices` and `non_sensory_indices` attributes.
+        sensory (bool): If True, considers only sensory neurons; otherwise, considers non-sensory neurons.
+        n (int, optional): Number of top activations to return for each column. If None, 
+            all activations above the threshold are returned. Defaults to None.
+        threshold (float, optional): Minimum activation level to consider. If None, 
+            the top n activations are returned regardless of their magnitude. Defaults to None.
+
+    Returns:
+        dict: A dictionary where each key is a column index and each value is a nested dictionary 
+            of neuron identifiers and their activations, for those activations that are either 
+            in the top n, above the threshold, or both.
+
+    Note:
+        If both `n` and `threshold` are provided, the function returns up to top n activations 
+        that are also above the threshold for each column.
+    """
+    result = {}
+    sensory_indices = model.sensory_indices.cpu().numpy()
+    non_sensory_indices = model.non_sensory_indices.cpu().numpy()
+
+    for col in range(array.shape[1]):
+        # Determine which indices to use based on the 'sensory' flag
+        indices = sensory_indices if sensory else non_sensory_indices
+        column_values = array[:, col]
+
+        # Filter activations by threshold if provided
+        if threshold is not None:
+            filtered_indices = np.where(column_values >= threshold)[0]
+            column_values = column_values[filtered_indices]
+            selected_indices = indices[filtered_indices]
+        else:
+            selected_indices = indices
+
+        # Sort the filtered activations
+        sorted_indices = np.argsort(
+            column_values)[-n:] if n is not None else np.argsort(column_values)
+        top_indices = selected_indices[sorted_indices]
+
+        # Build the result dictionary
+        result[col] = {idx_map[idx]: column_values[np.where(selected_indices == idx)[0][0]]
+                       for idx in top_indices}
+
+    return result
+
+
+def plot_column_changes(input_snapshots, column_index=0):
+    """
+    Plot the changes in a specific column of input_tensor across training iterations.
+
+    Args:
+        input_snapshots: List of 2D tensor snapshots collected during training.
+        column_index: Index of the column to plot.
+    """
+    # Assuming input_snapshots is a list of 2D arrays, extract the specific column across snapshots
+    column_values = np.array([snapshot[:, column_index]
+                             for snapshot in input_snapshots])
+
+    # Plotting
+    plt.figure(figsize=(10, 6))
+    # Use 'imshow' for a 2D heatmap-like visualization
+    plt.imshow(column_values.T, aspect='auto', cmap='viridis', origin='lower')
+    plt.colorbar(label='Value')
+    plt.xlabel('Snapshot Index')
+    plt.ylabel(f'Elements in Column {column_index}')
+    plt.title(f'Changes in Column {column_index} During Training')
+    plt.show()
