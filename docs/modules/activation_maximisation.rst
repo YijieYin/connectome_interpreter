@@ -1,5 +1,5 @@
-Compress paths
-=====================
+Activation maximisation
+=======================
 
 .. automodule:: connectome_interpreter.activation_maximisation
    :members:
