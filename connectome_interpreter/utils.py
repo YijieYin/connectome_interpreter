@@ -338,7 +338,7 @@ def top_n_activated(array, idx_map, model, sensory, n=None, threshold=None):
 
     Args:
         array (np.ndarray): 2D array of neuron activations, where rows represent neurons 
-            and columns represent different conditions or time steps.
+            and columns represent different time steps.
         idx_map (dict): Mapping from neuron index to neuron identifier.
         model: Model object containing `sensory_indices` and `non_sensory_indices` attributes.
         sensory (bool): If True, considers only sensory neurons; otherwise, considers non-sensory neurons.
@@ -360,27 +360,37 @@ def top_n_activated(array, idx_map, model, sensory, n=None, threshold=None):
     sensory_indices = model.sensory_indices.cpu().numpy()
     non_sensory_indices = model.non_sensory_indices.cpu().numpy()
 
+    indices = sensory_indices if sensory else non_sensory_indices
+    global_to_local_map = {global_idx: num for num,
+                           global_idx in enumerate(indices)}
+
     for col in range(array.shape[1]):
         # Determine which indices to use based on the 'sensory' flag
-        indices = sensory_indices if sensory else non_sensory_indices
+        # these are global indices in the all-to-all connectivity
+
         column_values = array[:, col]
 
         # Filter activations by threshold if provided
         if threshold is not None:
+            # these are local indices
             filtered_indices = np.where(column_values >= threshold)[0]
-            column_values = column_values[filtered_indices]
-            selected_indices = indices[filtered_indices]
+            # these are global indices
+            threshold_indices = indices[filtered_indices]
         else:
-            selected_indices = indices
+            threshold_indices = indices
 
         # Sort the filtered activations
+        # these are the local indices corresponding to only sensory/non-sensory neurons, but not both
         sorted_indices = np.argsort(
             column_values)[-n:] if n is not None else np.argsort(column_values)
-        top_indices = selected_indices[sorted_indices]
+        # these are global indices
+        topn_indices = indices[sorted_indices]
+
+        selected = np.intersect1d(threshold_indices, topn_indices)
 
         # Build the result dictionary
-        result[col] = {idx_map[idx]: column_values[np.where(selected_indices == idx)[0][0]]
-                       for idx in top_indices}
+        result[col] = {idx_map[idx]: column_values[global_to_local_map[idx]]
+                       for idx in selected}
 
     return result
 
