@@ -205,6 +205,10 @@ def activation_maximisation(
     if use_tqdm:
         iteration_range = tqdm(iteration_range)
 
+    # map between all indices and non_sensory_only indices
+    # model.non_sensory_indices has indices for the all-to-all matrix
+    all_to_nonsensory_map = {global_idx: num for num,
+                             global_idx in enumerate(model.non_sensory_indices.cpu().detach().numpy())}
     losses = []
     for iteration in iteration_range:
         optimizer.zero_grad()
@@ -224,14 +228,17 @@ def activation_maximisation(
         # Check if the model has an 'activations' attribute and the selected_neurons_per_layer is not empty
         if hasattr(model, 'activations') and selected_neurons_per_layer:
             for layer_index, neuron_indices in selected_neurons_per_layer.items():
+                # first transform the neuron_indices to indices of non_sensory neurons only
+                non_sensory_only_indices = [
+                    all_to_nonsensory_map[idx] for idx in neuron_indices]
                 # Ensure layer index is valid
-                if layer_index < len(model.activations):
+                if layer_index < model.activations.shape[1]:
                     # Get activations for this layer
                     layer_activations = model.activations[:, layer_index]
                     # Negative sign because we want to maximize activation
                     # Only select activations from specified neurons
                     activation_loss -= torch.mean(
-                        layer_activations[neuron_indices])
+                        layer_activations[non_sensory_only_indices])
         # in the end, activation loss is the sum of mean activation across layers.
 
         out_regularisation_loss = out_regularisation_lambda * torch.mean(
