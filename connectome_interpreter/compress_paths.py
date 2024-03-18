@@ -209,7 +209,7 @@ def add_first_n_matrices(matrices, n):
     return sum_matrix
 
 
-def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None, display_output=True):
+def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None, display_output=True, sort_by_column=None):
     """
     Generates a summary of connections between different types of neurons, 
     represented by their input and output indexes. The function calculates 
@@ -225,6 +225,7 @@ def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None, display_ou
         outidx_map (dict, optional): Mapping from indices to neuron groups for the output neurons.
             Defaults to None, in which case it is set to be the same as inidx_map.
         display_output (bool, optional): Whether to display the output in a coloured dataframe. Defaults to True.
+        sort_by_column (str or list, optional): the column name(s) to sort the result by. If none is provided, then sort by the first column. 
 
     Returns:
         pd.DataFrame: A dataframe representing the summed synaptic input from presynaptic neuron groups 
@@ -260,8 +261,22 @@ def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None, display_ou
     # averaging across columns of the same type:
     # on average, a neuron of that type receives x% input from a presynaptic type
     result_df = summed_df.T.groupby(level=0).mean().T
-    # sort result_df by the values in the first column, in descending order
-    result_df = result_df.sort_values(by=result_df.columns[0], ascending=False)
+
+    if sort_by_column is None:
+        # sort result_df by the values in the first column, in descending order
+        result_df = result_df.sort_values(
+            by=result_df.columns[0], ascending=False)
+    elif isinstance(sort_by_column, str):
+        sort_by_column = [sort_by_column]
+
+    if sort_by_column is not None:
+        if set(sort_by_column).issubset(result_df.columns):
+            result_df = result_df.sort_values(
+                by=sort_by_column, ascending=False)
+        else:
+            raise ValueError(
+                "sort_by_column must be present in the values of outidx_map.")
+
     if display_output:
         result_dp = result_df.style.background_gradient(cmap='Blues', vmin=result_df.min().min(),
                                                         vmax=result_df.max().max())
