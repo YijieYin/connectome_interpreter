@@ -320,13 +320,14 @@ def contribution_by_path_lengths(steps, inidx, outidx, outidx_map):
                           columns=[outidx_map[key] for key in outidx])
 
         # Sum across rows: presynaptic neuron is in the rows
-        # summing across neurons of the same type: total amount of input from that type for the postsynaptic neuron
+        # summing across neurons of the same type: total amount of input for the postsynaptic neuron
         # this gives a dataframe of one column, where each row is a value from outidx_map
+        # there is some secret transposing after summing
         summed_df = df.sum().to_frame()
 
         # Average across columns and transpose back
         # averaging across columns of the same type:
-        # on average, a neuron of that type receives x% input from a presynaptic type
+        # on average, a neuron of that type receives x% input from the inidx
         result_df = summed_df.groupby(level=0).mean().T
         rows.append(result_df)
 
@@ -338,6 +339,7 @@ def contribution_by_path_lengths(steps, inidx, outidx, outidx_map):
     contri = pd.concat(rows, ignore_index=True).melt(
         ignore_index=False).reset_index()
     contri.columns = ['path_length', 'postsynaptic_type', 'value']
+    contri.path_length = contri.path_length+1
 
     fig = px.line(contri, x="path_length", y="value",
                   color='postsynaptic_type')
