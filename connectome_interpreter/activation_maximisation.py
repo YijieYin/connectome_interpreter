@@ -87,6 +87,7 @@ class MultilayeredNetwork(nn.Module):
 
         # Use broadcasting to create a meshgrid for indexing
         # The unsqueeze methods are used to align dimensions for broadcasting
+        # .unsqueeze() puts the non_sensory_indices into a column
         row_indices = self.non_sensory_indices.unsqueeze(
             1).expand(-1, len(self.sensory_indices))
         col_indices = self.sensory_indices.unsqueeze(

@@ -40,7 +40,7 @@ def find_path_once(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, to
         # so when target_layer_number == 2, we should use steps_cpu[0] (direct connectivity), that is, target_layer_number-2:
         # subtract 1 for getting top_n_row_indices below which is going one step upstream; and another for 0-based indexing in steps_cpu.
         # the next line gets the targets that receive non-zero compressed input from inidx
-        #  when target_layer_number >= 2.
+        # when target_layer_number >= 2.
         # .nonzero() returns row, column of the nonzero values.
         colidx = steps_cpu[target_layer_number-2][inidx, :].nonzero()[1]
 

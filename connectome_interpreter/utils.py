@@ -331,36 +331,37 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
     return scene.url
 
 
-def top_n_activated(array, idx_map, model, sensory, n=None, threshold=None):
+def top_n_activated(array, global_indices, idx_map, n=None, threshold=None):
     """
-    Identifies the top activated neurons for each column in the array, 
+    Identifies the top activated neurons for each column in the array,
     either by number (top n) or by a minimum activation threshold, or both.
 
     Args:
-        array (np.ndarray): 2D array of neuron activations, where rows represent neurons 
+        array (np.ndarray): 2D array of neuron activations, where rows represent neurons
             and columns represent different time steps.
-        idx_map (dict): Mapping from neuron index to neuron identifier.
-        model: Model object containing `sensory_indices` and `non_sensory_indices` attributes.
-        sensory (bool): If True, considers only sensory neurons; otherwise, considers non-sensory neurons.
-        n (int, optional): Number of top activations to return for each column. If None, 
+        global_indices (int, list, set, np.ndarray, pd.Series): Array of global neuron indices corresponding to the rows of the array.
+        idx_map (dict): Mapping from neuron index (`global_indices`) to neuron identifier.
+        n (int, optional): Number of top activations to return for each column. If None,
             all activations above the threshold are returned. Defaults to None.
-        threshold (float, optional): Minimum activation level to consider. If None, 
+        threshold (float, optional): Minimum activation level to consider. If None,
             the top n activations are returned regardless of their magnitude. Defaults to None.
 
     Returns:
-        dict: A dictionary where each key is a column index and each value is a nested dictionary 
-            of neuron identifiers and their activations, for those activations that are either 
+        dict: A dictionary where each key is a column index and each value is a nested dictionary
+            of neuron identifiers and their activations, for those activations that are either
             in the top n, above the threshold, or both.
 
     Note:
-        If both `n` and `threshold` are provided, the function returns up to top n activations 
+        The global_indices have to be in the same order as the indices in defining the original model. 
+        If both `n` and `threshold` are provided, the function returns up to top n activations
         that are also above the threshold for each column.
     """
     result = {}
-    sensory_indices = model.sensory_indices.cpu().numpy()
-    non_sensory_indices = model.non_sensory_indices.cpu().numpy()
+    indices = to_nparray(global_indices)
+    if array.shape[0] != len(indices):
+        raise ValueError(
+            "The length of 'global_indices' should match the number of rows in 'array'.")
 
-    indices = sensory_indices if sensory else non_sensory_indices
     global_to_local_map = {global_idx: num for num,
                            global_idx in enumerate(indices)}
 
@@ -393,26 +394,3 @@ def top_n_activated(array, idx_map, model, sensory, n=None, threshold=None):
                        for idx in selected}
 
     return result
-
-
-def plot_column_changes(input_snapshots, column_index=0):
-    """
-    Plot the changes in a specific column of input_tensor across training iterations.
-
-    Args:
-        input_snapshots: List of 2D tensor snapshots collected during training.
-        column_index: Index of the column to plot.
-    """
-    # Assuming input_snapshots is a list of 2D arrays, extract the specific column across snapshots
-    column_values = np.array([snapshot[:, column_index]
-                             for snapshot in input_snapshots])
-
-    # Plotting
-    plt.figure(figsize=(10, 6))
-    # Use 'imshow' for a 2D heatmap-like visualization
-    plt.imshow(column_values.T, aspect='auto', cmap='viridis', origin='lower')
-    plt.colorbar(label='Value')
-    plt.xlabel('Snapshot Index')
-    plt.ylabel(f'Elements in Column {column_index}')
-    plt.title(f'Changes in Column {column_index} During Training')
-    plt.show()
