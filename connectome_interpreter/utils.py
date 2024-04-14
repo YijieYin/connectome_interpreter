@@ -7,6 +7,7 @@ from scipy.sparse import coo_matrix, csr_matrix, issparse
 import matplotlib.colors as mcl
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+import networkx as nx
 
 
 def dynamic_representation(tensor, density_threshold=0.2):
@@ -82,15 +83,15 @@ def coo_tensor_to_el(coo_tensor):
     Convert a PyTorch sparse COO tensor to a DataFrame representing an edge list.
 
     This function checks if the input tensor is sparse. If not, it converts it to a sparse COO tensor.
-    It then extracts the indices and values, and creates a DataFrame with columns 'row_idx', 'col_idx', and 'value'.
-    Each row in the DataFrame represents an edge in the graph, where 'row_idx' and 'col_idx' are the nodes connected by the edge,
-    and 'value' is the weight of the edge.
+    It then extracts the indices and values, and creates a DataFrame with columns 'pre', 'post', and 'weight'.
+    Each row in the DataFrame represents an edge in the graph, where 'pre' and 'post' are the nodes connected by the edge,
+    and 'weight' is the weight of the edge.
 
     Args:
       coo_tensor (torch.Tensor): A PyTorch tensor, either already in sparse COO format or dense.
 
     Returns:
-      pd.DataFrame: A DataFrame with columns 'row_idx', 'col_idx', and 'value', representing the edge list of the graph.
+      pd.DataFrame: A DataFrame with columns 'pre', 'post', and 'weight', representing the edge list of the graph.
     """
 
     if not coo_tensor.is_sparse:
@@ -101,33 +102,71 @@ def coo_tensor_to_el(coo_tensor):
     values = coo_tensor.values().cpu().numpy()
 
     # Split the indices to row and column
-    row_idx, col_idx = indices[:, 0], indices[:, 1]
+    pre, post = indices[:, 0], indices[:, 1]
 
     edge_list_df = pd.DataFrame(
-        {'row_idx': row_idx, 'col_idx': col_idx, 'value': values})
+        {'pre': pre, 'post': post, 'weight': values})
     return edge_list_df
 
 
-def coo_to_el(coo):
+def coo_to_el(coo, row_indices=None, col_indices=None):
     """
-    Convert a SciPy sparse COO matrix to a DataFrame representing an edge list.
-
-    Extracts the row indices, column indices, and data from a COO matrix to create a DataFrame.
-    Each row in the DataFrame represents an edge in the graph, where 'row_idx' and 'col_idx' are the nodes connected by the edge,
+    Extracts an edgelist from a COO matrix, optionally using pre-specified row and/or column indices.
+    If row_indices or col_indices are None, all rows or columns are considered, respectively.
+    Each row in the resulting DataFrame represents an edge in the graph, where 'pre' and 'post' are the nodes connected by the edge,
     and 'value' is the weight of the edge.
 
     Args:
-      coo (scipy.sparse.coo_matrix): A COO matrix from SciPy representing a sparse matrix.
+      coo: A scipy.sparse.coo_matrix instance.
+      row_indices: Optional; A list or array of row indices of interest.
+      col_indices: Optional; A list or array of column indices of interest.
 
     Returns:
-      pd.DataFrame: A DataFrame with columns 'row_idx', 'col_idx', and 'value', representing the edge list of the graph.
+      pd.DataFrame: A DataFrame with columns 'pre', 'post', and 'value', representing the edge list of the graph.
     """
-    row = coo.row
-    col = coo.col
-    data = coo.data
-    all_el = pd.DataFrame({'row_idx': row, 'col_idx': col, 'value': data})
+    # Determine whether to filter on rows/columns based on provided indices
+    row_mask = np.full(coo.shape[0], True) if row_indices is None else np.isin(
+        coo.row, row_indices)
+    col_mask = np.full(coo.shape[1], True) if col_indices is None else np.isin(
+        coo.col, col_indices)
+
+    # Combine row and column masks
+    mask = row_mask & col_mask
+
+    # Filter rows, cols, and data based on the combined mask
+    rows = coo.row[mask]
+    cols = coo.col[mask]
+    data = coo.data[mask]
+
+    all_el = pd.DataFrame({'pre': rows, 'post': cols, 'value': data})
 
     return all_el
+
+
+def adjacency_df_to_el(adjacency, threshold=None):
+    """
+    Convert a DataFrame representing an adjacency matrix to an edge list.
+
+    This function takes a DataFrame where the index and columns represent nodes in the graph,
+    and the values represent the weights of the edges between them. It converts this DataFrame to an edge list,
+    where each row represents an edge in the graph, with columns 'pre', 'post', and 'weight'.
+
+    Args:
+      adjacency (pd.DataFrame): A DataFrame representing an adjacency matrix.
+      threshold (float, optional): If provided, edges with values below this threshold are removed. Default to None.
+
+    Returns:
+      pd.DataFrame: A DataFrame with columns 'pre', 'post', and 'weight', representing the edge list of the graph.
+    """
+    if threshold is not None:
+        adjacency = adjacency.where(adjacency >= threshold, 0)
+
+    # Stack the DataFrame to create a long format
+    adjacency = adjacency.stack().reset_index()
+    adjacency.columns = ['pre', 'post', 'weight']
+    adjacency = adjacency[adjacency['weight'] != 0]
+
+    return adjacency
 
 
 def modify_coo_matrix(sparse_matrix, input_idx=None, output_idx=None, value=None, updates_df=None, re_normalize=True):
@@ -331,7 +370,7 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
     return scene.url
 
 
-def top_n_activated(array, global_indices, idx_map, n=None, threshold=None):
+def get_activations(array, global_indices, idx_map=None, top_n=None, threshold=None):
     """
     Identifies the top activated neurons for each column in the array,
     either by number (top n) or by a minimum activation threshold, or both.
@@ -340,11 +379,10 @@ def top_n_activated(array, global_indices, idx_map, n=None, threshold=None):
         array (np.ndarray): 2D array of neuron activations, where rows represent neurons
             and columns represent different time steps.
         global_indices (int, list, set, np.ndarray, pd.Series): Array of global neuron indices corresponding to the rows of the array.
-        idx_map (dict): Mapping from neuron index (`global_indices`) to neuron identifier.
-        n (int, optional): Number of top activations to return for each column. If None,
+        idx_map (dict, optional): Mapping from neuron index (`global_indices`) to neuron identifier. If not None, and if multiple neurons map to the same identifier, the activations are averaged. Defaults to None.
+        top_n (int, optional): Number of top activations to return for each column. If None,
             all activations above the threshold are returned. Defaults to None.
-        threshold (float, optional): Minimum activation level to consider. If None,
-            the top n activations are returned regardless of their magnitude. Defaults to None.
+        threshold (float, dict, optional): Minimum activation level to consider. If a dictionary is provided, the threshold for each column is specified by the column index. Defaults to None.
 
     Returns:
         dict: A dictionary where each key is a column index and each value is a nested dictionary
@@ -373,24 +411,154 @@ def top_n_activated(array, global_indices, idx_map, n=None, threshold=None):
 
         # Filter activations by threshold if provided
         if threshold is not None:
-            # these are local indices
-            filtered_indices = np.where(column_values >= threshold)[0]
-            # these are global indices
-            threshold_indices = indices[filtered_indices]
+            if isinstance(threshold, dict):
+                if col not in threshold:
+                    thresh = 0
+                else:
+                    thresh = threshold[col]
+            else:
+                thresh = threshold
+
+            if thresh > 0:
+                # these are local indices
+                filtered_indices = np.where(column_values >= thresh)[0]
+                # these are global indices
+                threshold_indices = indices[filtered_indices]
+            else:
+                threshold_indices = indices
         else:
             threshold_indices = indices
 
         # Sort the filtered activations
         # these are the local indices corresponding to only sensory/non-sensory neurons, but not both
         sorted_indices = np.argsort(
-            column_values)[-n:] if n is not None else np.argsort(column_values)
+            column_values)[-top_n:] if top_n is not None else np.argsort(column_values)
         # these are global indices
         topn_indices = indices[sorted_indices]
 
         selected = np.intersect1d(threshold_indices, topn_indices)
 
         # Build the result dictionary
-        result[col] = {idx_map[idx]: column_values[global_to_local_map[idx]]
-                       for idx in selected}
+        if idx_map is None:
+            result[col] = {idx: column_values[global_to_local_map[idx]]
+                           for idx in selected}
+        else:
+            # initialise a zero dict
+            result[col] = {idx_map[idx]: [] for idx in selected}
+            # calculate the average
+            for idx in selected:
+                result[col][idx_map[idx]].append(
+                    column_values[global_to_local_map[idx]])
+            new_indices = result[col].keys()
+            result[col] = {idx: np.mean(result[col][idx])
+                           for idx in new_indices}
 
     return result
+
+
+def plot_layered_paths(path_df, figsize=(10, 8), priority_indices=None, sort_by_activation=False, fraction=0.03, pad=0.02):
+    """
+    Plots a directed graph of layered paths with optional node coloring based on activation values.
+
+    This function creates a visualization of a directed graph with nodes placed in layers. Nodes can be optionally
+    colored based on 'pre_activation' and 'post_activation' columns present in the dataframe. If these columns are
+    missing, a default color is used for all nodes. The edges are weighted, and their labels represent the weight values.
+
+    Args:
+        path_df (pandas.DataFrame): A dataframe containing the columns 'pre', 'post', 'layer', 'weight', and optionally 
+                                    'pre_activation', 'post_activation', 'pre_layer', 'post_layer'. Each row represents an
+                                    edge in the graph. The 'pre' and 'post' columns refer to the source and target nodes, respectively.
+                                    The 'layer' column is used to place nodes in layers, and 'weight' indicates the edge weight.
+                                    If present, 'pre_activation' and 'post_activation' are used to color the nodes based on
+                                    their activation values.
+        figsize (tuple, optional): A tuple indicating the size of the matplotlib figure. Defaults to (10, 8).
+        priority_indices (list, optional): A list of indices to prioritize when creating the layered positions. Nodes with these
+                                    indices will be placed at the top of their respective layers. Defaults to None. 
+        sort_by_activation (bool, optional): A flag to sort the nodes based on their activation values (after grouping by priority). Defaults to False.
+        fraction (float, optional): The fraction of the figure width to use for the colorbar. Defaults to 0.03.
+        pad (float, optional): The padding between the colorbar and the plot. Defaults to 0.02.
+
+    Returns:
+        None: This function does not return a value. It generates a plot using matplotlib.
+
+    Note:
+        - If 'pre_layer' and 'post_layer' columns are not in the dataframe, they will be created within the function
+        to uniquely identify the nodes based on their 'pre'/'post' values and 'layer'.
+        - The function automatically checks for the presence of 'pre_activation' and 'post_activation' columns to
+        determine whether to color the nodes based on activation values.
+        - The positions of the nodes are determined by a custom positioning function (`connectome_interpreter.path_finding.create_layered_positions`).
+        - This function requires the networkx library for graph operations and matplotlib for plotting.
+    """
+    if path_df.shape[0] == 0:
+        raise ValueError("The provided DataFrame is empty.")
+
+    # Create a 'post_layer' column to use as unique identifiers
+    if 'post_layer' not in path_df.columns:
+        path_df['post_layer'] = path_df['post'].astype(
+            str) + '_' + path_df['layer'].astype(str)
+    if 'pre_layer' not in path_df.columns:
+        path_df['pre_layer'] = path_df['pre'].astype(
+            str) + '_' + (path_df.layer-1).astype(str)
+
+    # Create the graph using the new 'post_layer' identifiers
+    G = nx.from_pandas_edgelist(path_df, 'pre_layer', 'post_layer', [
+                                'weight'], create_using=nx.DiGraph())
+
+    # Labels for nodes
+    labels = dict(zip(path_df.post_layer, path_df.post))
+    labels.update(dict(zip(path_df.pre_layer, path_df.pre)))
+
+    # Determine the width of the edges
+    weights = [G[u][v]['weight'] for u, v in G.edges()]
+    widths = [max(0.1, w * 5) for w in weights]  # Scale weights for visibility
+
+    # Generate positions
+    if sort_by_activation:
+        node_activation_dict = dict(
+            zip(path_df.post_layer, path_df.post_activation))
+        node_activation_dict.update(
+            dict(zip(path_df.pre_layer, path_df.pre_activation)))
+        positions = create_layered_positions(
+            path_df, priority_indices, sort_dict=node_activation_dict)
+    else:
+        positions = create_layered_positions(path_df, priority_indices)
+
+    # Node colors based on activation values
+    if ('pre_activation' in path_df.columns) & ('post_activation' in path_df.columns):
+        activations = np.concatenate(
+            [path_df['pre_activation'].values, path_df['post_activation'].values])
+        norm = plt.Normalize(vmin=activations.min(), vmax=activations.max())
+        color_map = plt.get_cmap('viridis')
+        # Update graph with activation data
+        nx.set_node_attributes(
+            G, dict(zip(path_df.pre_layer, path_df.pre_activation)), 'activation')
+        nx.set_node_attributes(
+            G, dict(zip(path_df.post_layer, path_df.post_activation)), 'activation')
+
+        node_colors = [color_map(norm(G.nodes[node]['activation']))
+                       for node in G.nodes()]
+
+    # Plot the graph
+    fig, ax = plt.subplots(figsize=figsize)
+    if ('pre_activation' in path_df.columns) & ('post_activation' in path_df.columns):
+        nx.draw(G, pos=positions,
+                labels=labels,
+                with_labels=True, node_size=100,
+                node_color=node_colors,
+                arrows=True, arrowstyle='-|>', arrowsize=10,
+                font_size=8, width=widths, edge_color='lightgrey', ax=ax)
+        plt.colorbar(plt.cm.ScalarMappable(
+            norm=norm, cmap=color_map), ax=ax, label='Activation', fraction=fraction, pad=pad)
+    else:
+        nx.draw(G, pos=positions,
+                labels=labels,
+                with_labels=True, node_size=100,
+                node_color='lightblue', arrows=True, arrowstyle='-|>', arrowsize=10, font_size=8, width=widths, ax=ax)
+
+    edge_labels = {(u, v): f'{data["weight"]:.2f}' for u,
+                   v, data in G.edges(data=True)}
+    nx.draw_networkx_edge_labels(G, pos=positions, edge_labels=edge_labels,
+                                 #  font_color='red'
+                                 ax=ax)
+    ax.set_ylim(0, 1)
+    plt.show()
