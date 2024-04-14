@@ -3,8 +3,13 @@ from typing import Callable, Dict, List, Tuple
 import torch
 import torch.nn as nn
 import numpy as np
+import pandas as pd
+from scipy.sparse import issparse
 
 from tqdm import tqdm
+
+from .compress_paths import result_summary
+from .utils import adjacency_df_to_el, get_activations
 
 
 class MultilayeredNetwork(nn.Module):
@@ -250,7 +255,7 @@ def activation_maximisation(
         loss = activation_loss + in_regularisation_loss + out_regularisation_loss
         losses.append(loss.item())
 
-        if early_stopping and iteration > n_runs:
+        if early_stopping and (iteration > n_runs):
             # when the difference between the max and the min < stopping_threshold
             if np.max(losses[-n_runs:]) - np.min(losses[-n_runs:]) < stopping_threshold:
                 break
@@ -283,3 +288,74 @@ def activation_maximisation(
     return (input_tensor.cpu().detach().numpy(),
             output_after.cpu().detach().numpy(),
             act_loss, out_reg_loss, in_reg_loss, input_snapshots)
+
+
+def activations_to_df(inprop, opt_in, out, sensory_indices, inidx_mapping=None, outidx_mapping=None, activation_threshold=0, connectivity_threshold=0):
+    """
+    Generates a dataframe representing the paths in a layered plot, filtering by activation and connectivity thresholds.
+
+    This function takes the direct connectivity matrix (inprop), optimal input, output data, indices for sensory neurons, and mapping between input and output indices to groups. It generates a dataframe that represents the paths through the network layers.
+
+    Args:
+        inprop (scipy.sparse matrix or numpy.ndarray): Matrix representing the synaptic strengths 
+            between neurons, can be dense or sparse. Presynaptic is in the rows, postsynaptic in the columns.
+        opt_in (numpy.ndarray): A 2D array representing optimal input to the network.
+        out (numpy.ndarray): A 2D array representing the output from the network. The second dimension represents timepoints.
+        sensory_indices (list of int): A list of indices corresponding to sensory neurons in `inprop`.
+        inidx_mapping (dict, optional): A dictionary mapping indices in `inprop` to new indices. If None, indices are not remapped.
+                                       Defaults to None.
+        outidx_mapping (dict, optional): A dictionary mapping indices in `out` to new indices. If None, `inidx_mapping` is used for
+                                         mapping. Defaults to None.
+        activation_threshold (float, optional): A threshold value for activation. Neurons with activations below this threshold are
+                                                not considered. Defaults to 0.
+        connectivity_threshold (float, optional): A threshold for filtering connections. Connections with weights below this threshold
+                                                  are ignored. Defaults to 0.
+
+    Returns:
+        pandas.DataFrame: A dataframe representing the paths in the network. Each row is a connection, with columns for 'pre' and
+                          'post' neuron indices, 'layer', and their respective activations ('pre_activation', 'post_activation').
+    """
+    non_sensory_indices = [i for i in range(
+        inprop.shape[0]) if i not in sensory_indices]
+
+    if outidx_mapping is None:
+        outidx_mapping = inidx_mapping
+
+    if issparse(inprop):
+        inprop = inprop.toarray()
+
+    sensory_act = get_activations(
+        opt_in, sensory_indices, inidx_mapping, threshold=activation_threshold)
+
+    non_sensory_act = get_activations(
+        out, non_sensory_indices, outidx_mapping, threshold=activation_threshold)
+
+    conn = result_summary(inprop, inidx=sensory_indices + non_sensory_indices,
+                          outidx=non_sensory_indices, inidx_map=inidx_mapping, outidx_map=outidx_mapping, display_output=False)
+
+    conn_el = adjacency_df_to_el(
+        conn, threshold=connectivity_threshold)
+
+    # make paths df
+    paths = []
+    for layer in range(out.shape[1]):
+        if layer == 0:
+            pre = sensory_act[layer]
+            post = non_sensory_act[layer]
+        else:
+            pre = sensory_act[layer]
+            pre.update(non_sensory_act[layer-1])
+            post = non_sensory_act[layer]
+
+        connections = conn_el[conn_el.pre.isin(
+            pre.keys()) & conn_el.post.isin(post.keys())]
+        # so that direct connectivity is layer 1
+        connections.loc[:, ['layer']] = layer+1
+        connections.loc[:, ['pre_activation']] = connections.pre.map(pre)
+        connections.loc[:, ['post_activation']] = connections.post.map(post)
+        if connections.shape[0] > 0:
+            paths.append(connections)
+        else:
+            print(f"No connections found in layer {layer+1}.")
+    paths = pd.concat(paths)
+    return paths
