@@ -141,11 +141,13 @@ def find_path_iteratively(inprop_csc, steps_cpu, inidx, outidx, target_layer_num
     return pd.concat(dfs)
 
 
-def create_layered_positions(df):
+def create_layered_positions(df, priority_indices=None, sort_dict=None):
     """
     Creates a dictionary of positions for each neuron in the paths, so that the paths can be visualized in a layered manner. It assumes that `df` contains the columns 'layer', 'pre_layer', 'post_layer' (or 'layer', 'pre', 'post'). If a neuron exists in multiple layers, it is plotted multiple times.
     Args:
         df (pd.DataFrame): The DataFrame containing the path data, including the layer number, pre-synaptic index, and post-synaptic index.
+        priority_indices (list, set, pd.Series, numpy.ndarray optional): A list of neuron indices that should be plotted on top of each layer. Defaults to None.
+        sort_dict (dict, optional): A dictionary of neuron indices as keys and their sorting order as values. Defaults to None.
     Returns:
         dict: A dictionary of positions for each neuron in the paths, with the keys as the neuron indices and the values as the (x, y) coordinates.
     """
@@ -158,28 +160,44 @@ def create_layered_positions(df):
         df['pre_layer'] = df['pre'].astype(
             str) + '_' + (df.layer-1).astype(str)
 
+    if priority_indices is not None:
+        priority_indices = set(priority_indices)
+
     number_of_layers = df.layer.nunique()
     layer_width = 1.0 / (number_of_layers + 1)
     positions = {}
 
-    pre_neurons = df[df['layer'] == 1]['pre_layer'].unique()
-    vertical_spacing = 1.0 / (len(pre_neurons) + 1)
-    for index, neuron in enumerate(pre_neurons, start=1):
-        positions[neuron] = (0, index * vertical_spacing)
+    all_names = set(df['pre_layer']) | set(df['post_layer'])
+    name_to_idx = dict(zip(df.pre_layer, df.pre))
+    name_to_idx.update(dict(zip(df.post_layer, df.post)))
 
-    for layer in range(1, number_of_layers + 1):
-        posts_in_layer = df[df['layer'] == layer]['post_layer'].unique()
-        vertical_spacing = 1.0 / (len(posts_in_layer) + 1)
-        for index, post in enumerate(posts_in_layer, start=1):
-            positions[post] = (layer * layer_width, index * vertical_spacing)
+    for layer in range(0, number_of_layers + 1):
+        layer_name = [item for item in all_names if '_'+str(layer) in item]
+        if sort_dict is not None:
+            layer_name = sorted(layer_name, key=lambda x: sort_dict[x])
+
+        if priority_indices is not None:
+            layer_name_priority = [
+                item for item in layer_name if name_to_idx[item] in priority_indices]
+            layer_name_not = [
+                item for item in layer_name if name_to_idx[item] not in priority_indices]
+
+            layer_name = layer_name_not + layer_name_priority
+        for index, neuron in enumerate(layer_name, start=1):
+            positions[neuron] = (layer * layer_width,
+                                 index * 1.0 / (len(layer_name) + 1))
+
     return positions
 
 
-def remove_excess_neurons(df):
+def remove_excess_neurons(df, keep=None, target_indices=None, keep_targets_in_middle=False):
     """After filtering, some neurons are no longer on the paths between the input and output neurons. This function removes those neurons from the paths.
 
     Args:
         df (pd.Dataframe): a filtered dataframe with similar structure as the dataframe returned by `find_path_iteratively()`.
+        keep (list, set, pd.Series, numpy.ndarray, optional): A list of neuron indices that should be kept in the paths, even if they don't connect between input and target in the last layer. Defaults to None.
+        target_indices (list, set, pd.Series, numpy.ndarray, optional): A list of target neuron indices that should be kept in the last layer. Defaults to None, in which case all neurons in the last layer in `df` would be kept.
+        keep_targets_in_middle (bool, optional): If True, the target_indices are kept in the middle layers as well, even if they don't connect between input and target in the last layer. Defaults to False.
 
     Returns:
         pd.Dataframe: a dataframe with similar structure as the result of `find_path_iteratively()`, with the excess neurons removed.
@@ -187,17 +205,38 @@ def remove_excess_neurons(df):
     if df.layer.max() == 1:
         return df
 
-    while any([set(df[df.layer == i].post) != set(df[df.layer == (i+1)].pre) for i in range(1, df.layer.max())]):
-        df_layers_update = []
+    # if target_indices are provided, first use this to filter the last layer
+    if target_indices is not None:
+        target_indices = set(target_indices)
+        if not target_indices.issubset(df[df.layer == df.layer.max()].post):
+            raise ValueError('The target indices are not in the post-synaptic neurons of the last layer. Here are the indices of the last layer: ',
+                             df[df.layer == df.layer.max()].post, '. Your target_indices should be a subset.')
 
+        df = df[(df.layer != df.layer.max()) | df.post.isin(target_indices)]
+
+    while any([set(df[df.layer == i].post) != set(df[df.layer == (i+1)].pre) for i in range(1, df.layer.max())]):
+        if keep is not None:
+            keep = set(keep)
+
+            if all([set(df[df.layer == i].post).union(keep) == set(df[df.layer == (i+1)].pre).union(keep) for i in range(1, df.layer.max())]):
+                break
+        else:
+            keep = set()
+
+        if keep_targets_in_middle:
+            if target_indices is not None:
+                keep = keep.union(target_indices)
+
+        # start adding each layer to df_layers_update
+        df_layers_update = []
         if df.layer.max() == 2:
             df_layer = df[df.layer == 2]
             df_prev_layer = df[df.layer == 1]
 
             df_layers_update.append(
-                df_layer[df_layer.pre.isin(df_prev_layer.post)])
+                df_layer[df_layer.pre.isin(set(df_prev_layer.post).union(keep))])
             df_layers_update.append(
-                df_prev_layer[df_prev_layer.post.isin(df_layer.pre)])
+                df_prev_layer[df_prev_layer.post.isin(set(df_layer.pre).union(keep))])
             df = pd.concat(df_layers_update)
 
         else:
@@ -212,17 +251,26 @@ def remove_excess_neurons(df):
                     set(df_layer.post), set(df_next_layer.pre))
 
                 if i == 2:
+                    # add edges in the first layer
                     df_prev_layer = df_prev_layer[df_prev_layer.post.isin(
-                        df_pre)]
+                        df_pre.union(keep))]
                     df_layers_update.append(df_prev_layer)
 
                 df_layer = df_layer[df_layer.pre.isin(
-                    df_pre) & df_layer.post.isin(df_post)]
+                    df_pre.union(keep)) & df_layer.post.isin(df_post.union(keep))]
+                if df_layer.shape[0] == 0:
+                    raise ValueError(
+                        'No path found. Try lowering the threshold for the edges to be included in the path.')
                 df_layers_update.append(df_layer)
 
                 if i == (df.layer.max()-1):
-                    df_next_layer = df_next_layer[df_next_layer.pre.isin(
-                        df_post)]
+                    # add edges in the last layer
+                    if target_indices is None:
+                        df_next_layer = df_next_layer[df_next_layer.pre.isin(
+                            df_post.union(keep))]
+                    else:
+                        df_next_layer = df_next_layer[df_next_layer.pre.isin(
+                            df_post.union(keep).union(target_indices))]
                     df_layers_update.append(df_next_layer)
 
             df = pd.concat(df_layers_update)
