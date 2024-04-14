@@ -9,3 +9,4 @@ torch>=2.2
 tqdm>=4.65
 plotly>=5.19
 matplotlib>=3.4
+networkx>3.0 

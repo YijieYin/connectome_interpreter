@@ -482,12 +482,12 @@ def plot_layered_paths(path_df, figsize=(10, 8), priority_indices=None, sort_by_
         None: This function does not return a value. It generates a plot using matplotlib.
 
     Note:
-        - If 'pre_layer' and 'post_layer' columns are not in the dataframe, they will be created within the function
+        If 'pre_layer' and 'post_layer' columns are not in the dataframe, they will be created within the function
         to uniquely identify the nodes based on their 'pre'/'post' values and 'layer'.
-        - The function automatically checks for the presence of 'pre_activation' and 'post_activation' columns to
+        The function automatically checks for the presence of 'pre_activation' and 'post_activation' columns to
         determine whether to color the nodes based on activation values.
-        - The positions of the nodes are determined by a custom positioning function (`connectome_interpreter.path_finding.create_layered_positions`).
-        - This function requires the networkx library for graph operations and matplotlib for plotting.
+        The positions of the nodes are determined by a custom positioning function (`connectome_interpreter.path_finding.create_layered_positions`).
+        This function requires the networkx library for graph operations and matplotlib for plotting.
     """
     if path_df.shape[0] == 0:
         raise ValueError("The provided DataFrame is empty.")
