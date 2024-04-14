@@ -209,7 +209,7 @@ def add_first_n_matrices(matrices, n):
     return sum_matrix
 
 
-def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None, display_output=True, sort_by_column=None):
+def result_summary(stepsn, inidx, outidx, inidx_map=None, outidx_map=None, display_output=True, sort_by_column=None):
     """
     Generates a summary of connections between different types of neurons, 
     represented by their input and output indexes. The function calculates 
@@ -221,7 +221,7 @@ def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None, display_ou
             between neurons, can be dense or sparse.
         inidx (numpy.ndarray): Array of indices representing the input (presynaptic) neurons, used to subset stepsn. nan values are removed.
         outidx (numpy.ndarray): Array of indices representing the output (postsynaptic) neurons.
-        inidx_map (dict): Mapping from indices to neuron groups for the input neurons.
+        inidx_map (dict, optional): Mapping from indices to neuron groups for the input neurons. Defaults to None, in which case neurons are not grouped. 
         outidx_map (dict, optional): Mapping from indices to neuron groups for the output neurons.
             Defaults to None, in which case it is set to be the same as inidx_map.
         display_output (bool, optional): Whether to display the output in a coloured dataframe. Defaults to True.
@@ -235,6 +235,8 @@ def result_summary(stepsn, inidx, outidx, inidx_map, outidx_map=None, display_ou
     Displays:
         If display_output is True, the function will display a styled version of the resulting dataframe.
     """
+    if inidx_map is None:
+        inidx_map = {idx: idx for idx in inidx}
     if outidx_map is None:
         outidx_map = inidx_map
 
