@@ -513,6 +513,7 @@ def plot_layered_paths(path_df, figsize=(10, 8), priority_indices=None, sort_by_
     widths = [max(0.1, w * 5) for w in weights]  # Scale weights for visibility
 
     # Generate positions
+    from .path_finding import create_layered_positions
     if sort_by_activation:
         node_activation_dict = dict(
             zip(path_df.post_layer, path_df.post_activation))
