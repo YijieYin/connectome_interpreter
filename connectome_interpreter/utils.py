@@ -196,50 +196,109 @@ def modify_coo_matrix(sparse_matrix, input_idx=None, output_idx=None, value=None
     if not issparse(sparse_matrix):
         raise TypeError("The provided matrix is not a sparse matrix.")
 
-    # Ensure we're working with CSR for efficiency, remember original format
+    # Convert sparse matrix to COO format for direct edge manipulation
     original_format = sparse_matrix.getformat()
-    csr = sparse_matrix.tocsr() if original_format == 'coo' else sparse_matrix
+    if original_format != 'coo':
+        sparse_matrix = sparse_matrix.tocoo()
 
-    updated_cols = set()  # Track columns that are updated or added
+    # Extract edges as a DataFrame
+    edges = pd.DataFrame(
+        {'input_idx': sparse_matrix.row, 'output_idx': sparse_matrix.col, 'value': sparse_matrix.data})
+
     print("Updating matrix...")
     if input_idx is not None and output_idx is not None and value is not None:
-        # Convert inputs to arrays and ensure compatibility
+        # Create updates DataFrame from provided indices and values
         input_idx = to_nparray(input_idx)
         output_idx = to_nparray(output_idx)
-        if np.isscalar(value) or (isinstance(value, np.ndarray) and value.size == 1):
+        if np.isscalar(value):
             value = np.full(len(input_idx) * len(output_idx), value)
-        elif len(value) == len(input_idx) * len(output_idx):
-            value = np.atleast_1d(value)
-        else:
+        elif len(value) != len(input_idx) * len(output_idx):
             raise ValueError(
-                "The length of 'value' is incorrect. It should either be a single value or match the length of 'input_idx' * 'output_idx'.")
+                "Length of 'value' must match the product of the lengths of 'input_idx' and 'output_idx', or be one single value.")
 
-        for (i, j, val) in tqdm(zip(np.repeat(input_idx, len(output_idx)),
-                                    np.tile(output_idx, len(input_idx)),
-                                    value)):
-            # Update the matrix, note the changes in indexing for csr
-            if csr[i, j] != 0:
-                csr[i, j] = val  # Efficient for CSR format
-                updated_cols.add(j)
+        updates = pd.DataFrame({
+            'input_idx': np.repeat(input_idx, len(output_idx)),
+            'output_idx': np.tile(output_idx, len(input_idx)),
+            'value': value
+        })
+        # Replace existing values
+        edges = edges.set_index(['input_idx', 'output_idx'])
+        updates = updates.set_index(['input_idx', 'output_idx'])
+        edges.update(updates)
 
     elif updates_df is not None:
-        # Batch updates from a DataFrame
-        for _, row in tqdm(updates_df.iterrows()):
-            i, j, val = row['input_idx'], row['output_idx'], row['value']
-            if csr[i, j] != 0:
-                csr[i, j] = val  # Efficient for CSR format
-                updated_cols.add(j)
+        # Replace existing values with updates from DataFrame
+        updates_df.columns = ['input_idx', 'output_idx', 'value']
+        updates_df = updates_df.set_index(['input_idx', 'output_idx'])
+        edges = edges.set_index(['input_idx', 'output_idx'])
+        edges.update(updates_df)
 
-    if re_normalize and updated_cols:
-        print("Re-normalizing updated columns...")
-        # Normalize updated columns
-        for col in updated_cols:
-            col_sum = csr[:, col].sum()
-            if col_sum != 0:
-                csr[:, col] /= col_sum
-    # remove 0 entries
-    csr.eliminate_zeros()
-    return csr.asformat(original_format)
+    else:
+        raise ValueError(
+            "Either ['input_idx', 'output_idx', and 'value'], or 'updates_df' must be provided.")
+
+    edges.reset_index(inplace=True)
+    # Re-normalize if requested
+    if re_normalize:
+        print("Re-normalizing matrix...")
+        col_sums = edges.groupby('output_idx').data.sum()
+        edges['value'] /= edges['output_idx'].map(col_sums)
+
+    # Convert back to original sparse matrix format
+    updated_matrix = coo_matrix(
+        (edges['value'], (edges['input_idx'], edges['output_idx'])), shape=sparse_matrix.shape)
+    return updated_matrix.asformat(original_format)
+
+    # if not issparse(sparse_matrix):
+    #     raise TypeError("The provided matrix is not a sparse matrix.")
+
+    # # Ensure we're working with CSR for efficiency, remember original format
+    # original_format = sparse_matrix.getformat()
+    # csr = sparse_matrix.tocsr() if original_format == 'coo' else sparse_matrix
+
+    # updated_cols = set()  # Track columns that are updated or added
+    # print("Updating matrix...")
+    # if input_idx is not None and output_idx is not None and value is not None:
+    #     # Convert inputs to arrays and ensure compatibility
+    #     input_idx = to_nparray(input_idx)
+    #     output_idx = to_nparray(output_idx)
+    #     if np.isscalar(value) or (isinstance(value, np.ndarray) and value.size == 1):
+    #         value = np.full(len(input_idx) * len(output_idx), value)
+    #     elif len(value) == len(input_idx) * len(output_idx):
+    #         value = np.atleast_1d(value)
+    #     else:
+    #         raise ValueError(
+    #             "The length of 'value' is incorrect. It should either be a single value or match the length of 'input_idx' * 'output_idx'.")
+
+    #     for (i, j, val) in tqdm(zip(np.repeat(input_idx, len(output_idx)),
+    #                                 np.tile(output_idx, len(input_idx)),
+    #                                 value)):
+    #         # Update the matrix, note the changes in indexing for csr
+    #         if csr[i, j] != 0:
+    #             csr[i, j] = val  # Efficient for CSR format
+    #             updated_cols.add(j)
+
+    # elif updates_df is not None:
+    #     # Batch updates from a DataFrame
+    #     for _, row in tqdm(updates_df.iterrows()):
+    #         i, j, val = row['input_idx'], row['output_idx'], row['value']
+    #         if csr[i, j] != 0:
+    #             csr[i, j] = val  # Efficient for CSR format
+    #             updated_cols.add(j)
+
+    # else:
+    #     raise ValueError("Either ['input_idx', 'output_idx', and 'value'], or 'updates_df' must be provided.")
+
+    # if re_normalize and updated_cols:
+    #     print("Re-normalizing updated columns...")
+    #     # Normalize updated columns
+    #     for col in updated_cols:
+    #         col_sum = csr[:, col].sum()
+    #         if col_sum != 0:
+    #             csr[:, col] /= col_sum
+    # # remove 0 entries
+    # csr.eliminate_zeros()
+    # return csr.asformat(original_format)
 
 
 def to_nparray(input_data):
