@@ -1,4 +1,5 @@
 import random
+import warnings
 
 import torch
 import pandas as pd
@@ -216,37 +217,58 @@ def modify_coo_matrix(sparse_matrix, input_idx=None, output_idx=None, value=None
             raise ValueError(
                 "Length of 'value' must match the product of the lengths of 'input_idx' and 'output_idx', or be one single value.")
 
-        updates = pd.DataFrame({
+        updates_df = pd.DataFrame({
             'input_idx': np.repeat(input_idx, len(output_idx)),
             'output_idx': np.tile(output_idx, len(input_idx)),
             'value': value
         })
-        # Replace existing values
-        edges = edges.set_index(['input_idx', 'output_idx'])
-        updates = updates.set_index(['input_idx', 'output_idx'])
-        edges.update(updates)
 
     elif updates_df is not None:
-        # Replace existing values with updates from DataFrame
-        updates_df.columns = ['input_idx', 'output_idx', 'value']
-        updates_df = updates_df.set_index(['input_idx', 'output_idx'])
-        edges = edges.set_index(['input_idx', 'output_idx'])
-        edges.update(updates_df)
+        # check column names
+        if not all(col in updates_df.columns for col in ['input_idx', 'output_idx', 'value']):
+            raise ValueError(
+                "The DataFrame must contain columns ['input_idx', 'output_idx', 'value'].")
 
     else:
         raise ValueError(
             "Either ['input_idx', 'output_idx', and 'value'], or 'updates_df' must be provided.")
 
-    edges.reset_index(inplace=True)
-    # Re-normalize if requested
-    if re_normalize:
-        print("Re-normalizing matrix...")
-        col_sums = edges.groupby('output_idx').data.sum()
-        edges['value'] /= edges['output_idx'].map(col_sums)
+    # Concatenate edges and updates_df, ensuring that updates_df is last so its values take precedence
+    combined_edges = pd.concat([edges, updates_df])
+
+    # Remove duplicates, keeping the last occurrence (from updates_df)
+    # We specify the subset to be the columns 'input_idx' and 'output_idx'
+    edges = combined_edges.drop_duplicates(
+        subset=['input_idx', 'output_idx'], keep='last')
 
     # Convert back to original sparse matrix format
     updated_matrix = coo_matrix(
         (edges['value'], (edges['input_idx'], edges['output_idx'])), shape=sparse_matrix.shape)
+
+    if re_normalize:
+        print("Re-normalizing updated columns...")
+        # Convert updated_matrix back to CSR format for efficient column operations
+        updated_matrix = updated_matrix.tocsr()
+
+        # Identify the unique columns to re-normalize based on the updates_df
+        unique_cols = updates_df.reset_index()['output_idx'].unique()
+
+        # Compute sum of each column that has been updated
+        col_sums = np.array(
+            updated_matrix[:, unique_cols].sum(axis=0)).flatten()
+
+        # Avoid division by zero by replacing zeros with one (or any non-zero number to prevent change)
+        # This step ensures no values are divided by zero, maintaining original values in such cases
+        col_sums[col_sums == 0] = 1
+
+        for idx, col in enumerate(unique_cols):
+            updated_matrix[:, col] /= col_sums[idx]
+
+    if issubclass(updated_matrix.dtype.type, np.integer):
+        warnings.warn(
+            "Matrix data is of integer type instead of float32. Is the sparse matrix normalised connectivity?",
+            UserWarning
+        )
     return updated_matrix.asformat(original_format)
 
     # if not issparse(sparse_matrix):
