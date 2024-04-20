@@ -241,34 +241,44 @@ def modify_coo_matrix(sparse_matrix, input_idx=None, output_idx=None, value=None
     edges = combined_edges.drop_duplicates(
         subset=['input_idx', 'output_idx'], keep='last')
 
+    if re_normalize:
+        print("Re-normalizing updated columns...")
+        edge_to_normalise = edges[edges.output_idx.isin(updates_df.output_idx)]
+        col_sums = edge_to_normalise.groupby('output_idx').value.sum()
+        col_sums[col_sums == 0] = 1
+
+        edge_to_normalise.loc[:, ['value']] = edge_to_normalise['value'] / \
+            edge_to_normalise['output_idx'].map(col_sums)
+
+        edges = pd.concat([edges[~edges.output_idx.isin(updates_df.output_idx)],
+                           edge_to_normalise])
+
     # Convert back to original sparse matrix format
     updated_matrix = coo_matrix(
         (edges['value'], (edges['input_idx'], edges['output_idx'])), shape=sparse_matrix.shape)
 
-    if re_normalize:
-        print("Re-normalizing updated columns...")
-        # Convert updated_matrix back to CSR format for efficient column operations
-        updated_matrix = updated_matrix.tocsr()
+    # if re_normalize:
+    #     print("Re-normalizing updated columns...")
+    #     # Convert updated_matrix back to CSR format for efficient column operations
+    #     updated_matrix = updated_matrix.tocsr()
 
-        # Identify the unique columns to re-normalize based on the updates_df
-        unique_cols = updates_df.reset_index()['output_idx'].unique()
+    #     # Identify the unique columns to re-normalize based on the updates_df
+    #     unique_cols = updates_df.reset_index()['output_idx'].unique()
 
-        # Compute sum of each column that has been updated
-        col_sums = np.array(
-            updated_matrix[:, unique_cols].sum(axis=0)).flatten()
+    #     # Compute sum of each column that has been updated
+    #     col_sums = np.array(
+    #         updated_matrix[:, unique_cols].sum(axis=0)).flatten()
 
-        # Avoid division by zero by replacing zeros with one (or any non-zero number to prevent change)
-        # This step ensures no values are divided by zero, maintaining original values in such cases
-        col_sums[col_sums == 0] = 1
-
-        for idx, col in enumerate(unique_cols):
-            updated_matrix[:, col] /= col_sums[idx]
+    #     for idx, col in enumerate(unique_cols):
+    #         if col_sums[idx] != 0:
+    #             updated_matrix[:, col] /= col_sums[idx]
 
     if issubclass(updated_matrix.dtype.type, np.integer):
         warnings.warn(
             "Matrix data is of integer type instead of float32. Is the sparse matrix normalised connectivity?",
             UserWarning
         )
+    updated_matrix.eliminate_zeros()
     return updated_matrix.asformat(original_format)
 
     # if not issparse(sparse_matrix):
