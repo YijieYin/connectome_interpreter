@@ -209,7 +209,7 @@ def add_first_n_matrices(matrices, n):
     return sum_matrix
 
 
-def result_summary(stepsn, inidx, outidx, inidx_map=None, outidx_map=None, display_output=True, sort_by_column=None):
+def result_summary(stepsn, inidx, outidx, inidx_map=None, outidx_map=None, display_output=True, sort_by_column=None, pre_in_column=False, display_threshold=0):
     """
     Generates a summary of connections between different types of neurons, 
     represented by their input and output indexes. The function calculates 
@@ -226,6 +226,8 @@ def result_summary(stepsn, inidx, outidx, inidx_map=None, outidx_map=None, displ
             Defaults to None, in which case it is set to be the same as inidx_map.
         display_output (bool, optional): Whether to display the output in a coloured dataframe. Defaults to True.
         sort_by_column (str or list, optional): the column name(s) to sort the result by. If none is provided, then sort by the first column. 
+        pre_in_column (bool, optional): Whether to have the presynaptic neuron groups as columns. Defaults to False (pre in rows, post in columns).
+        display_threshold (float, optional): The threshold for displaying the output. Defaults to 0.
 
     Returns:
         pd.DataFrame: A dataframe representing the summed synaptic input from presynaptic neuron groups 
@@ -263,6 +265,13 @@ def result_summary(stepsn, inidx, outidx, inidx_map=None, outidx_map=None, displ
     # averaging across columns of the same type:
     # on average, a neuron of that type receives x% input from a presynaptic type
     result_df = summed_df.T.groupby(level=0).mean().T
+
+    if pre_in_column:
+        result_df = result_df.T
+
+    if display_threshold > 0:
+        # only display rows where any value >= display_threshold
+        result_df = result_df[(result_df >= display_threshold).any(axis=1)]
 
     if sort_by_column is None:
         # sort result_df by the values in the first column, in descending order
