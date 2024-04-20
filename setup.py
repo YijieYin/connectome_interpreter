@@ -32,7 +32,7 @@ setup(
         'Documentation': 'https://connectome-interpreter.readthedocs.io/en/latest/',
         'Larva connectome example': 'https://colab.research.google.com/drive/1VIMNFBp7dCgN5XOQ9vvzPaqb80BGPZx4?usp=sharing',
         'Adult connectome example (FAFB)': 'https://colab.research.google.com/drive/1ECUagwN-r2rnKyfcYgtR1oG8Lox8m8BW?usp=sharing',
-    }
+    },
     # url='https://connectome-interpreter.readthedocs.io/en/latest/',
     test_suite='tests'  # Project home page
 )
