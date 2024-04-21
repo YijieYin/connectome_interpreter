@@ -14,13 +14,19 @@ import networkx as nx
 def dynamic_representation(tensor, density_threshold=0.2):
     """Convert tensor to sparse if density is below threshold, otherwise to dense."""
     nonzero_elements = torch.nonzero(tensor).size(0)
-    total_elements = tensor.numel()
-    density = nonzero_elements / total_elements
 
-    if density < density_threshold:
-        return tensor.to_sparse()
+    # to_sparse() doesn't support operations on tensors with more than INT_MAX (2,147,483,647) elements
+    if nonzero_elements < 2147483647:
+        total_elements = tensor.numel()
+        density = nonzero_elements / total_elements
+
+        if density < density_threshold:
+            return tensor.to_sparse()
+        else:
+            return tensor.to_dense()
     else:
-        return tensor.to_dense()
+        print("Tensor is too large to convert to sparse. Returning dense tensor.")
+        return tensor
 
 
 def torch_sparse_where(x, threshold):
@@ -58,25 +64,26 @@ def tensor_to_csc(tensor):
     """Turn torch.Tensor into scipy Compressed Sparse Column matrix.
 
     Args:
-      tensor (torch.Tensor): A sparse tensor.
+      tensor (torch.Tensor): A (sparse) tensor.
 
     Returns:
       scipy.sparse.csc_matrix: A Scipy sparse Compressed Sparse Column matrix.
     """
-    tensor = tensor.to('cpu').coalesce()
-    # Extract indices and values
-    indices = tensor.indices().numpy()
-    values = tensor.values().numpy()
-    # Calculate the shape of the original tensor
-    shape = tensor.shape
+    if tensor.is_sparse:
+        tensor = tensor.coalesce()
+        indices = tensor.indices().numpy()
+        values = tensor.values().numpy()
+        shape = tensor.shape
+        coo = coo_matrix((values, (indices[0], indices[1])), shape=shape)
+    else:
+        # Convert dense tensor to COO directly, necessary if the tensor is not sparse
+        indices = torch.nonzero(tensor).t()
+        values = tensor[indices[0], indices[1]]
+        shape = tensor.shape
+        coo = coo_matrix(
+            (values.numpy(), (indices[0].numpy(), indices[1].numpy())), shape=shape)
 
-    # Create a SciPy COO matrix
-    coo = coo_matrix((values, (indices[0], indices[1])), shape=shape)
-
-    # Convert COO matrix to CSC matrix
-    csc = coo.tocsc()
-
-    return csc
+    return coo.tocsc()
 
 
 def coo_tensor_to_el(coo_tensor):
