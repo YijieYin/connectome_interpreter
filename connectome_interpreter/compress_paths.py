@@ -9,6 +9,7 @@ from scipy.sparse import issparse
 import ipywidgets as widgets
 import seaborn as sns
 import matplotlib.pyplot as plt
+from IPython.display import display
 
 from .utils import dynamic_representation, torch_sparse_where, to_nparray, tensor_to_csc
 
@@ -423,4 +424,4 @@ def contribution_by_path_lengths_heatmap(steps, inidx, outidx, inidx_map=None, o
                                description='Path length', continuous_update=True)
 
     # Link the slider to the plotting function
-    widgets.interactive(plot_heatmap, index=slider)
+    display(widgets.interactive(plot_heatmap, index=slider))
