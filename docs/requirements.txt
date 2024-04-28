@@ -12,3 +12,4 @@ matplotlib>=3.4
 networkx>3.0 
 ipywidgets>=7.6
 seaborn>=0.11
+IPython>=7.23
