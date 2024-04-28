@@ -5,8 +5,10 @@ Sphinx>=7.2
 numpy>=1.26
 pandas>=2.1
 scipy>=1.11
-torch>=2.2
+torch>=1.10
 tqdm>=4.65
 plotly>=5.19
 matplotlib>=3.4
 networkx>3.0 
+ipywidgets>=7.6
+seaborn>=0.11
