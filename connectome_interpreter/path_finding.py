@@ -72,23 +72,19 @@ def find_path_once(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, to
     # Get the original row indices corresponding to these top n averages
     top_n_row_indices = thresholded_intersect[top_n_indices]
 
-    # Initialize lists to store data for DataFrame
-    pre_list, post_list, weight_list = [], [], []
+    # make the edgelist
+    submatrix = inprop_csc[top_n_row_indices, :][:, outidx]
 
-    # Iterate through each possible combination and store only non-zero weights
-    for pre in top_n_row_indices:
-        for post in outidx:
-            weight = inprop_csc[pre, post]
-            if weight > 0:  # Only consider non-zero weights
-                pre_list.append(pre)
-                post_list.append(post)
-                weight_list.append(weight)
+    # Convert submatrix to COO format to efficiently find non-zero elements
+    coo_submatrix = submatrix.tocoo()
 
-    # Construct DataFrame from lists
+    # Create DataFrame directly from COO format data
     df = pd.DataFrame({
-        'pre': pre_list,
-        'post': post_list,
-        'weight': weight_list
+        # Map back to original indices
+        'pre': top_n_row_indices[coo_submatrix.row],
+        # Map back to original output indices
+        'post': outidx[coo_submatrix.col],
+        'weight': coo_submatrix.data
     })
 
     return df
