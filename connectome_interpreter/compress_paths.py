@@ -6,6 +6,9 @@ from tqdm import tqdm
 import pandas as pd
 import plotly.express as px
 from scipy.sparse import issparse
+import ipywidgets as widgets
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 from .utils import dynamic_representation, torch_sparse_where, to_nparray, tensor_to_csc
 
@@ -211,8 +214,8 @@ def result_summary(stepsn, inidx, outidx, inidx_map=None, outidx_map=None, displ
     Args:
         stepsn (scipy.sparse matrix or numpy.ndarray): Matrix representing the synaptic strengths 
             between neurons, can be dense or sparse.
-        inidx (numpy.ndarray): Array of indices representing the input (presynaptic) neurons, used to subset stepsn. nan values are removed.
-        outidx (numpy.ndarray): Array of indices representing the output (postsynaptic) neurons.
+        inidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of indices representing the input (presynaptic) neurons, used to subset stepsn. nan values are removed.
+        outidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of indices representing the output (postsynaptic) neurons.
         inidx_map (dict, optional): Mapping from indices to neuron groups for the input neurons. Defaults to None, in which case neurons are not grouped. 
         outidx_map (dict, optional): Mapping from indices to neuron groups for the output neurons.
             Defaults to None, in which case it is set to be the same as inidx_map.
@@ -297,8 +300,8 @@ def contribution_by_path_lengths(steps, inidx, outidx, outidx_map):
     Args:
         steps (list of scipy.sparse matrices): List of sparse matrices, each representing 
             synaptic strengths for a specific path length.
-        inidx (numpy.ndarray): Array of indices representing input (presynaptic) neurons.
-        outidx (numpy.ndarray): Array of indices representing output (postsynaptic) neurons.
+        inidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of indices representing input (presynaptic) neurons.
+        outidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of indices representing output (postsynaptic) neurons.
         outidx_map (dict): Mapping from indices to postsynaptic neuron groups.
 
     Returns:
@@ -354,3 +357,70 @@ def contribution_by_path_lengths(steps, inidx, outidx, outidx_map):
         )
     )
     fig.show()
+
+
+def contribution_by_path_lengths_heatmap(steps, inidx, outidx, inidx_map=None, outidx_map=None,
+                                         sort_by_index=True, sort_by_column=None,
+                                         pre_in_column=False,
+                                         display_threshold=0,
+                                         cmap='viridis'):
+    """
+    Display the contribution from inidx to outidx, grouped by inidx_map and outidx_map, across different path lengths.
+
+    Args:
+        steps (list of scipy.sparse matrices): List of sparse matrices, each representing synaptic strengths for a specific path length.
+        inidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of indices representing input (presynaptic) neurons.
+        outidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of indices representing output (postsynaptic) neurons.
+        inidx_map (dict, optional): Mapping from indices to input neuron groups. Defaults to None, in which case neurons are not grouped.
+        outidx_map (dict, optional): Mapping from indices to output neuron groups. Defaults to None, in which case it is set to be the same as inidx_map.
+        sort_by_index (bool, optional): Whether to sort the output by index. Defaults to True.
+        sort_by_column (str or list, optional): the column name(s) to sort the result by. If none is provided, then sort by the first column.
+        pre_in_column (bool, optional): Whether to have the presynaptic neuron groups as columns. Defaults to False (pre in rows, post in columns).
+        display_threshold (float, optional): The threshold for displaying the output. Defaults to 0.
+        cmap (str, optional): The colormap to use for the heatmap. Defaults to 'viridis'.
+
+    Returns:
+        None: Displays an interactive heatmap showing the contribution from inidx to outidx, grouped by inidx_map and outidx_map, across different path lengths.
+
+    """
+
+    inidx = to_nparray(inidx)
+    outidx = to_nparray(outidx)
+
+    if inidx_map is None:
+        inidx_map = {idx: idx for idx in inidx}
+    if outidx_map is None:
+        outidx_map = inidx_map
+
+    def plot_heatmap(index):
+        plt.figure(figsize=(30, 15))
+        # plt.imshow(heatmaps[index], cmap='viridis', aspect = 'auto')
+        # Use seaborn's heatmap function which is a higher-level API for Matplotlib's imshow
+        sns.heatmap(heatmaps[index-1], annot=True, fmt=".2f",
+                    linewidths=.5, cmap=cmap)
+
+        # Rotate the tick labels for the columns to show them better
+        plt.xticks(rotation=90)
+        plt.yticks(rotation=0)
+
+        # Show the heatmap
+        plt.show()
+
+    heatmaps = []
+
+    for step in tqdm(steps):
+        df = result_summary(step, inidx, outidx,
+                            inidx_map, outidx_map,
+                            display_output=False,
+                            sort_by_column=sort_by_column,
+                            pre_in_column=pre_in_column,
+                            display_threshold=display_threshold)
+        if sort_by_index:
+            df.sort_index(inplace=True)
+        heatmaps.append(df)
+
+    slider = widgets.IntSlider(value=1, min=1, max=len(heatmaps), step=1,
+                               description='Path length', continuous_update=True)
+
+    # Link the slider to the plotting function
+    widgets.interactive(plot_heatmap, index=slider)
