@@ -22,11 +22,12 @@ def find_path_once(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, to
       np.ndarray: An array of neuron indices in the previous layer that have significant connectivity, connecting between the `inidx` and `outidx`.
     """
 
-    inidx = to_nparray(inidx)
-    outidx = to_nparray(outidx)
-    # make sure they are integers as well
+    # make sure they are integers
     inidx = [int(i) for i in inidx]
     outidx = [int(i) for i in outidx]
+
+    inidx = to_nparray(inidx)
+    outidx = to_nparray(outidx)
 
     if target_layer_number == 1:
         # if the target layer is 1, we are looking at the direct synaptic connectivity
