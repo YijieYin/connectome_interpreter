@@ -42,8 +42,10 @@ class MultilayeredNetwork(nn.Module):
     def __init__(self, all_weights, sensory_indices, num_layers=2, threshold=0.01, tanh_steepness=5):
         super(MultilayeredNetwork, self).__init__()
 
+        # num_neurons x num_neurons = 18k * 18k, ~1.2GB
         self.all_weights = torch.nn.parameter.Parameter(all_weights)
-        self.sensory_indices = torch.tensor(sensory_indices)
+        self.sensory_indices = torch.tensor(
+            sensory_indices)  # shape: vector of sensory indices. These are the ones we manipulate
         self.num_layers = num_layers
         self.threshold = threshold
         self.tanh_steepness = tanh_steepness
@@ -57,7 +59,7 @@ class MultilayeredNetwork(nn.Module):
         the final activations.
 
         Args:
-            inthroughtime (torch.Tensor): A 2D tensor representing the input to the network
+            inthroughtime (torch.Tensor): A 2D tensor (number of neurons, number of time steps) representing the input to the network
                 across different time steps. Each column corresponds to a different time step,
                 and each row corresponds to different sensory inputs.
 
@@ -83,17 +85,18 @@ class MultilayeredNetwork(nn.Module):
         inthroughtime = torch.tanh(inthroughtime)
 
         # Initial activations are based only on sensory inputs for the first time step
+        # shape: (18k , 1)
         x = self.all_weights[:, self.sensory_indices] @ inthroughtime[:, 0]
         # thresholded relu
         x = torch.where(x >= self.threshold, x, 0)
 
         # Limit the range between 0 and 1
         x = torch.tanh(self.tanh_steepness*x)
-        self.activations.append(x.cpu().detach().numpy())
+        self.activations.append(x)
 
         # Process remaining layers
         for i in range(1, self.num_layers):
-            x = self.all_weights @ x
+            x = self.all_weights @ x  # shape: (18k, 1)
             # add inthroughtime[:, i] to the sensory neurons
             x[self.sensory_indices] += inthroughtime[:, i]
             # thresholded relu
@@ -102,7 +105,7 @@ class MultilayeredNetwork(nn.Module):
             # Limit the range between 0 and 1
             x = torch.tanh(self.tanh_steepness*x)
 
-            self.activations.append(x.cpu().detach().numpy())
+            self.activations.append(x)
 
         # free up memory as much as possible
         del inthroughtime
@@ -110,8 +113,7 @@ class MultilayeredNetwork(nn.Module):
         torch.cuda.empty_cache()
 
         # stack the numpy activations together
-        self.activations = np.stack(self.activations, axis=1)
-        # self.activations = torch.stack(self.activations, dim=1)
+        self.activations = torch.stack(self.activations, dim=1)
         return self.activations
 
 
@@ -122,7 +124,7 @@ def activation_maximisation(
         in_regularisation_lambda=0.1, custom_in_regularisation: Callable[[torch.Tensor], torch.Tensor] = None,
         out_regularisation_lambda=0.1,
         early_stopping=True, stopping_threshold=1e-6, n_runs=10,
-        use_tqdm=True, print_output=True,
+        use_tqdm=True, print_output=True, report_memory_usage=False,
         device=None, wandb=True) -> Tuple[np.ndarray, np.ndarray, list, list]:
     """
     Performs activation maximisation on a given model to identify input patterns that maximally activate selected neurons.
@@ -149,6 +151,7 @@ def activation_maximisation(
         n_runs (int, optional): The number of runs to consider for early stopping. Defaults to 10.
         use_tqdm (bool, optional): Whether to use tqdm progress bars to track optimization progress. Defaults to True.
         print_output (bool, optional): Whether to print loss information during optimization. Defaults to True.
+        report_memory_usage (bool, optional): Whether to report GPU memory usage during optimization. Defaults to False.
         device: The device to run the optimization on. If None, automatically selects a device. Defaults to None.
         wandb (bool, optional): Whether to log optimization details to Weights & Biases. Defaults to True. Requires wandb to be installed.
 
@@ -200,6 +203,11 @@ def activation_maximisation(
     in_reg_loss = []
     losses = []
     iteration_range = range(num_iterations)
+
+    if report_memory_usage:
+        print('GPU memory before optimization:', torch.cuda.memory_allocated(
+            device) / 1e9, 'GB')
+
     if use_tqdm:
         iteration_range = tqdm(iteration_range)
 
@@ -229,11 +237,11 @@ def activation_maximisation(
                 # Negative sign because we want to maximize activation
                 # Only select activations from specified neurons
                 # layer_activations is now a numpy array
-                activation_loss -= np.mean(
+                activation_loss -= torch.mean(
                     layer_activations[neuron_indices])
         # in the end, activation loss is the sum of mean activation across layers.
 
-        out_regularisation_loss = out_regularisation_lambda * np.mean(
+        out_regularisation_loss = out_regularisation_lambda * torch.mean(
             model.activations)
         # Apply custom regularisation
         in_regularisation_loss = in_regularisation_lambda * custom_in_regularisation(
@@ -265,12 +273,14 @@ def activation_maximisation(
         if print_output and iteration % 10 == 0:  # Print every 10 iterations
             print(
                 f"Iteration {iteration}: Activation Loss = {activation_loss.item()}, Input regularization Loss = {in_regularisation_loss.item()}, Output regularization Loss = {out_regularisation_loss.item()}")
-            # print(f'Memory after optimization {iteration}:', torch.cuda.memory_allocated(
-            #     device) / 1e9, 'GB')
+
+        if report_memory_usage and iteration % 10 == 0:
+            print(f'GPU memory at iteration {iteration}:', torch.cuda.memory_allocated(
+                device) / 1e9, 'GB')
 
         torch.cuda.empty_cache()
 
-    output_after = model(input_tensor)
+    output_after = model(input_tensor).cpu().detach().numpy()
     # first bring to cpu to save gpu memory
     input_tensor = input_tensor.cpu().detach().numpy()
     input_tensor = np.where(input_tensor >= model.threshold,
@@ -278,8 +288,9 @@ def activation_maximisation(
     # Limit the range between 0 and 1
     input_tensor = np.tanh(input_tensor)
 
-    # print('Memory after optimization:',
-    #       torch.cuda.memory_allocated(device) / 1e9, 'GB')
+    if report_memory_usage:
+        print('GPU memory after optimization:', torch.cuda.memory_allocated(
+            device) / 1e9, 'GB')
 
     return (input_tensor, output_after,
             act_loss, out_reg_loss, in_reg_loss, input_snapshots)
