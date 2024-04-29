@@ -1,4 +1,23 @@
 from setuptools import setup, find_packages
+import pkg_resources
+
+# Function to check if PyTorch is already installed
+
+
+def get_torch_version():
+    try:
+        return pkg_resources.get_distribution('torch').version
+    except pkg_resources.DistributionNotFound:
+        return None
+
+
+# Specify a PyTorch version requirement only if it's not installed
+torch_version = get_torch_version()
+if torch_version is None:
+    torch_requirement = 'torch>=1.7.1'
+else:
+    torch_requirement = f'torch=={torch_version}'
+
 
 setup(
     name='connectome_interpreter',
@@ -12,7 +31,8 @@ setup(
         'numpy',
         'pandas',
         'scipy',
-        'torch>=1.7.1',
+        # 'torch>=1.7.1',
+        torch_requirement,
         'tqdm',
         'plotly',
         'matplotlib',

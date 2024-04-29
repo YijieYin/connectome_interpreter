@@ -14,28 +14,27 @@ from .utils import adjacency_df_to_el, get_activations
 
 class MultilayeredNetwork(nn.Module):
     """
-    A PyTorch module representing a multilayered neural network model. 
-    This network architecture is designed to process temporal sequences of sensory data 
-    through multiple layers, with the initial layer handling sensory inputs and subsequent 
+    A PyTorch module representing a multilayered neural network model.
+    This network architecture is designed to process temporal sequences of sensory data
+    through multiple layers, with the initial layer handling sensory inputs and subsequent
     layers processing sensory + non-sensory input.
 
-    The forward pass of the network unrolls the connectome through time, with each layer 
-    receiving its own time-specific sensory input. 
+    The forward pass of the network unrolls the connectome through time, with each layer
+    receiving its own time-specific sensory input.
 
     Attributes:
-        all_weights (torch.nn.Parameter): The connectome. Input neurons are in the columns. 
-        sensory_indices (list[int]): Indices indicating which rows/columns in the all_weights matrix 
+        all_weights (torch.nn.Parameter): The connectome. Input neurons are in the columns.
+        sensory_indices (list[int]): Indices indicating which rows/columns in the all_weights matrix
             correspond to sensory neurons.
         num_layers (int): The number of layers in the network.
         threshold (float): The activation threshold for neurons in the network.
-        activations (list[torch.Tensor]): A list storing the activations of each layer 
-            after the forward pass.
+        activations (numpy.ndarray): A 2D array storing the activations of all neurons (rows) across time steps (columns).
 
     Args:
         all_weights (torch.Tensor): The connectome. Input neurons are in the columns.
-        sensory_indices (list[int]): A list indicating the indices of sensory neurons 
+        sensory_indices (list[int]): A list indicating the indices of sensory neurons
             within the network.
-        num_layers (int, optional): The number of temporal layers to unroll the network through. 
+        num_layers (int, optional): The number of temporal layers to unroll the network through.
             Defaults to 2.
         threshold (float, optional): The threshold for activation of neurons. Defaults to 0.01.
     """
@@ -48,7 +47,7 @@ class MultilayeredNetwork(nn.Module):
         self.num_layers = num_layers
         self.threshold = threshold
         self.tanh_steepness = tanh_steepness
-        self.activations = []  # List for activations of middle layers
+        self.activations = []
 
     def forward(self, inthroughtime):
         """
@@ -63,7 +62,7 @@ class MultilayeredNetwork(nn.Module):
                 and each row corresponds to different sensory inputs.
 
         Returns:
-            torch.Tensor: A 2D tensor of activations for all neurons across all layers and
+            numpy.ndarray: A 2D array of activations for all neurons across all layers and
                 time steps. Each column represents the activations for a specific time step,
                 while each row corresponds to different neurons.
 
@@ -77,31 +76,42 @@ class MultilayeredNetwork(nn.Module):
 
         self.activations = []  # Clear activations list at each forward pass
 
+        # thresholded relu
         inthroughtime = torch.where(inthroughtime >= self.threshold,
-                                    inthroughtime, 0)  # Thresholded ReLU
+                                    inthroughtime, 0)
         # Limit the range between 0 and 1
         inthroughtime = torch.tanh(inthroughtime)
 
         # Initial activations are based only on sensory inputs for the first time step
         x = self.all_weights[:, self.sensory_indices] @ inthroughtime[:, 0]
-        x = torch.where(x >= self.threshold, x, 0)  # Thresholded ReLU
+        # thresholded relu
+        x = torch.where(x >= self.threshold, x, 0)
+
         # Limit the range between 0 and 1
         x = torch.tanh(self.tanh_steepness*x)
-        self.activations.append(x)
+        self.activations.append(x.cpu().detach().numpy())
 
         # Process remaining layers
         for i in range(1, self.num_layers):
             x = self.all_weights @ x
             # add inthroughtime[:, i] to the sensory neurons
             x[self.sensory_indices] += inthroughtime[:, i]
+            # thresholded relu
+            x = torch.where(x >= self.threshold, x, 0)
 
-            x = torch.where(x >= self.threshold, x, 0)  # Thresholded ReLU
             # Limit the range between 0 and 1
             x = torch.tanh(self.tanh_steepness*x)
 
-            self.activations.append(x)
+            self.activations.append(x.cpu().detach().numpy())
 
-        self.activations = torch.stack(self.activations, dim=1)
+        # free up memory as much as possible
+        del inthroughtime
+        del x
+        torch.cuda.empty_cache()
+
+        # stack the numpy activations together
+        self.activations = np.stack(self.activations, axis=1)
+        # self.activations = torch.stack(self.activations, dim=1)
         return self.activations
 
 
@@ -147,7 +157,7 @@ def activation_maximisation(
         The optimized `input_tensor` as a numpy array.
         The output of the model after optimization as a numpy array.
         A list of input activation losses over iterations.
-        A list of output activation losses over iterations. 
+        A list of output activation losses over iterations.
         A list of input activation regularization losses over iterations.
         A list of output activation regularization losses over iterations.
         A list of input tensor snapshots taken during optimization.
@@ -218,11 +228,12 @@ def activation_maximisation(
                 layer_activations = model.activations[:, layer_index]
                 # Negative sign because we want to maximize activation
                 # Only select activations from specified neurons
-                activation_loss -= torch.mean(
+                # layer_activations is now a numpy array
+                activation_loss -= np.mean(
                     layer_activations[neuron_indices])
         # in the end, activation loss is the sum of mean activation across layers.
 
-        out_regularisation_loss = out_regularisation_lambda * torch.mean(
+        out_regularisation_loss = out_regularisation_lambda * np.mean(
             model.activations)
         # Apply custom regularisation
         in_regularisation_loss = in_regularisation_lambda * custom_in_regularisation(
@@ -236,10 +247,10 @@ def activation_maximisation(
                 break
 
         if wandb:
-            dct = {"activation_loss": activation_loss.item(
-            ), "in_regularisation_loss": in_regularisation_loss.item(),
-                'out_regularisation_loss': out_regularisation_loss.item(),
-                "loss": loss.item()}
+            dct = {"activation_loss": activation_loss.item(),
+                   "in_regularisation_loss": in_regularisation_loss.item(),
+                   'out_regularisation_loss': out_regularisation_loss.item(),
+                   "loss": loss.item()}
             wandb.log(dct)
 
         act_loss.append(activation_loss.item())
@@ -254,15 +265,23 @@ def activation_maximisation(
         if print_output and iteration % 10 == 0:  # Print every 10 iterations
             print(
                 f"Iteration {iteration}: Activation Loss = {activation_loss.item()}, Input regularization Loss = {in_regularisation_loss.item()}, Output regularization Loss = {out_regularisation_loss.item()}")
+            # print(f'Memory after optimization {iteration}:', torch.cuda.memory_allocated(
+            #     device) / 1e9, 'GB')
+
+        torch.cuda.empty_cache()
 
     output_after = model(input_tensor)
-    input_tensor = torch.where(input_tensor >= model.threshold,
-                               input_tensor, 0)  # Thresholded ReLU
+    # first bring to cpu to save gpu memory
+    input_tensor = input_tensor.cpu().detach().numpy()
+    input_tensor = np.where(input_tensor >= model.threshold,
+                            input_tensor, 0)
     # Limit the range between 0 and 1
-    input_tensor = torch.tanh(input_tensor)
+    input_tensor = np.tanh(input_tensor)
 
-    return (input_tensor.cpu().detach().numpy(),
-            output_after.cpu().detach().numpy(),
+    # print('Memory after optimization:',
+    #       torch.cuda.memory_allocated(device) / 1e9, 'GB')
+
+    return (input_tensor, output_after,
             act_loss, out_reg_loss, in_reg_loss, input_snapshots)
 
 
@@ -552,7 +571,7 @@ def activations_to_df(inprop, opt_in, out, sensory_indices, inidx_mapping=None, 
     This function takes the direct connectivity matrix (inprop), optimal input neuron activity, output neuron activity, indices for sensory neurons, and mapping between input and output indices to groups. It generates a dataframe that represents the paths through the network layers.
 
     Args:
-        inprop (scipy.sparse matrix or numpy.ndarray): Matrix representing the synaptic strengths 
+        inprop (scipy.sparse matrix or numpy.ndarray): Matrix representing the synaptic strengths
             between neurons, can be dense or sparse. Presynaptic is in the rows, postsynaptic in the columns.
         opt_in (numpy.ndarray): A 2D array representing optimal input to the network.
         out (numpy.ndarray): A 2D array representing the output from the network. The second dimension represents timepoints.
