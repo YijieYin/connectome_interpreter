@@ -398,10 +398,11 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
         import nglscenes as ngl
     except ImportError:
         raise ImportError(
-            "To use this function, please install the package by running 'pip3 install git+https://github.com/schlegelp/nglscenes@main]'")
+            "To use this function, please install the package by running 'pip3 install git+https://github.com/schlegelp/nglscenes@main'")
 
     # define a scene if not given:
     if scene == None:
+        no_scene_provided = True
         # Initialize a scene
         scene = ngl.Scene()
         scene['layout'] = '3d'
@@ -418,7 +419,6 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
         fafb_layer['selectedAlpha'] = 0.55
         fafb_layer['segmentColors'] = {'1': '#cacdd8'}
         fafb_layer['colorSeed'] = 778769298
-        scene.add_layers(fafb_layer)
 
         # and the neuropil layer with names
         np_layer = ngl.SegmentationLayer(source='precomputed://gs://neuroglancer-fafb-data/elmr-data/FAFBNP.surf/mesh#type=mesh',
@@ -426,7 +426,6 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
         np_layer['segments'] = [str(num) for num in range(0, 79)]
         np_layer['visible'] = False
         np_layer['objectAlpha'] = 0.17
-        scene.add_layers(np_layer)
 
     # Define a list of colors optimized for human perception on a dark background
     colors = ['#ff6b6b', '#f06595', '#cc5de8', '#845ef7', '#5c7cfa', '#339af0', '#22b8cf', '#20c997', '#51cf66', '#94d82d', '#fcc419', '#4ecdc4',
@@ -440,9 +439,10 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
 
     scene['layout'] = '3d'
 
-    source = 'precomputed://gs://flywire_v141_m783'
+    source = ['precomputed://gs://flywire_v141_m783',
+              'precomputed://https://flyem.mrc-lmb.cam.ac.uk/flyconnectome/dynann/flytable-info-783-all']
 
-    for column in df.columns:
+    for i, column in enumerate(df.columns):
         color = random.choice(colors)
         cmap = mcl.LinearSegmentedColormap.from_list(
             "custom_cmap", ["white", color])
@@ -459,24 +459,34 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
             str(root_id): mcl.to_hex(cmap(colour_saturation + (1-colour_saturation)*value.values[0]))
             for root_id, value in df_group.iterrows()
         }
+        # only the first layer is visible
+        if i == 0:
+            layer['visible'] = True
+        else:
+            layer['visible'] = False
+
         if include_postsynaptic_neuron:
             layer['segments'].append(str(df_group.columns[0]))
             layer['segmentColors'][str(df_group.columns[0])] = '#43A7FF'
 
         scene.add_layers(layer)
 
+    if no_scene_provided:
+        # add FAFB and NP layers at the end
+        scene.add_layers(fafb_layer)
+        scene.add_layers(np_layer)
+
     return scene.url
 
 
 def get_activations(array, global_indices, idx_map=None, top_n=None, threshold=None):
     """
-    Identifies the top activated neurons for each column in the array,
-    either by number (top n) or by a minimum activation threshold, or both.
+    Get activation for neurons (in rows) in `array` for each time step (in columns). Optionally group neurons by `idx_map`, and filter by `top_n` or `threshold`.
 
     Args:
         array (np.ndarray): 2D array of neuron activations, where rows represent neurons
             and columns represent different time steps.
-        global_indices (int, list, set, np.ndarray, pd.Series): Array of global neuron indices corresponding to the rows of the array.
+        global_indices (int, list, set, np.ndarray, pd.Series): Array of global neuron indices corresponding to keys in `idx_map`. 
         idx_map (dict, optional): Mapping from neuron index (`global_indices`) to neuron identifier. If not None, and if multiple neurons map to the same identifier, the activations are averaged. Defaults to None.
         top_n (int, optional): Number of top activations to return for each column. If None,
             all activations above the threshold are returned. Defaults to None.
@@ -506,6 +516,7 @@ def get_activations(array, global_indices, idx_map=None, top_n=None, threshold=N
         # these are global indices in the all-to-all connectivity
 
         column_values = array[:, col]
+        local_indices = np.asarray(range(len(column_values)))
 
         # Filter activations by threshold if provided
         if threshold is not None:
@@ -519,42 +530,41 @@ def get_activations(array, global_indices, idx_map=None, top_n=None, threshold=N
 
             if thresh > 0:
                 # these are local indices
-                filtered_indices = np.where(column_values >= thresh)[0]
-                # these are global indices
-                threshold_indices = indices[filtered_indices]
-            else:
-                threshold_indices = indices
-        else:
-            threshold_indices = indices
+                local_indices -= np.where(column_values < thresh)[0]
 
         # Sort the filtered activations
-        # these are the local indices corresponding to only sensory/non-sensory neurons, but not both
+        # these are the local indices
         sorted_indices = np.argsort(
             column_values)[-top_n:] if top_n is not None else np.argsort(column_values)
-        # these are global indices
-        topn_indices = indices[sorted_indices]
 
-        selected = np.intersect1d(threshold_indices, topn_indices)
+        # get intersection of sorted_indices and local_indices, in the same order as sorted_indices
+        selected_local = [
+            index for index in sorted_indices if index in local_indices]
+        selected_global = indices[selected_local]
 
         # Build the result dictionary
         if idx_map is None:
             result[col] = {idx: column_values[global_to_local_map[idx]]
-                           for idx in selected}
+                           for idx in selected_global}
         else:
-            # initialise a zero dict
-            result[col] = {idx_map[idx]: [] for idx in selected}
-            # calculate the average
-            for idx in selected:
+            # initialise a dict of empty lists
+            result[col] = {idx_map[idx]: [] for idx in selected_global}
+
+            for idx in selected_global:
                 result[col][idx_map[idx]].append(
                     column_values[global_to_local_map[idx]])
+            # grouped indices by idx_map
             new_indices = result[col].keys()
+            # calculate the average
             result[col] = {idx: np.mean(result[col][idx])
                            for idx in new_indices}
 
     return result
 
 
-def plot_layered_paths(path_df, figsize=(10, 8), priority_indices=None, sort_by_activation=False, fraction=0.03, pad=0.02):
+def plot_layered_paths(path_df, figsize=(10, 8), priority_indices=None, sort_by_activation=False,
+                       fraction=0.03, pad=0.02, weight_decimals=2,
+                       neuron_to_sign=None, sign_color_map={1: 'red', -1: 'blue'}):
     """
     Plots a directed graph of layered paths with optional node coloring based on activation values.
 
@@ -575,6 +585,9 @@ def plot_layered_paths(path_df, figsize=(10, 8), priority_indices=None, sort_by_
         sort_by_activation (bool, optional): A flag to sort the nodes based on their activation values (after grouping by priority). Defaults to False.
         fraction (float, optional): The fraction of the figure width to use for the colorbar. Defaults to 0.03.
         pad (float, optional): The padding between the colorbar and the plot. Defaults to 0.02.
+        weight_decimals (int, optional): The number of decimal places to display for edge weights. Defaults to 2.
+        neuron_to_sign (dict, optional): A dictionary mapping neuron names (as they appear in path_df) to their signs (e.g. {'KCg-m': 1, 'Delta7': -1}). Defaults to None.
+        sign_color_map (dict, optional): A dictionary mapping neuron signs to colors. Defaults to red for excitatory, and blue for inhibitory. Edges are in lightgrey by default.
 
     Returns:
         None: This function does not return a value. It generates a plot using matplotlib.
@@ -637,24 +650,37 @@ def plot_layered_paths(path_df, figsize=(10, 8), priority_indices=None, sort_by_
         node_colors = [color_map(norm(G.nodes[node]['activation']))
                        for node in G.nodes()]
 
+    # Edge colors based on neuron signs
+    default_color = 'lightgrey'  # Default edge color
+
+    # specify edge colour based on pre-neuron sign, if available
+    edge_colors = []
+    for u, _ in G.edges():
+        pre_neuron = labels[u]
+        if neuron_to_sign and pre_neuron in neuron_to_sign:
+            edge_colors.append(sign_color_map.get(
+                neuron_to_sign[pre_neuron], default_color))
+        else:
+            edge_colors.append(default_color)
+
     # Plot the graph
-    fig, ax = plt.subplots(figsize=figsize)
+    _, ax = plt.subplots(figsize=figsize)
     if ('pre_activation' in path_df.columns) & ('post_activation' in path_df.columns):
         nx.draw(G, pos=positions,
                 labels=labels,
                 with_labels=True, node_size=100,
                 node_color=node_colors,
                 arrows=True, arrowstyle='-|>', arrowsize=10,
-                font_size=8, width=widths, edge_color='lightgrey', ax=ax)
+                font_size=8, width=widths, edge_color=edge_colors, ax=ax)
         plt.colorbar(plt.cm.ScalarMappable(
             norm=norm, cmap=color_map), ax=ax, label='Activation', fraction=fraction, pad=pad)
     else:
         nx.draw(G, pos=positions,
                 labels=labels,
                 with_labels=True, node_size=100,
-                node_color='lightblue', arrows=True, arrowstyle='-|>', arrowsize=10, font_size=8, width=widths, ax=ax)
+                node_color='lightblue', arrows=True, arrowstyle='-|>', arrowsize=10, font_size=8, width=widths, ax=ax, edge_color=edge_colors)
 
-    edge_labels = {(u, v): f'{data["weight"]:.2f}' for u,
+    edge_labels = {(u, v): f'{data["weight"]:.{weight_decimals}f}' for u,
                    v, data in G.edges(data=True)}
     nx.draw_networkx_edge_labels(G, pos=positions, edge_labels=edge_labels,
                                  #  font_color='red'
