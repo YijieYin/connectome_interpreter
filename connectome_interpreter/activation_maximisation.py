@@ -118,7 +118,8 @@ class MultilayeredNetwork(nn.Module):
 
 
 def activation_maximisation(
-        model, selected_neurons_per_layer: Dict[int, List[int]],
+        model, neurons_to_activate: Dict[int, List[int]],
+        neurons_to_deactivate=None,
         input_tensor=None,
         num_iterations=100, learning_rate=0.4,
         in_regularisation_lambda=0.1, custom_in_regularisation: Callable[[torch.Tensor], torch.Tensor] = None,
@@ -135,8 +136,10 @@ def activation_maximisation(
 
     Args:
         model: A PyTorch model with `activations`, `sensory_indices`, and `threshold` attributes.
-        selected_neurons_per_layer (Dict[int, List[int]]): A dictionary mapping from layer indices to lists of neuron indices
+        neurons_to_activate (Dict[int, List[int]]): A dictionary mapping from layer indices to lists of neuron indices
             whose activations are to be maximized.
+        neurons_to_deactivate (Dict[int, List[int]]): A dictionary mapping from layer indices to lists of neuron indices
+            whose activations are to be minimized. Defaults to None.
         input_tensor (torch.Tensor, optional): The initial tensor to optimize. If None, a random tensor is created.
             Defaults to None.
         num_iterations (int, optional): The number of iterations to run the optimization for. Defaults to 100.
@@ -228,25 +231,37 @@ def activation_maximisation(
 
         # Calculate activation loss
         activation_loss = torch.tensor(0.0, device=input_tensor.device)
-
-        for layer_index, neuron_indices in selected_neurons_per_layer.items():
+        for layer_index, neuron_indices in neurons_to_activate.items():
             # Ensure layer index is valid
             if layer_index < model.activations.shape[1]:
                 # Get activations for this layer
                 layer_activations = model.activations[:, layer_index]
                 # Negative sign because we want to maximize activation
                 # Only select activations from specified neurons
-                # layer_activations is now a numpy array
                 activation_loss -= torch.mean(
                     layer_activations[neuron_indices])
+            else:
+                print(f"Layer index {layer_index} is invalid. Skipping.")
         # in the end, activation loss is the sum of mean activation across layers.
+
+        silence_loss = torch.tensor(0.0, device=input_tensor.device)
+        if neurons_to_deactivate is not None:
+            for layer_index, neuron_indices in neurons_to_deactivate.items():
+                # Ensure layer index is valid
+                if layer_index < model.activations.shape[1]:
+                    # Get activations for this layer
+                    layer_activations = model.activations[:, layer_index]
+                    # Only select activations from specified neurons
+                    silence_loss += torch.mean(
+                        layer_activations[neuron_indices])
 
         out_regularisation_loss = out_regularisation_lambda * torch.mean(
             model.activations)
         # Apply custom regularisation
         in_regularisation_loss = in_regularisation_lambda * custom_in_regularisation(
             input_tensor)
-        loss = activation_loss + in_regularisation_loss + out_regularisation_loss
+        loss = activation_loss + silence_loss + \
+            in_regularisation_loss + out_regularisation_loss
         losses.append(loss.item())
 
         if early_stopping and (iteration > n_runs):
@@ -256,6 +271,7 @@ def activation_maximisation(
 
         if wandb:
             dct = {"activation_loss": activation_loss.item(),
+                   "silence_loss": silence_loss.item(),
                    "in_regularisation_loss": in_regularisation_loss.item(),
                    'out_regularisation_loss': out_regularisation_loss.item(),
                    "loss": loss.item()}
@@ -272,7 +288,7 @@ def activation_maximisation(
         # Optional: Print information about the optimization process
         if print_output and iteration % 10 == 0:  # Print every 10 iterations
             print(
-                f"Iteration {iteration}: Activation Loss = {activation_loss.item()}, Input regularization Loss = {in_regularisation_loss.item()}, Output regularization Loss = {out_regularisation_loss.item()}")
+                f"Iteration {iteration}: Activation Loss = {activation_loss.item()}, De-activation loss = {silence_loss.item()}, Input regularization Loss = {in_regularisation_loss.item()}, Output regularization Loss = {out_regularisation_loss.item()}")
 
         if report_memory_usage and iteration % 10 == 0:
             print(f'GPU memory at iteration {iteration}:', torch.cuda.memory_allocated(
@@ -413,7 +429,7 @@ def activation_maximisation(
 
 
 # def activation_maximisation(
-#         model, selected_neurons_per_layer: Dict[int, List[int]],
+#         model, neurons_to_activate: Dict[int, List[int]],
 #         input_tensor=None,
 #         num_iterations=300, learning_rate=0.4,
 #         in_regularisation_lambda=0.1, custom_in_regularisation: Callable[[torch.Tensor], torch.Tensor] = None,
@@ -430,7 +446,7 @@ def activation_maximisation(
 
 #     Args:
 #         model: A PyTorch model with `activations`, `sensory_indices`, and `threshold` attributes.
-#         selected_neurons_per_layer (Dict[int, List[int]]): A dictionary mapping from layer indices to lists of neuron indices
+#         neurons_to_activate (Dict[int, List[int]]): A dictionary mapping from layer indices to lists of neuron indices
 #             whose activations are to be maximized.
 #         input_tensor (torch.Tensor, optional): The initial tensor to optimize. If None, a random tensor is created.
 #             Defaults to None.
@@ -516,9 +532,9 @@ def activation_maximisation(
 #             input_snapshots.append(snapshot)
 
 #         activation_loss = torch.tensor(0.0, device=input_tensor.device)
-#         # Check if the model has an 'activations' attribute and the selected_neurons_per_layer is not empty
-#         if hasattr(model, 'activations') and selected_neurons_per_layer:
-#             for layer_index, neuron_indices in selected_neurons_per_layer.items():
+#         # Check if the model has an 'activations' attribute and the neurons_to_activate is not empty
+#         if hasattr(model, 'activations') and neurons_to_activate:
+#             for layer_index, neuron_indices in neurons_to_activate.items():
 #                 # first transform the neuron_indices to indices of non_sensory neurons only
 #                 non_sensory_only_indices = [
 #                     all_to_nonsensory_map[idx] for idx in neuron_indices]
@@ -584,7 +600,7 @@ def activations_to_df(inprop, opt_in, out, sensory_indices, inidx_mapping=None, 
     Args:
         inprop (scipy.sparse matrix or numpy.ndarray): Matrix representing the synaptic strengths
             between neurons, can be dense or sparse. Presynaptic is in the rows, postsynaptic in the columns.
-        opt_in (numpy.ndarray): A 2D array representing optimal input to the network.
+        opt_in (numpy.ndarray): A 2D array representing optimal input to the network. Neurons are in the rows, timepoints in the columns. Only the first timepoint is used, since `out` is expected to have activity of all neurons, including input neurons.
         out (numpy.ndarray): A 2D array representing the output from the network. The second dimension represents timepoints.
         sensory_indices (list of int): A list of indices corresponding to sensory neurons in `inprop`.
         inidx_mapping (dict, optional): A dictionary mapping indices in `inprop` to new indices. If None, indices are not remapped.
