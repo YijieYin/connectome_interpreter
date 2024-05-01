@@ -205,7 +205,7 @@ def add_first_n_matrices(matrices, n):
     return sum_matrix
 
 
-def result_summary(stepsn, inidx, outidx, inidx_map=None, outidx_map=None, display_output=True, sort_by_column=None, pre_in_column=False, display_threshold=0):
+def result_summary(stepsn, inidx, outidx, inidx_map=None, outidx_map=None, display_output=True, sort_by_column=None, pre_in_column=False, display_threshold=0, include_undefined_groups=False):
     """
     Generates a summary of connections between different types of neurons, 
     represented by their input and output indexes. The function calculates 
@@ -224,6 +224,7 @@ def result_summary(stepsn, inidx, outidx, inidx_map=None, outidx_map=None, displ
         sort_by_column (str or list, optional): the column name(s) to sort the result by. If none is provided, then sort by the first column. 
         pre_in_column (bool, optional): Whether to have the presynaptic neuron groups as columns. Defaults to False (pre in rows, post in columns).
         display_threshold (float, optional): The threshold for displaying the output. Defaults to 0.
+        include_undefined_groups (bool, optional): Whether to include undefined groups in the output. Defaults to False.
 
     Returns:
         pd.DataFrame: A dataframe representing the summed synaptic input from presynaptic neuron groups 
@@ -247,11 +248,19 @@ def result_summary(stepsn, inidx, outidx, inidx_map=None, outidx_map=None, displ
     else:
         matrix = stepsn[inidx, :][:, outidx]
 
+    if include_undefined_groups:
+        # fill the nan values in inidx_map (e.g. 17726: nan) and outidx_map with 'undefined'
+        inidx_map = {k: v if pd.notna(
+            v) else 'undefined' for k, v in inidx_map.items()}
+        outidx_map = {k: v if pd.notna(
+            v) else 'undefined' for k, v in outidx_map.items()}
+
     # Create the dataframe
     df = pd.DataFrame(data=matrix,
                       # choose what to group by here
-                      index=[inidx_map[key] for key in inidx],
-                      columns=[outidx_map[key] for key in outidx])
+                      # if idx is mapped to root_id, if root_id is kept as int64, the root_ids seem a bit messed up
+                      index=[str(inidx_map[key]) for key in inidx],
+                      columns=[str(outidx_map[key]) for key in outidx])
 
     # Sum across rows: presynaptic neuron is in the rows
     # summing across neurons of the same type: total amount of input from that type for the postsynaptic neuron
