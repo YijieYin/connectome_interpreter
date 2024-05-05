@@ -530,7 +530,8 @@ def get_activations(array, global_indices, idx_map=None, top_n=None, threshold=N
 
             if thresh > 0:
                 # these are local indices
-                local_indices -= np.where(column_values < thresh)[0]
+                local_indices = np.setdiff1d(
+                    local_indices, np.where(column_values < thresh)[0])
 
         # Sort the filtered activations
         # these are the local indices
