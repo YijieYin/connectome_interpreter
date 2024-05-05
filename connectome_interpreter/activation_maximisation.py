@@ -43,7 +43,7 @@ class MultilayeredNetwork(nn.Module):
         super(MultilayeredNetwork, self).__init__()
 
         # num_neurons x num_neurons = 18k * 18k, ~1.2GB
-        self.all_weights = torch.nn.parameter.Parameter(all_weights)
+        self.all_weights = all_weights  # this does not require grad
         self.sensory_indices = torch.tensor(
             sensory_indices)  # shape: vector of sensory indices. These are the ones we manipulate
         self.num_layers = num_layers
