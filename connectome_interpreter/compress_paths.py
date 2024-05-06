@@ -4,6 +4,7 @@
 import torch
 from tqdm import tqdm
 import pandas as pd
+import numpy as np
 import plotly.express as px
 from scipy.sparse import issparse
 import ipywidgets as widgets
@@ -14,7 +15,7 @@ from IPython.display import display
 from .utils import dynamic_representation, torch_sparse_where, to_nparray, tensor_to_csc
 
 
-def compress_paths(inprop, step_number, threshold=0, output_threshold=1e-4):
+def compress_paths(inprop, step_number, threshold=0, output_threshold=1e-4, root=False):
     """
     Performs iterative multiplication of a sparse matrix `inprop` for a specified number of steps, 
     applying thresholding to filter out values below a certain `threshold` to optimize memory usage 
@@ -32,6 +33,7 @@ def compress_paths(inprop, step_number, threshold=0, output_threshold=1e-4):
                                      Values below this threshold are set to zero. Defaults to 0.
         output_threshold (float, optional): The threshold value to apply to the final output, 
                                             used to reduce memory footprint. Defaults to 1e-4.
+        root (bool, optional): Whether to take the nth root of the output. This can be understood as "the average direct connection strength" (when root=True), as opposed to "the proportion of influence among all partners n steps away" (when root=False). Defaults to False.
 
     Returns:
         list: A list of scipy.sparse.csc_matrix objects, each representing connectivity from all neurons to all neurons n steps away. 
@@ -60,27 +62,30 @@ def compress_paths(inprop, step_number, threshold=0, output_threshold=1e-4):
         else:
             out_tensor = torch.matmul(out_tensor, inprop_tensor)
 
-            # # Downgrade the previous one to save memory
-            # steps_fast[-1] = torch.where(steps_fast[-1] >= output_threshold,
-            #                              steps_fast[-1], torch.tensor(0.0, device=device))
-            # steps_fast[-1] = steps_fast[-1].to_sparse()
-
         # Thresholding during matmul
         if threshold != 0:
             out_tensor = torch.where(
                 out_tensor >= threshold, out_tensor, torch.tensor(0.0, device=device))
+        # Dynamic representation based on density
+        # out_tensor = dynamic_representation(out_tensor)
 
-        # Thresholding for output
-        out_csc = torch.where(out_tensor >= output_threshold,
-                              out_tensor, torch.tensor(0.0, device=device))
+        if root:
+            out_csc = torch.pow(out_tensor, 1/(i+1))
+        else:
+            out_csc = out_tensor.clone()
+
+        if output_threshold > 0:
+            out_csc = torch_sparse_where(out_csc, output_threshold)
         out_csc = tensor_to_csc(out_csc.to('cpu'))
+        out_csc.eliminate_zeros()
+
         steps_fast.append(out_csc)
 
     torch.cuda.empty_cache()
     return steps_fast
 
 
-def compress_paths_signed(inprop, idx_to_sign, target_layer_number, threshold=0, output_threshold=1e-4):
+def compress_paths_signed(inprop, idx_to_sign, target_layer_number, threshold=0, output_threshold=1e-4, root=False):
     """
     Calculates the excitatory and inhibitory influences across specified layers of a neural network, using PyTorch for GPU acceleration. This function processes a connectivity matrix (where presynaptic neurons are represented by rows and postsynaptic neurons by columns) to distinguish and compute the influence of excitatory and inhibitory neurons at each layer.
 
@@ -90,6 +95,7 @@ def compress_paths_signed(inprop, idx_to_sign, target_layer_number, threshold=0,
         target_layer_number (int): The number of layers through which to calculate influences, starting from the second layer (with the first layer's influence, the direct connectivity, being defined by `inprop`).
         threshold (float, optional): A value to threshold the influences; influences below this value are set to zero, and not passed on in future layers. Defaults to 0.
         output_threshold (float, optional): A threshold for the final output to reduce memory usage, with values below this threshold set to zero. Defaults to 1e-4.
+        root (bool, optional): Whether to take the nth root of the output. This can be understood as "the average direct connection strength" (when root=True), as opposed to "the proportion of influence among all partners n steps away" (when root=False). Defaults to False.
 
     Returns:
         Tuple[List[scipy.sparse.csc_matrix], List[scipy.sparse.csc_matrix]]: Two lists of sparse matrices representing the excitatory and inhibitory influences, respectively, up to the specified target layer. 
@@ -137,30 +143,27 @@ def compress_paths_signed(inprop, idx_to_sign, target_layer_number, threshold=0,
             lni = dynamic_representation(lni_new)
             torch.cuda.empty_cache()
 
-        # steps_excitatory.append(lne)
-        # steps_inhibitory.append(lni)
+        # possible alternative implementation: first root and threshold, then move to CPU. But not sure if can root sparse tensor. So:
+        stepe_csc = tensor_to_csc(lne.to('cpu'))
+        stepi_csc = tensor_to_csc(lni.to('cpu'))
 
-        # Thresholding for output
-        stepe_csc = torch_sparse_where(lne, output_threshold)
-        stepe_csc = tensor_to_csc(stepe_csc.to('cpu'))
+        if root:
+            stepe_csc.data = np.power(stepe_csc.data, 1/(layer+1))
+            stepi_csc.data = np.power(stepi_csc.data, 1/(layer+1))
+
+        # then threshold
+        if output_threshold > 0:
+            stepe_csc.data = np.where(
+                stepe_csc.data >= output_threshold, stepe_csc.data, 0)
+            stepi_csc.data = np.where(
+                stepi_csc.data >= output_threshold, stepi_csc.data, 0)
+
+        stepe_csc.eliminate_zeros()
+        stepi_csc.eliminate_zeros()
+
         steps_excitatory.append(stepe_csc)
-
-        stepi_csc = torch_sparse_where(lni, output_threshold)
-        stepi_csc = tensor_to_csc(stepi_csc.to('cpu'))
         steps_inhibitory.append(stepi_csc)
 
-    #     # Downgrade previous matrices to save memory
-    #     if steps_excitatory:
-    #         steps_excitatory[-1] = torch_sparse_where(
-    #             steps_excitatory[-1], output_threshold).to_sparse()
-    #         steps_inhibitory[-1] = torch_sparse_where(
-    #             steps_inhibitory[-1], output_threshold).to_sparse()
-
-    # # Downgrade the last one to save memory
-    # steps_excitatory[-1] = torch_sparse_where(
-    #     steps_excitatory[-1], output_threshold).to_sparse()
-    # steps_inhibitory[-1] = torch_sparse_where(
-    #     steps_inhibitory[-1], output_threshold).to_sparse()
     torch.cuda.empty_cache()
 
     return steps_excitatory, steps_inhibitory
@@ -244,6 +247,9 @@ def result_summary(stepsn, inidx, outidx, inidx_map=None, outidx_map=None, displ
     outidx = to_nparray(outidx)
 
     if issparse(stepsn):
+        # if stepsn is coo, turn into csc
+        if stepsn.format == 'coo':
+            stepsn = stepsn.tocsc()
         matrix = stepsn[:, outidx][inidx, :].toarray()
     else:
         matrix = stepsn[inidx, :][:, outidx]
