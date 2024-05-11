@@ -688,3 +688,53 @@ def plot_layered_paths(path_df, figsize=(10, 8), priority_indices=None, sort_by_
                                  ax=ax)
     ax.set_ylim(0, 1)
     plt.show()
+
+
+def change_model_weights(model, df, mode, coefficient=0.1):
+    """
+    Change the weights of the model based on the provided DataFrame.
+    The DataFrame should contain columns 'pre' and 'post', which contain indices of the connectivity weights in model. The weights are modified proportional to: 
+    1. The similarity of pre and post activations (i.e. the sum of element-wise multiplication of activations across time), and 
+    2. The coefficient provided.
+    The 'mode' column should specify whether the weight change is ltp or ltd.
+
+    Args:
+        model (torch.nn.Module): The model containing the weights to change.
+        df (pd.DataFrame): A DataFrame containing the columns 'pre' and 'post'.
+        mode (str): The mode of weight change, either 'ltp' or 'ltd'.
+
+    Returns:
+        None: This function modifies the model weights in place.
+    """
+
+    df.loc[:, ['pre_local_idx']] = pd.factorize(df.pre)[0]
+    df.loc[:, ['post_local_idx']] = pd.factorize(df.post)[0]
+
+    # piggy back on matrix multiplication, and calculate between each pair of neurons:
+    # sum of unitary product of activity across timesteps
+    # then multiply this sum with the coefficient
+    weight_changes = torch.matmul(model.activations[df.pre.unique(), :],
+                                  model.activations.t()[:, df.post.unique()]) * coefficient
+    # only select the pairs present in the original ltd/ltp_df
+    mask = torch.zeros_like(
+        weight_changes, dtype=torch.bool, device=weight_changes.device)
+    mask[df.pre_local_idx.values[:, None], df.post_local_idx.values] = True
+    # the rest have no change
+    weight_changes[~mask] = 0
+
+    # take out the weights to change
+    # NOTE: all_weights have pre in the columns, post in the rows
+    weights_subset = model.all_weights[df.post.unique()[
+        :, None], df.pre.unique()]
+    # change the weights: keep the signs separate, strengthen (ltp) / weaken (ltd) the connection by using the absolute values
+    if mode == 'ltp':
+        # strengthen connectivity
+        weights_subset_abs = torch.abs(weights_subset) + weight_changes.t()
+    elif mode == 'ltd':
+        # weaken connectivity
+        weights_subset_abs = torch.abs(weights_subset) - weight_changes.t()
+    weights_subset = torch.sign(weights_subset) * \
+        torch.clamp(weights_subset_abs, 0)
+    # finally modify in the big weights matrix.
+    model.all_weights[df.post.unique()[:, None], df.pre.unique()
+                      ] = weights_subset
