@@ -9,7 +9,7 @@ from scipy.sparse import issparse
 from tqdm import tqdm
 
 from .compress_paths import result_summary
-from .utils import adjacency_df_to_el, get_activations
+from .utils import adjacency_df_to_el, get_activations, change_model_weights
 
 
 class MultilayeredNetwork(nn.Module):
@@ -124,6 +124,8 @@ def activation_maximisation(
         num_iterations=100, learning_rate=0.4,
         in_regularisation_lambda=0.1, custom_in_regularisation: Callable[[torch.Tensor], torch.Tensor] = None,
         out_regularisation_lambda=0.1,
+        ltd_df=None, ltd_coefficient=0.1,
+        ltp_df=None, ltp_coefficient=0.1,
         early_stopping=True, stopping_threshold=1e-6, n_runs=10,
         use_tqdm=True, print_output=True, report_memory_usage=False,
         device=None, wandb=True) -> Tuple[np.ndarray, np.ndarray, list, list]:
@@ -148,6 +150,10 @@ def activation_maximisation(
         custom_in_regularisation (Callable[[torch.Tensor], torch.Tensor], optional): A function that applies custom
             regularization to the `input_tensor`. Defaults to L1+L2 norm if None.
         out_regularisation_lambda (float, optional): The coefficient for punishing output neuron activation. Defaults to 0.1.
+        ltd_df (pd.DataFrame, optional): A DataFrame with columns 'pre' and 'post', which contain indices of the connectivity weights in model for long-term depression. Defaults to None.
+        ltd_coefficient (float, optional): The coefficient for long-term depression. Defaults to 0.1.
+        ltp_df (pd.DataFrame, optional): A DataFrame with columns 'pre' and 'post', which contain indices of the connectivity weights in model for long-term potentiation. Defaults to None.
+        ltp_coefficient (float, optional): The coefficient for long-term potentiation. Defaults to 0.1.
         early_stopping (bool, optional): Whether to stop the optimization early if the difference between the biggest and the smallest loss within the last n_runs falls below `stopping_threshold`.
             Defaults to True.
         stopping_threshold (float, optional): The threshold for early stopping. Defaults to 1e-6.
@@ -295,6 +301,13 @@ def activation_maximisation(
                 device) / 1e9, 'GB')
 
         torch.cuda.empty_cache()
+
+        # plasticity
+        if ltd_df is not None:
+            change_model_weights(model, ltd_df, 'ltd', ltd_coefficient)
+
+        if ltp_df is not None:
+            change_model_weights(model, ltp_df, 'ltp', ltp_coefficient)
 
     output_after = model(input_tensor).cpu().detach().numpy()
     # first bring to cpu to save gpu memory
