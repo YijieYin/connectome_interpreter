@@ -169,7 +169,9 @@ def create_layered_positions(df, priority_indices=None, sort_dict=None):
     name_to_idx.update(dict(zip(df.post_layer, df.post)))
 
     for layer in range(0, number_of_layers + 1):
-        layer_name = [item for item in all_names if '_'+str(layer) in item]
+        # if the last characters match
+        layer_name = [item for item in all_names if '_' +
+                      str(layer) == item[-len(str(layer))-1:]]
         if sort_dict is not None:
             layer_name = sorted(layer_name, key=lambda x: sort_dict[x])
 
