@@ -207,6 +207,7 @@ def modify_coo_matrix(sparse_matrix, input_idx=None, output_idx=None, value=None
 
     # Convert sparse matrix to COO format for direct edge manipulation
     original_format = sparse_matrix.getformat()
+    original_dtype = sparse_matrix.dtype
     if original_format != 'coo':
         sparse_matrix = sparse_matrix.tocoo()
 
@@ -263,7 +264,7 @@ def modify_coo_matrix(sparse_matrix, input_idx=None, output_idx=None, value=None
 
     # Convert back to original sparse matrix format
     updated_matrix = coo_matrix(
-        (edges['value'], (edges['input_idx'], edges['output_idx'])), shape=sparse_matrix.shape)
+        (edges['value'].astype(original_dtype), (edges['input_idx'], edges['output_idx'])), shape=sparse_matrix.shape)
 
     # if re_normalize:
     #     print("Re-normalizing updated columns...")
