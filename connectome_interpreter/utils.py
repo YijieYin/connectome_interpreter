@@ -12,8 +12,11 @@ import networkx as nx
 
 
 def dynamic_representation(tensor, density_threshold=0.2):
-    """Convert tensor to sparse if density is below threshold, otherwise to dense."""
-    nonzero_elements = torch.nonzero(tensor).size(0)
+    """Convert tensor to sparse if density is below threshold, otherwise to dense. This might be memory intensive."""
+    # nonzero_elements = torch.nonzero(tensor).size(0)
+    # .nonzero() doesn't work if the tensor has more than INT_MAX elements
+    # Calculate the number of non-zero elements without using torch.nonzero()
+    nonzero_elements = tensor.count_nonzero().item()
 
     # to_sparse() doesn't support operations on tensors with more than INT_MAX (2,147,483,647) elements
     if nonzero_elements < 2147483647:
@@ -76,12 +79,10 @@ def tensor_to_csc(tensor):
         shape = tensor.shape
         coo = coo_matrix((values, (indices[0], indices[1])), shape=shape)
     else:
-        # Convert dense tensor to COO directly, necessary if the tensor is not sparse
-        indices = torch.nonzero(tensor).t()
-        values = tensor[indices[0], indices[1]]
-        shape = tensor.shape
-        coo = coo_matrix(
-            (values.numpy(), (indices[0].numpy(), indices[1].numpy())), shape=shape)
+        coo = coo_matrix(tensor.numpy())
+        coo.eliminate_zeros()
+        # .nonzero() is too memory consuming for large tensors
+        # memory usage can be further reduced by first spliting the tensor/COO matrix into smaller chunks, for future work
 
     return coo.tocsc()
 

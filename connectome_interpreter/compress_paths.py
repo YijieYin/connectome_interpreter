@@ -19,7 +19,7 @@ def compress_paths(inprop, step_number, threshold=0, output_threshold=1e-4, root
     """
     Performs iterative multiplication of a sparse matrix `inprop` for a specified number of steps, 
     applying thresholding to filter out values below a certain `threshold` to optimize memory usage 
-    and computation speed. The function is optimized to run on GPU if available. 
+    and computation speed. The function is optimized to run on GPU if available. It needs >= size_of_inprop * 3 amount of GPU memory, for matrix multiplication, and thresholding. 
 
     This function multiplies the connectivity matrix (input in rows; output in columns) `inprop` with itself `step_number` times, 
     with each step's result being thresholded to zero out elements below a given threshold. 
@@ -56,32 +56,33 @@ def compress_paths(inprop, step_number, threshold=0, output_threshold=1e-4, root
 
     inprop_tensor = torch.tensor(inprop.toarray(), device=device)
 
-    for i in tqdm(range(step_number)):
-        if i == 0:
-            out_tensor = inprop_tensor
-        else:
-            out_tensor = torch.matmul(out_tensor, inprop_tensor)
+    with torch.no_grad():
+        for i in tqdm(range(step_number)):
+            if i == 0:
+                out_tensor = inprop_tensor.clone()
+            else:
+                out_tensor = torch.matmul(out_tensor, inprop_tensor)
 
-        # Thresholding during matmul
-        if threshold != 0:
-            out_tensor = torch.where(
-                out_tensor >= threshold, out_tensor, torch.tensor(0.0, device=device))
-        # Dynamic representation based on density
-        # out_tensor = dynamic_representation(out_tensor)
+            # Thresholding during matmul
+            if threshold != 0:
+                out_tensor = torch.where(
+                    out_tensor >= threshold, out_tensor, torch.tensor(0.0, device=device))
 
-        if root:
-            out_csc = torch.pow(out_tensor, 1/(i+1))
-        else:
-            out_csc = out_tensor.clone()
+            # Convert to csc for output
+            out_csc = tensor_to_csc(out_tensor.to('cpu'))
+            out_csc.eliminate_zeros()
 
-        if output_threshold > 0:
-            out_csc = torch_sparse_where(out_csc, output_threshold)
-        out_csc = tensor_to_csc(out_csc.to('cpu'))
-        out_csc.eliminate_zeros()
+            if root:
+                out_csc.data = np.power(out_csc.data, 1/(i+1))
 
-        steps_fast.append(out_csc)
+            if output_threshold > 0:
+                out_csc.data = np.where(
+                    out_csc.data >= output_threshold, out_csc.data, 0)
+                out_csc.eliminate_zeros()
 
-    torch.cuda.empty_cache()
+            steps_fast.append(out_csc)
+            torch.cuda.empty_cache()
+
     return steps_fast
 
 
