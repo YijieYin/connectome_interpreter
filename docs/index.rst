@@ -13,6 +13,7 @@ Welcome to Connectome Interpreter's documentation!
    modules/activation_maximisation
    modules/compress_paths
    modules/path_finding 
+   modules/external_map
    modules/utils
 
 Indices and tables
