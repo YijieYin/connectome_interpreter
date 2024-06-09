@@ -300,3 +300,32 @@ def filter_paths(df, threshold=0, necessary_intermediate=None):
 
         df = remove_excess_neurons(df)
     return df
+
+
+def group_paths(paths, pre_group, post_group):
+    """
+    Group the paths by user-specified variable (e.g. cell type, cell class etc.). Weights are summed across presynaptic neurons of the same group and averaged across postsynaptic neurons of the same group.
+
+    Args:
+        paths (pd.DataFrame): The DataFrame containing the path data, looking like the output from `find_path_iteratively()`.
+        pre_group (dict): A dictionary that maps pre-synaptic neuron indices to their respective group.
+        post_group (dict): A dictionary that maps post-synaptic neuron indices to their respective group.
+
+    Returns:
+        pd.DataFrame: The grouped DataFrame containing the path data, including the layer number, pre-synaptic index, post-synaptic index, and weight.
+    """
+
+    # add cell type information
+    paths['pre_type'] = paths.pre.map(pre_group)
+    paths['post_type'] = paths.post.map(post_group)
+
+    # sum across presynaptic neurons of the same type
+    paths = paths.groupby(
+        ['layer', 'pre_type', 'post', 'post_type']).weight.sum().reset_index()
+    # average across postsynaptic neurons of the same type
+    paths = paths.groupby(
+        ['layer', 'pre_type', 'post_type']).weight.mean().reset_index()
+    paths.rename(columns={'pre_type': 'pre',
+                 'post_type': 'post'}, inplace=True)
+
+    return paths
