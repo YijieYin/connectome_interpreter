@@ -369,7 +369,7 @@ def to_nparray(input_data):
     return np.unique(cleaned_array)
 
 
-def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=None, normalise_within_column=True, include_postsynaptic_neuron=False):
+def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=None, normalise_within_column=True, include_postsynaptic_neuron=False, diff_colours_per_layer=False, colors=None, colormap='viridis'):
     """
     Generates a Neuroglancer link with layers, corresponding to each column in the df. The function
     processes a dataframe, adding colour information to each neuron,
@@ -385,6 +385,9 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
         scene (ngl.Scene, optional): A Neuroglancer scene object from nglscenes package. You can read a scene from clipboard like `scene = Scene.from_clipboard()`. 
         normalise_within_column (bool, optional): Whether to normalise the values within each column (the alternative is normalising by the min and max value in the entire dataframe). Default to True.
         include_postsynaptic_neuron (bool, optional): Whether to include the postsynaptic neuron (column names of `df`) in the visualisation. Default to False.
+        diff_colours_per_layer (bool, optional): Whether to use different colours for each layer. Default to False.
+        colors (list, optional): A list of colours to use for the neurons in each layer, if `diff_colours_per_layer` is True. If None, a default list of colours is used. Default to None.
+        colormap (str, optional): The name of the colormap to use for colouring the neurons in every layer, if `diff_colours_per_layer` is False. Default to 'viridis'.
 
     Returns:
         str: A URL to the generated Neuroglancer scene.
@@ -430,8 +433,9 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
         np_layer['objectAlpha'] = 0.17
 
     # Define a list of colors optimized for human perception on a dark background
-    colors = ['#ff6b6b', '#f06595', '#cc5de8', '#845ef7', '#5c7cfa', '#339af0', '#22b8cf', '#20c997', '#51cf66', '#94d82d', '#fcc419', '#4ecdc4',
-              '#ffe66d', '#7bed9f', '#a9def9', '#f694c1', '#c7f0bd', '#ffc5a1', '#ff8c94', '#ffaaa6', '#ffd3b5', '#a8e6cf', '#a6d0e4', '#c1beff', '#f5b0cb']
+    if colors is None:
+        colors = ['#ff6b6b', '#f06595', '#cc5de8', '#845ef7', '#5c7cfa', '#339af0', '#22b8cf', '#20c997', '#51cf66', '#94d82d', '#fcc419', '#4ecdc4',
+                  '#ffe66d', '#7bed9f', '#a9def9', '#f694c1', '#c7f0bd', '#ffc5a1', '#ff8c94', '#ffaaa6', '#ffd3b5', '#a8e6cf', '#a6d0e4', '#c1beff', '#f5b0cb']
 
     # Normalize the values in the DataFrame
     if normalise_within_column:
@@ -445,9 +449,12 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
               'precomputed://https://flyem.mrc-lmb.cam.ac.uk/flyconnectome/dynann/flytable-info-783-all']
 
     for i, column in enumerate(df.columns):
-        color = random.choice(colors)
-        cmap = mcl.LinearSegmentedColormap.from_list(
-            "custom_cmap", ["white", color])
+        if diff_colours_per_layer:
+            color = random.choice(colors)
+            cmap = mcl.LinearSegmentedColormap.from_list(
+                "custom_cmap", ["white", color])
+        else:
+            cmap = plt.get_cmap(colormap)
 
         df_group = df_norm[[column]]
         if no_connection_invisible:
@@ -456,11 +463,17 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
         layer = ngl.SegmentationLayer(source=source, name=str(column))
 
         layer['segments'] = list(df_group.index.astype(str))
-        layer['segmentColors'] = {
-            # trick from Claud to make the colours more saturated
-            str(root_id): mcl.to_hex(cmap(colour_saturation + (1-colour_saturation)*value.values[0]))
-            for root_id, value in df_group.iterrows()
-        }
+        if diff_colours_per_layer:
+            layer['segmentColors'] = {
+                # trick from Claud to make the colours more saturated
+                str(root_id): mcl.to_hex(cmap(colour_saturation + (1-colour_saturation)*value.values[0]))
+                for root_id, value in df_group.iterrows()
+            }
+        else:
+            layer['segmentColors'] = {
+                str(root_id): mcl.to_hex(cmap(value.values[0]))
+                for root_id, value in df_group.iterrows()
+            }
         # only the first layer is visible
         if i == 0:
             layer['visible'] = True
@@ -692,51 +705,125 @@ def plot_layered_paths(path_df, figsize=(10, 8), priority_indices=None, sort_by_
     plt.show()
 
 
-def change_model_weights(model, df, mode, coefficient=0.1):
+# def change_model_weights(model, df, mode, coefficient=0.1):
+#     """
+#     Change the weights of the model based on the provided DataFrame.
+#     The DataFrame should contain columns 'pre' and 'post', which contain indices of the connectivity weights in model. The weights are modified proportional to:
+#     1. The similarity of pre and post activations (i.e. the sum of element-wise multiplication of activations across time), and
+#     2. The coefficient provided.
+#     The 'mode' column should specify whether the weight change is ltp or ltd.
+
+#     Args:
+#         model (torch.nn.Module): The model containing the weights to change.
+#         df (pd.DataFrame): A DataFrame containing the columns 'pre' and 'post'.
+#         mode (str): The mode of weight change, either 'ltp' or 'ltd'.
+
+#     Returns:
+#         None: This function modifies the model weights in place.
+#     """
+
+#     df.loc[:, ['pre_local_idx']] = pd.factorize(df.pre)[0]
+#     df.loc[:, ['post_local_idx']] = pd.factorize(df.post)[0]
+
+#     # piggy back on matrix multiplication, and calculate between each pair of neurons:
+#     # sum of unitary product of activity across timesteps
+#     # then multiply this sum with the coefficient
+#     weight_changes = torch.matmul(model.activations[df.pre.unique(), :],
+#                                   model.activations.t()[:, df.post.unique()]) * coefficient
+#     # only select the pairs present in the original ltd/ltp_df
+#     mask = torch.zeros_like(
+#         weight_changes, dtype=torch.bool, device=weight_changes.device)
+#     mask[df.pre_local_idx.values[:, None], df.post_local_idx.values] = True
+#     # the rest have no change
+#     weight_changes[~mask] = 0
+
+#     # take out the weights to change
+#     # NOTE: all_weights have pre in the columns, post in the rows
+#     weights_subset = model.all_weights[df.post.unique()[
+#         :, None], df.pre.unique()]
+#     # change the weights: keep the signs separate, strengthen (ltp) / weaken (ltd) the connection by using the absolute values
+#     if mode == 'ltp':
+#         # strengthen connectivity
+#         weights_subset_abs = torch.abs(weights_subset) + weight_changes.t()
+#     elif mode == 'ltd':
+#         # weaken connectivity
+#         weights_subset_abs = torch.abs(weights_subset) - weight_changes.t()
+#     weights_subset = torch.sign(weights_subset) * \
+#         torch.clamp(weights_subset_abs, 0)
+#     # finally modify in the big weights matrix.
+#     model.all_weights[df.post.unique()[:, None], df.pre.unique()
+#                       ] = weights_subset
+
+
+def change_model_weights(model, df, mode, coefficient=0.1, offset=0, normalise=True):
     """
     Change the weights of the model based on the provided DataFrame.
-    The DataFrame should contain columns 'pre' and 'post', which contain indices of the connectivity weights in model. The weights are modified proportional to: 
+    The DataFrame should contain columns 'pre' and 'post', and optionally 'conditional', which contain indices of the connectivity weights in model. The weights are modified proportional to: 
     1. The similarity of pre and post activations (i.e. the sum of element-wise multiplication of activations across time), and 
     2. The coefficient provided.
+    3. The similarity of conditional activations (if provided). `offset` specifies the time lag between the conditional neurons and the pre and post neurons.
     The 'mode' column should specify whether the weight change is ltp or ltd.
 
     Args:
         model (torch.nn.Module): The model containing the weights to change.
         df (pd.DataFrame): A DataFrame containing the columns 'pre' and 'post'.
         mode (str): The mode of weight change, either 'ltp' or 'ltd'.
+        coefficient (float): The coefficient to multiply the weight change by. Can be thought of as the 'strength of plasticity'. Default to 0.1.
+        offset (int): Offset between the conditional neurons and the pre and post neurons. Default to 0. -1 means the conditional neurons' activity precede the pre and post neurons, and the activity of conditional neurons at time t is related to the activity of pre and post neurons at time t+1.
+        normalise (bool): Whether to normalise the weights after changing them, such that absolute weights to postsynaptic neuron sums to 1. Default to True.
 
     Returns:
         None: This function modifies the model weights in place.
     """
 
-    df.loc[:, ['pre_local_idx']] = pd.factorize(df.pre)[0]
-    df.loc[:, ['post_local_idx']] = pd.factorize(df.post)[0]
+    if 'conditional' in df.columns:
+        # first group by unique combinations of pre and post
+        # Create a pivot table to get the mean conditional activations for each unique pre and post combination
+        pivot_table = df.pivot_table(
+            index=['pre', 'post'], values='conditional', aggfunc=list).reset_index()
+        # get the average activation of the conditionals across timepoints
+        conditional_acts = torch.stack([torch.mean(
+            model.activations[torch.tensor(cond)], dim=0) for cond in pivot_table.conditional.values])
+        # then multiply with the pre and post activations, and the coefficeint
+        if offset == 0:
+            weight_change = torch.mean(
+                # the activation of the conditional neurons relates positively to the plasticity
+                model.activations[pivot_table.pre, :] * \
+                model.activations[pivot_table.post, :] * conditional_acts,
+                dim=1) * coefficient
+        else:
+            weight_change = torch.mean(
+                # the activation of the conditional neurons relates positively to the plasticity
+                model.activations[pivot_table.pre, -offset:] * \
+                model.activations[pivot_table.post, - \
+                                  offset:] * conditional_acts[:, :offset],
+                dim=1) * coefficient
 
-    # piggy back on matrix multiplication, and calculate between each pair of neurons:
-    # sum of unitary product of activity across timesteps
-    # then multiply this sum with the coefficient
-    weight_changes = torch.matmul(model.activations[df.pre.unique(), :],
-                                  model.activations.t()[:, df.post.unique()]) * coefficient
-    # only select the pairs present in the original ltd/ltp_df
-    mask = torch.zeros_like(
-        weight_changes, dtype=torch.bool, device=weight_changes.device)
-    mask[df.pre_local_idx.values[:, None], df.post_local_idx.values] = True
-    # the rest have no change
-    weight_changes[~mask] = 0
+    else:
+        weight_change = torch.mean(
+            model.activations[df.pre, :] * model.activations[df.post, :], dim=1) * coefficient
+    # shape of weight_change is the same as the number of rows in the df
 
     # take out the weights to change
     # NOTE: all_weights have pre in the columns, post in the rows
-    weights_subset = model.all_weights[df.post.unique()[
-        :, None], df.pre.unique()]
+    weights_subset = model.all_weights[df.post, df.pre]
     # change the weights: keep the signs separate, strengthen (ltp) / weaken (ltd) the connection by using the absolute values
     if mode == 'ltp':
         # strengthen connectivity
-        weights_subset_abs = torch.abs(weights_subset) + weight_changes.t()
+        weights_subset_abs = torch.abs(weights_subset) + weight_change.t()
     elif mode == 'ltd':
         # weaken connectivity
-        weights_subset_abs = torch.abs(weights_subset) - weight_changes.t()
+        weights_subset_abs = torch.abs(weights_subset) - weight_change.t()
+    else:
+        raise ValueError("The mode should be either 'ltp' or 'ltd'.")
+
+    # add the sign back
     weights_subset = torch.sign(weights_subset) * \
-        torch.clamp(weights_subset_abs, 0)
+        torch.clamp(weights_subset_abs, 0, 1)
     # finally modify in the big weights matrix.
-    model.all_weights[df.post.unique()[:, None], df.pre.unique()
-                      ] = weights_subset
+    model.all_weights[df.post, df.pre] = weights_subset
+
+    if normalise:
+        # make sure all the rows modified (df.post) have their absolute values sum up to 1
+        model.all_weights[df.post, :] = model.all_weights[df.post,
+                                                          :] / model.all_weights[df.post, :].abs().sum(dim=1)[:, None]

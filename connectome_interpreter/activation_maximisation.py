@@ -126,6 +126,7 @@ def activation_maximisation(
         out_regularisation_lambda=0.1,
         ltd_df=None, ltd_coefficient=0.1,
         ltp_df=None, ltp_coefficient=0.1,
+        plasticity_conditional_offset=0, plasticity_each_n_iterations=5,
         early_stopping=True, stopping_threshold=1e-6, n_runs=10,
         use_tqdm=True, print_output=True, report_memory_usage=False,
         device=None, wandb=True) -> Tuple[np.ndarray, np.ndarray, list, list]:
@@ -150,10 +151,12 @@ def activation_maximisation(
         custom_in_regularisation (Callable[[torch.Tensor], torch.Tensor], optional): A function that applies custom
             regularization to the `input_tensor`. Defaults to L1+L2 norm if None.
         out_regularisation_lambda (float, optional): The coefficient for punishing output neuron activation. Defaults to 0.1.
-        ltd_df (pd.DataFrame, optional): A DataFrame with columns 'pre' and 'post', which contain indices of the connectivity weights in model for long-term depression. Defaults to None.
+        ltd_df (pd.DataFrame, optional): A DataFrame with columns 'pre' and 'post', and optionally 'conditional', which contain indices of the connectivity weights in model for long-term depression (and the indices the plasticity is dependent on). Defaults to None.
         ltd_coefficient (float, optional): The coefficient for long-term depression. Defaults to 0.1.
-        ltp_df (pd.DataFrame, optional): A DataFrame with columns 'pre' and 'post', which contain indices of the connectivity weights in model for long-term potentiation. Defaults to None.
+        ltp_df (pd.DataFrame, optional): A DataFrame with columns 'pre' and 'post', and optionally 'conditional', which contain indices of the connectivity weights in model for long-term potentiation (and the indices the plasticity is dependent on). Defaults to None.
         ltp_coefficient (float, optional): The coefficient for long-term potentiation. Defaults to 0.1.
+        plasticity_conditional_offset (int, optional): The offset for the conditional indices in the plasticity DataFrames. Defaults to 0.
+        plasticity_each_n_iterations (int, optional): The number of iterations to wait before allowing weight to change by plasticity. Defaults to 5.
         early_stopping (bool, optional): Whether to stop the optimization early if the difference between the biggest and the smallest loss within the last n_runs falls below `stopping_threshold`.
             Defaults to True.
         stopping_threshold (float, optional): The threshold for early stopping. Defaults to 1e-6.
@@ -168,7 +171,6 @@ def activation_maximisation(
         A tuple containing:
         The optimized `input_tensor` as a numpy array.
         The output of the model after optimization as a numpy array.
-        A list of input activation losses over iterations.
         A list of output activation losses over iterations.
         A list of input activation regularization losses over iterations.
         A list of output activation regularization losses over iterations.
@@ -303,11 +305,14 @@ def activation_maximisation(
         torch.cuda.empty_cache()
 
         # plasticity
-        if ltd_df is not None:
-            change_model_weights(model, ltd_df, 'ltd', ltd_coefficient)
+        if iteration % plasticity_each_n_iterations == 0:
+            if ltd_df is not None:
+                change_model_weights(
+                    model, ltd_df, 'ltd', ltd_coefficient, offset=plasticity_conditional_offset)
 
-        if ltp_df is not None:
-            change_model_weights(model, ltp_df, 'ltp', ltp_coefficient)
+            if ltp_df is not None:
+                change_model_weights(
+                    model, ltp_df, 'ltp', ltp_coefficient, offset=plasticity_conditional_offset)
 
     output_after = model(input_tensor).cpu().detach().numpy()
     # first bring to cpu to save gpu memory
