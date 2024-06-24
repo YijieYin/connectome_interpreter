@@ -1,3 +1,4 @@
+from collections import defaultdict
 import random
 import warnings
 
@@ -220,6 +221,13 @@ def modify_coo_matrix(sparse_matrix, input_idx=None, output_idx=None, value=None
         # Create updates DataFrame from provided indices and values
         input_idx = to_nparray(input_idx)
         output_idx = to_nparray(output_idx)
+
+        if len(input_idx) == 0 or len(output_idx) == 0:
+            # warning
+            warnings.warn(
+                "No updates were provided. Returning the original matrix.", UserWarning)
+            return sparse_matrix
+
         if np.isscalar(value):
             value = np.full(len(input_idx) * len(output_idx), value)
         elif len(value) != len(input_idx) * len(output_idx):
@@ -827,3 +835,19 @@ def change_model_weights(model, df, mode, coefficient=0.1, offset=0, normalise=T
         # make sure all the rows modified (df.post) have their absolute values sum up to 1
         model.all_weights[df.post, :] = model.all_weights[df.post,
                                                           :] / model.all_weights[df.post, :].abs().sum(dim=1)[:, None]
+
+
+def count_keys_per_value(d):
+    """
+    Count the number of keys per value in a dictionary.
+
+    Args:
+        d (dict): The input dictionary.
+
+    Returns:
+        dict: A dictionary where each key is a value from the input dictionary, and each value is the number of keys that map to that value.
+    """
+    value_counts = defaultdict(int)
+    for value in d.values():
+        value_counts[value] += 1
+    return dict(value_counts)

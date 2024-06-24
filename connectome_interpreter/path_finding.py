@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from .utils import to_nparray
+from .utils import to_nparray, count_keys_per_value
 
 
 def find_path_once(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, top_n=-1, threshold=0):
@@ -302,30 +302,47 @@ def filter_paths(df, threshold=0, necessary_intermediate=None):
     return df
 
 
-def group_paths(paths, pre_group, post_group):
+def group_paths(paths, pre_group, post_group, intermediate_group=None):
     """
-    Group the paths by user-specified variable (e.g. cell type, cell class etc.). Weights are summed across presynaptic neurons of the same group and averaged across postsynaptic neurons of the same group.
+    Group the paths by user-specified variable (e.g. cell type, cell class etc.). Weights are summed across presynaptic neurons of the same group and averaged across all postsynaptic neurons of the same group (even if some postsynaptic neurons are not in `paths`).
 
     Args:
         paths (pd.DataFrame): The DataFrame containing the path data, looking like the output from `find_path_iteratively()`.
         pre_group (dict): A dictionary that maps pre-synaptic neuron indices to their respective group.
         post_group (dict): A dictionary that maps post-synaptic neuron indices to their respective group.
+        intermediate_group (dict, optional): A dictionary that maps intermediate neuron indices to their respective group. Defaults to None. If None, it will be set to pre_group.
 
     Returns:
         pd.DataFrame: The grouped DataFrame containing the path data, including the layer number, pre-synaptic index, post-synaptic index, and weight.
     """
 
+    if intermediate_group is None:
+        intermediate_group = pre_group
+
     # add cell type information
-    paths['pre_type'] = paths.pre.map(pre_group)
-    paths['post_type'] = paths.post.map(post_group)
+    # first use intermediate_group, then modify specifically for pre at the first layer, and post at the last layer
+    paths['pre_type'] = paths.pre.map(intermediate_group)
+    paths['post_type'] = paths.post.map(intermediate_group)
+
+    paths.loc[paths.layer == paths.layer.min(), 'pre_type'] = paths.loc[paths.layer ==
+                                                                        paths.layer.min(), 'pre'].map(pre_group)
+    paths.loc[paths.layer == paths.layer.max(), 'post_type'] = paths.loc[paths.layer ==
+                                                                         paths.layer.max(), 'post'].map(post_group)
+
+    # sometimes only one neuron in a type is connected to another type, so only this connection is in paths
+    # but to calculate the average weight between two types, we should take into account all the neurons of the post-synaptic type
+    # so let's count the number of neurons in each post-synaptic type
+    nneuron_per_type = count_keys_per_value(intermediate_group)
+    nneuron_per_type.update(count_keys_per_value(post_group))
 
     # sum across presynaptic neurons of the same type
     paths = paths.groupby(
-        ['layer', 'pre_type', 'post', 'post_type']).weight.sum().reset_index()
-    # average across postsynaptic neurons of the same type
-    paths = paths.groupby(
-        ['layer', 'pre_type', 'post_type']).weight.mean().reset_index()
+        ['layer', 'pre_type', 'post_type']).weight.sum().reset_index()
+    # divide by number of postsynaptic neurons of the same type
+    paths['nneuron_post'] = paths.post_type.map(nneuron_per_type)
+    paths['weight'] = paths.weight / paths.nneuron_post
     paths.rename(columns={'pre_type': 'pre',
                  'post_type': 'post'}, inplace=True)
+    paths.drop(columns='nneuron_post', inplace=True)
 
     return paths
