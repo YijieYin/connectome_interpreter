@@ -3,18 +3,17 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-Welcome to Connectome Interpreter's documentation!
+Connectome Interpreter's documentation
 ==================================================
 
 .. toctree::
    :maxdepth: 2
    :caption: Contents:
 
-   modules/activation_maximisation
-   modules/compress_paths
-   modules/path_finding 
-   modules/external_map
-   modules/utils
+   tutorials/toc
+   modules/toc
+
+   
 
 Indices and tables
 ==================
