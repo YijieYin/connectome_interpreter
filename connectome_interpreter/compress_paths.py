@@ -1,6 +1,3 @@
-"""This module is about compressing the paths of different lengths (either taking into account the sign of connections or not), and looking at the result (`result_summary()`).
-"""
-
 import torch
 from tqdm import tqdm
 import pandas as pd

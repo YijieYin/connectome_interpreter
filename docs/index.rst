@@ -12,6 +12,7 @@ Connectome Interpreter's documentation
 
    tutorials/toc
    modules/toc
+   your_own_data
 
    
 
