@@ -1,5 +1,5 @@
-Modules 
-=======
+Function documentation  
+=======================
 
 .. toctree:: 
     :maxdepth: 1

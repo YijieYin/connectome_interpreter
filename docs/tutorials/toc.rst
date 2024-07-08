@@ -7,3 +7,5 @@ How is it done?
    matmul
    ei_matmul
    path_finding
+   simple_model
+   act_max
