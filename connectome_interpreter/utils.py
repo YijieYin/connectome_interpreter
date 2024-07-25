@@ -377,7 +377,7 @@ def to_nparray(input_data):
     return np.unique(cleaned_array)
 
 
-def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=None, normalise_within_column=True, include_postsynaptic_neuron=False, diff_colours_per_layer=False, colors=None, colormap='viridis'):
+def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=None, source=None, normalise_within_column=True, include_postsynaptic_neuron=False, diff_colours_per_layer=False, colors=None, colormap='viridis'):
     """
     Generates a Neuroglancer link with layers, corresponding to each column in the df. The function
     processes a dataframe, adding colour information to each neuron,
@@ -391,6 +391,7 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
         no_connection_invisible (bool, optional): Whether to make invisible neurons that are not connected. Default to True (invisible). 
         colour_saturation (float, optional): The saturation of the colours. Default to 0.4.
         scene (ngl.Scene, optional): A Neuroglancer scene object from nglscenes package. You can read a scene from clipboard like `scene = Scene.from_clipboard()`. 
+        source (list, optional): The source of the Neuroglancer layers. Default to None, in which case Full Adult Fly Brain neurons are used. 
         normalise_within_column (bool, optional): Whether to normalise the values within each column (the alternative is normalising by the min and max value in the entire dataframe). Default to True.
         include_postsynaptic_neuron (bool, optional): Whether to include the postsynaptic neuron (column names of `df`) in the visualisation. Default to False.
         diff_colours_per_layer (bool, optional): Whether to use different colours for each layer. Default to False.
@@ -439,6 +440,8 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
         np_layer['segments'] = [str(num) for num in range(0, 79)]
         np_layer['visible'] = False
         np_layer['objectAlpha'] = 0.17
+    else:
+        no_scene_provided = False
 
     # Define a list of colors optimized for human perception on a dark background
     if colors is None:
@@ -453,8 +456,9 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
 
     scene['layout'] = '3d'
 
-    source = ['precomputed://gs://flywire_v141_m783',
-              'precomputed://https://flyem.mrc-lmb.cam.ac.uk/flyconnectome/dynann/flytable-info-783-all']
+    if source is None:
+        source = ['precomputed://gs://flywire_v141_m783',
+                  'precomputed://https://flyem.mrc-lmb.cam.ac.uk/flyconnectome/dynann/flytable-info-783-all']
 
     for i, column in enumerate(df.columns):
         if diff_colours_per_layer:
