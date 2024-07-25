@@ -201,7 +201,8 @@ def remove_excess_neurons(df, keep=None, target_indices=None, keep_targets_in_mi
     Returns:
         pd.Dataframe: a dataframe with similar structure as the result of `find_path_iteratively()`, with the excess neurons removed.
     """
-    if df.layer.max() == 1:
+    max_layer_num = df.layer.max()
+    if max_layer_num == 1:
         return df
 
     # if target_indices are provided, first use this to filter the last layer
@@ -273,6 +274,11 @@ def remove_excess_neurons(df, keep=None, target_indices=None, keep_targets_in_mi
                     df_layers_update.append(df_next_layer)
 
             df = pd.concat(df_layers_update)
+
+    # in case we removed all the connections in the last layer
+    if df.layer.max() != max_layer_num:
+        raise ValueError(
+            'No path found. Try lowering the threshold for the edges to be included in the path. Currently no connections are found in the last layer.')
     return df
 
 
@@ -282,7 +288,7 @@ def filter_paths(df, threshold=0, necessary_intermediate=None):
     Args:
         df (pd.DataFrame): The DataFrame containing the path data, including the layer number, pre-synaptic index, post-synaptic index, and weight.
         threshold (float, optional): The threshold for the weight of the direct connection between pre and post. Defaults to 0.
-        necessary_intermediate (dict, optional): A dictionary of necessary intermediate neurons, where the keys are the layer numbers and the values are the neuron indices. Defaults to None.
+        necessary_intermediate (dict, optional): A dictionary of necessary intermediate neurons, where the keys are the layer numbers (starting neurons: 1; directly downstream: 2) and the values are the neuron indices (can be int, float, list, set, numpy.ndarray, or pandas.Series). Defaults to None.
 
     Returns:
         pd.DataFrame: The filtered DataFrame containing the path data, including the layer number, pre-synaptic index, post-synaptic index, and weight.
@@ -295,8 +301,20 @@ def filter_paths(df, threshold=0, necessary_intermediate=None):
     if necessary_intermediate is not None:
         for layer, indices in necessary_intermediate.items():
             if type(indices) != list:
-                indices = [indices]
-            df = df[df.post.isin(indices) | (df.layer != layer)]
+                indices = list(to_nparray(indices))
+
+            if layer < 1:
+                # error: layer has to be an integer >=1
+                raise ValueError("Layer has to be an integer >=1")
+
+            if layer < (df.layer.max()+1):
+                df = df[df.pre.isin(indices) | (df.layer != layer)]
+            elif layer == (df.layer.max()+1):
+                # filter for targets
+                df = df[df.post.isin(indices) | (df.layer != layer)]
+            else:
+                # error: layer number too big
+                raise ValueError("Layer number too big")
 
         df = remove_excess_neurons(df)
     return df
