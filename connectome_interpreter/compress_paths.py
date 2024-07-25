@@ -3,7 +3,7 @@ from tqdm import tqdm
 import pandas as pd
 import numpy as np
 import plotly.express as px
-from scipy.sparse import issparse
+from scipy.sparse import issparse, csr_matrix
 import ipywidgets as widgets
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -206,7 +206,11 @@ def add_first_n_matrices(matrices, n):
     return sum_matrix
 
 
-def result_summary(stepsn, inidx, outidx, inidx_map=None, outidx_map=None, display_output=True, sort_by_column=None, pre_in_column=False, display_threshold=0, include_undefined_groups=False):
+def result_summary(stepsn, inidx, outidx, inidx_map=None, outidx_map=None,
+                   display_output=True, display_threshold=0, threshold_axis='row',
+                   sort_within='column', sort_names=None,
+                   pre_in_column=False,
+                   include_undefined_groups=False):
     """
     Generates a summary of connections between different types of neurons, 
     represented by their input and output indexes. The function calculates 
@@ -214,17 +218,17 @@ def result_summary(stepsn, inidx, outidx, inidx_map=None, outidx_map=None, displ
     postsynaptic neuron group.
 
     Args:
-        stepsn (scipy.sparse matrix or numpy.ndarray): Matrix representing the synaptic strengths 
-            between neurons, can be dense or sparse.
+        stepsn (scipy.sparse matrix or numpy.ndarray): Matrix representing the synaptic strengths between neurons, can be dense or sparse.
         inidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of indices representing the input (presynaptic) neurons, used to subset stepsn. nan values are removed.
         outidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of indices representing the output (postsynaptic) neurons.
         inidx_map (dict, optional): Mapping from indices to neuron groups for the input neurons. Defaults to None, in which case neurons are not grouped. 
-        outidx_map (dict, optional): Mapping from indices to neuron groups for the output neurons.
-            Defaults to None, in which case it is set to be the same as inidx_map.
+        outidx_map (dict, optional): Mapping from indices to neuron groups for the output neurons. Defaults to None, in which case it is set to be the same as inidx_map.
         display_output (bool, optional): Whether to display the output in a coloured dataframe. Defaults to True.
-        sort_by_column (str or list, optional): the column name(s) to sort the result by. If none is provided, then sort by the first column. 
+        display_threshold (float, optional): The minimum threshold for displaying the output. Defaults to 0. 
+        threshold_axis (str, optional): The axis to apply the display_threshold to. Defaults to 'row' (removing entire rows if no value exceeds display_threshold). 
+        sort_within (str, optional): The axis to sort the output in. Defaults to 'column'.
+        sort_names (str or list, optional): the column/row name(s) to sort the result by. If none is provided, then sort by the first column/row. 
         pre_in_column (bool, optional): Whether to have the presynaptic neuron groups as columns. Defaults to False (pre in rows, post in columns).
-        display_threshold (float, optional): The threshold for displaying the output. Defaults to 0.
         include_undefined_groups (bool, optional): Whether to include undefined groups in the output. Defaults to False.
 
     Returns:
@@ -279,23 +283,53 @@ def result_summary(stepsn, inidx, outidx, inidx_map=None, outidx_map=None, displ
         result_df = result_df.T
 
     if display_threshold > 0:
-        # only display rows where any value >= display_threshold
-        result_df = result_df[(result_df >= display_threshold).any(axis=1)]
-
-    if sort_by_column is None:
-        # sort result_df by the values in the first column, in descending order
-        result_df = result_df.sort_values(
-            by=result_df.columns[0], ascending=False)
-    elif isinstance(sort_by_column, str):
-        sort_by_column = [sort_by_column]
-
-    if sort_by_column is not None:
-        if set(sort_by_column).issubset(result_df.columns):
-            result_df = result_df.sort_values(
-                by=sort_by_column, ascending=False)
+        if threshold_axis == 'row':
+            # only display rows where any value >= display_threshold
+            result_df = result_df[(result_df >= display_threshold).any(axis=1)]
+        elif threshold_axis == 'column':
+            # only display columns where any value >= display_threshold
+            result_df = result_df.loc[:,
+                                      (result_df >= display_threshold).any(axis=0)]
         else:
             raise ValueError(
-                "sort_by_column must be present in the values of outidx_map.")
+                "threshold_axis must be either 'column' or 'row'.")
+
+    if sort_within == 'column':
+        if sort_names is None:
+            # sort result_df by the values in the first column, in descending order
+            result_df = result_df.sort_values(
+                by=result_df.columns[0], ascending=False)
+        elif isinstance(sort_names, str):
+            sort_names = [sort_names]
+
+        if sort_names is not None:
+            if set(sort_names).issubset(result_df.columns):
+                result_df = result_df.sort_values(
+                    by=sort_names, ascending=False)
+            else:
+                raise ValueError(
+                    "sort_names must be present in the values of outidx_map.")
+    elif sort_within == 'row':
+        # first sort rows by average row value in descending order
+        result_df = result_df.loc[result_df.mean(
+            axis=1).sort_values(ascending=False).index]
+
+        if sort_names is None:
+            # sort result_df by the values in the first column, in descending order
+            result_df = result_df.sort_values(
+                by=result_df.index[0], axis=1, ascending=False)
+        elif isinstance(sort_names, str):
+            sort_names = [sort_names]
+
+        if sort_names is not None:
+            if set(sort_names).issubset(result_df.index):
+                result_df = result_df.sort_values(
+                    by=sort_names, axis=1, ascending=False)
+            else:
+                raise ValueError(
+                    "sort_names must be present in the values of inidx_map.")
+    else:
+        raise ValueError("sort_within must be either 'column' or 'row'.")
 
     if display_output:
         result_dp = result_df.style.background_gradient(cmap='Blues', vmin=result_df.min().min(),
@@ -374,7 +408,7 @@ def contribution_by_path_lengths(steps, inidx, outidx, outidx_map):
 
 
 def contribution_by_path_lengths_heatmap(steps, inidx, outidx, inidx_map=None, outidx_map=None,
-                                         sort_by_index=True, sort_by_column=None,
+                                         sort_by_index=True, sort_names=None,
                                          pre_in_column=False,
                                          display_threshold=0,
                                          cmap='viridis'):
@@ -388,7 +422,7 @@ def contribution_by_path_lengths_heatmap(steps, inidx, outidx, inidx_map=None, o
         inidx_map (dict, optional): Mapping from indices to input neuron groups. Defaults to None, in which case neurons are not grouped.
         outidx_map (dict, optional): Mapping from indices to output neuron groups. Defaults to None, in which case it is set to be the same as inidx_map.
         sort_by_index (bool, optional): Whether to sort the output by index. Defaults to True.
-        sort_by_column (str or list, optional): the column name(s) to sort the result by. If none is provided, then sort by the first column.
+        sort_names (str or list, optional): the column name(s) to sort the result by. If none is provided, then sort by the first column.
         pre_in_column (bool, optional): Whether to have the presynaptic neuron groups as columns. Defaults to False (pre in rows, post in columns).
         display_threshold (float, optional): The threshold for displaying the output. Defaults to 0.
         cmap (str, optional): The colormap to use for the heatmap. Defaults to 'viridis'.
@@ -426,7 +460,7 @@ def contribution_by_path_lengths_heatmap(steps, inidx, outidx, inidx_map=None, o
         df = result_summary(step, inidx, outidx,
                             inidx_map, outidx_map,
                             display_output=False,
-                            sort_by_column=sort_by_column,
+                            sort_names=sort_names,
                             pre_in_column=pre_in_column,
                             display_threshold=display_threshold)
         if sort_by_index:
@@ -438,3 +472,64 @@ def contribution_by_path_lengths_heatmap(steps, inidx, outidx, inidx_map=None, o
 
     # Link the slider to the plotting function
     display(widgets.interactive(plot_heatmap, index=slider))
+
+
+def effective_conn_from_paths(paths, group_dict=None, wide=True):
+    """
+    Calculate the effective connectivity between (groups of) neurons based only on the provided `paths` between neurons. This function runs on CPU, and doesn't expect a big connectivity matrix as input. 
+
+    Args:
+        paths (pd.DataFrame): A dataframe representing the paths between neurons, with columns 'pre', 'post', 'weight', and 'layer'.
+        group_dict (dict, optional): A dictionary mapping neuron indices (values in columns `pre` and `post`) to groups. Defaults to None.
+        wide (bool, optional): Whether to pivot the output dataframe to a wide format. Defaults to True.
+
+    Returns:
+        pd.DataFrame: A dataframe representing the effective connectivity between groups of neurons.
+
+    """
+
+    # it will get confusing if we didn't use the same mapping for all layers
+    # though it is true that this would increase the size of the matrix being multiplied
+    local_idx_dict = {idx: i for i, idx in enumerate(
+        set(paths.pre).union(set(paths.post)))}
+    local_to_global_idx = {i: idx for idx, i in local_idx_dict.items()}
+    paths.loc[:, ['pre_idx']] = paths.pre.map(local_idx_dict)
+    paths.loc[:, ['post_idx']] = paths.post.map(local_idx_dict)
+
+    # matmul with sparse matrices
+    for i, layer in enumerate(sorted(paths.layer.unique())):
+        if i == 0:
+            initial_el = paths[paths.layer == layer]
+            csr = csr_matrix((initial_el.weight, (initial_el.pre_idx.values, initial_el.post_idx.values)),
+                             shape=(len(local_idx_dict), len(local_idx_dict)))
+
+        else:
+            el = paths[paths.layer == layer]
+            csr = csr @ csr_matrix((el.weight, (el.pre_idx.values, el.post_idx.values)),
+                                   shape=(len(local_idx_dict), len(local_idx_dict)))
+
+    coo = csr.tocoo()
+    result_el = pd.DataFrame({'pre_idx': coo.row,
+                              'post_idx': coo.col,
+                              'weight': coo.data})
+    result_el.loc[:, ['pre']] = result_el.pre_idx.map(local_to_global_idx)
+    result_el.loc[:, ['post']] = result_el.post_idx.map(local_to_global_idx)
+
+    if group_dict is not None:
+        result_el.loc[:, ['group_pre']] = result_el.pre.map(group_dict)
+        result_el.loc[:, ['group_post']] = result_el.post.map(group_dict)
+        # group by pre, sum; group by post, average
+        # e.g. if group is cell type: the input proportion from type A to an average neuron in type B
+        result_el = result_el.groupby(
+            ['group_pre', 'group_post', 'post']).weight.sum().reset_index()
+        result_el = result_el.groupby(
+            ['group_pre', 'group_post']).weight.mean().reset_index()
+        result_el.columns = ['pre', 'post', 'weight']
+
+    # pivot wider
+    if wide:
+        result_el = result_el.pivot(
+            index='pre', columns='post', values='weight')
+        result_el.fillna(0, inplace=True)
+
+    return result_el
