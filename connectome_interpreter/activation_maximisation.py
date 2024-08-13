@@ -609,7 +609,10 @@ def activation_maximisation(
 #             act_loss, out_reg_loss, in_reg_loss, input_snapshots)
 
 
-def activations_to_df(inprop, opt_in, out, sensory_indices, inidx_mapping=None, outidx_mapping=None, activation_threshold=0, connectivity_threshold=0):
+def activations_to_df(inprop, opt_in, out, sensory_indices,
+                      inidx_mapping=None, outidx_mapping=None,
+                      activation_threshold=0, connectivity_threshold=0,
+                      high_ram=True):
     """
     Generates a dataframe representing the paths in a layered plot, filtering by activation and connectivity thresholds.
 
@@ -629,6 +632,7 @@ def activations_to_df(inprop, opt_in, out, sensory_indices, inidx_mapping=None, 
                                                 not considered. Defaults to 0.
         connectivity_threshold (float, optional): A threshold for filtering connections. Connections with weights below this threshold
                                                   are ignored. Defaults to 0.
+        high_ram (bool, optional): Whether to use a high RAM implementation (which is slightly faster). This implementation gets direct connections between *all* relevant neurons at once, instead of within each layer. Defaults to True.
 
     Returns:
         pandas.DataFrame: A dataframe representing the paths in the network. Each row is a connection, with columns for 'pre' and
@@ -639,21 +643,36 @@ def activations_to_df(inprop, opt_in, out, sensory_indices, inidx_mapping=None, 
     if outidx_mapping is None:
         outidx_mapping = inidx_mapping
 
-    if issparse(inprop):
-        inprop = inprop.toarray()
-
+    print('Getting activations...')
     # get activations from opt_in and out, based on the mappings provided by inidx_mapping and outidx_mapping
     sensory_act = get_activations(
         opt_in, sensory_indices, inidx_mapping, threshold=activation_threshold)
     all_act = get_activations(
         out, all_indices, outidx_mapping, threshold=activation_threshold)
 
-    # get connectivity
-    conn = result_summary(inprop, inidx=all_indices,
-                          outidx=all_indices, inidx_map=inidx_mapping, outidx_map=outidx_mapping, display_output=False)
-    # turn to edgelist, and filter
-    conn_el = adjacency_df_to_el(
-        conn, threshold=connectivity_threshold)
+    print('Getting connectivity... If this takes a while, consider increasing the connectivity/activation threshold.')
+
+    if high_ram:
+        # get all pre and post indices across layers
+        post_groups = {key for _, d in all_act.items() for key in d}
+        pre_groups = set(sensory_act[0].keys()).union(post_groups)
+        pre_indices = [idx for idx, key in inidx_mapping.items()
+                       if key in pre_groups]
+        post_indices = [idx for idx,
+                        key in outidx_mapping.items() if key in post_groups]
+
+        # if there are literally no neurons
+        if len(pre_indices) == 0 or len(post_indices) == 0:
+            raise ValueError(
+                "No neurons found. Consider lowering the activation threshold.")
+
+        # get connectivity
+        conn = result_summary(inprop, inidx=pre_indices, outidx=post_indices,
+                              inidx_map=inidx_mapping, outidx_map=outidx_mapping,
+                              display_output=False)
+        # turn to edgelist, and filter
+        conn_el = adjacency_df_to_el(
+            conn, threshold=connectivity_threshold)
 
     # make paths df
     paths = []
@@ -667,8 +686,24 @@ def activations_to_df(inprop, opt_in, out, sensory_indices, inidx_mapping=None, 
             pre = all_act[layer-1]
             post = all_act[layer]
 
-        connections = conn_el[conn_el.pre.isin(
-            pre.keys()) & conn_el.post.isin(post.keys())]
+        if high_ram:
+            # index the big connectivity matrix for this layer
+            connections = conn_el[conn_el.pre.isin(
+                pre.keys()) & conn_el.post.isin(post.keys())]
+        else:
+            # pre and post are already grouped by inidx and outidx_mapping
+            # so need to recover the indices using pre, inidx_map, post, outidx_map
+            pre_indices = [idx for idx,
+                           val in inidx_mapping.items() if val in pre.keys()]
+            post_indices = [idx for idx,
+                            val in outidx_mapping.items() if val in post.keys()]
+
+            conn = result_summary(inprop, inidx=pre_indices,
+                                  outidx=post_indices, inidx_map=inidx_mapping, outidx_map=outidx_mapping, display_output=False)
+            # turn to edgelist, and filter
+            connections = adjacency_df_to_el(
+                conn, threshold=connectivity_threshold)
+
         # so that direct connectivity is layer 1
         connections.loc[:, ['layer']] = layer+1
         connections.loc[:, ['pre_activation']] = connections.pre.map(pre)
@@ -676,6 +711,6 @@ def activations_to_df(inprop, opt_in, out, sensory_indices, inidx_mapping=None, 
         if connections.shape[0] > 0:
             paths.append(connections)
         else:
-            print(f"No connections found in layer {layer+1}.")
+            print(f"Warning: No connections found in layer {layer+1}.")
     paths = pd.concat(paths)
     return paths
