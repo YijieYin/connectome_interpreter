@@ -1,7 +1,8 @@
 import numpy as np
 import pandas as pd
+from scipy.sparse import issparse
 
-from .utils import to_nparray, count_keys_per_value
+from .utils import to_nparray, count_keys_per_value, check_consecutive_layers
 
 
 def find_path_once(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, top_n=-1, threshold=0):
@@ -97,7 +98,7 @@ def find_path_iteratively(inprop_csc, steps_cpu, inidx, outidx, target_layer_num
     multiple layers, using the `find_path_once` function to traverse each layer.
 
     Args:
-      inprop_csc (scipy.sparse.csc_matrix): The direct connectivity matrix in Compressed Sparse Column format.
+      inprop_csc (scipy.sparse matrix): The direct connectivity matrix in Compressed Sparse Column format.
       steps_cpu (np.ndarray): A list of compressed connectivity matrices: one matrix for each compressed path length.
       inidx (int, float, list, set, numpy.ndarray, or pandas.Series): The input neuron indices.
       outidx (int, float, list, set, numpy.ndarray, or pandas.Series): The output neuron indices to start the reverse path finding.
@@ -111,6 +112,11 @@ def find_path_iteratively(inprop_csc, steps_cpu, inidx, outidx, target_layer_num
 
     inidx = to_nparray(inidx)
     outidx = to_nparray(outidx)
+
+    if issparse(inprop_csc):
+        # if stepsn is coo, turn into csc
+        if inprop_csc.format == 'coo':
+            inprop_csc = inprop_csc.tocsc()
 
     # path_indices = []  # This will store the path data as a list of arrays
     dfs = []  # This will store the path data as a list of DataFrames
@@ -149,6 +155,11 @@ def create_layered_positions(df, priority_indices=None, sort_dict=None):
         dict: A dictionary of positions for each neuron in the paths, with the keys as the neuron indices and the values as the (x, y) coordinates.
     """
 
+    # check if layer numbers in 'layer' column are consecutive. If anyone is absent, raise an error
+    if not check_consecutive_layers(df):
+        raise ValueError(
+            "The layer numbers in 'layer' column are not consecutive. ")
+
     # if post_layer and pre_layer are not present, create them
     if 'post_layer' not in df.columns:
         df['post_layer'] = df['post'].astype(
@@ -164,14 +175,20 @@ def create_layered_positions(df, priority_indices=None, sort_dict=None):
     layer_width = 1.0 / (number_of_layers + 1)
     positions = {}
 
-    all_names = set(df['pre_layer']) | set(df['post_layer'])
     name_to_idx = dict(zip(df.pre_layer, df.pre))
     name_to_idx.update(dict(zip(df.post_layer, df.post)))
 
+    global_to_local_layer_number = {l: i for i,
+                                    l in enumerate(sorted(df.layer.unique()))}
+    df.loc[:, ['local_layer']] = df.layer.map(global_to_local_layer_number)
+
     for layer in range(0, number_of_layers + 1):
-        # if the last characters match
-        layer_name = [item for item in all_names if '_' +
-                      str(layer) == item[-len(str(layer))-1:]]
+        if layer != number_of_layers:
+            layer_name = list(set(df.pre_layer[df.local_layer == layer]).union(
+                set(df.post_layer[df.local_layer == (layer-1)])))
+        else:
+            layer_name = list(set(df.post_layer[df.local_layer == layer-1]))
+
         if sort_dict is not None:
             layer_name = sorted(layer_name, key=lambda x: sort_dict[x])
 
@@ -194,8 +211,8 @@ def remove_excess_neurons(df, keep=None, target_indices=None, keep_targets_in_mi
 
     Args:
         df (pd.Dataframe): a filtered dataframe with similar structure as the dataframe returned by `find_path_iteratively()`.
-        keep (list, set, pd.Series, numpy.ndarray, optional): A list of neuron indices that should be kept in the paths, even if they don't connect between input and target in the last layer. Defaults to None.
-        target_indices (list, set, pd.Series, numpy.ndarray, optional): A list of target neuron indices that should be kept in the last layer. Defaults to None, in which case all neurons in the last layer in `df` would be kept.
+        keep (list, set, pd.Series, numpy.ndarray, str, optional): A list of neuron indices that should be kept in the paths, even if they don't connect between input and target in the last layer. Defaults to None.
+        target_indices (list, set, pd.Series, numpy.ndarray, str, optional): A list of target neuron indices that should be kept in the last layer. Defaults to None, in which case all neurons in the last layer in `df` would be kept.
         keep_targets_in_middle (bool, optional): If True, the target_indices are kept in the middle layers as well, even if they don't connect between input and target in the last layer. Defaults to False.
 
     Returns:
@@ -205,20 +222,52 @@ def remove_excess_neurons(df, keep=None, target_indices=None, keep_targets_in_mi
     if max_layer_num == 1:
         return df
 
-    # if target_indices are provided, first use this to filter the last layer
+    # if target_indices are provided, first use this to filter the last layer ----
     if target_indices is not None:
+        # if it's a string, convert to list
+        if type(target_indices) == str:
+            target_indices = [target_indices]
         target_indices = set(target_indices)
         if not target_indices.issubset(df[df.layer == df.layer.max()].post):
             raise ValueError('The target indices are not in the post-synaptic neurons of the last layer. Here are the indices of the last layer: ',
-                             df[df.layer == df.layer.max()].post, '. Your target_indices should be a subset.')
+                             ', '.join(df[df.layer == df.layer.max()].post.unique()), '. Your target_indices should be a subset.')
 
         df = df[(df.layer != df.layer.max()) | df.post.isin(target_indices)]
 
-    while any([set(df[df.layer == i].post) != set(df[df.layer == (i+1)].pre) for i in range(1, df.layer.max())]):
+    # check if all layer numbers are consecutive ----
+    if not check_consecutive_layers(df):
+        print('Warning: The layer numbers are not consecutive. Will only use the consecutive layers from the last one.')
+        selected = []
+        # get the consecutive layers from the last one
+        for l in range(df.layer.max(), 0, -1):
+            if l in df.layer.unique():
+                selected.append(l)
+            else:
+                break
+        df = df[df.layer.isin(selected)]
+
+        global_to_local_layer_number = {l: i for i,
+                                        l in enumerate(sorted(df.layer.unique()))}
+        df.loc[:, ['local_layer']] = df.layer.map(global_to_local_layer_number)
+
+    elif df.layer.min() != 1:
+        # if the layer numbers do not start from 1
+        print('Warning: The layer numbers do not start from 1. Will only use the consecutive layers from the last one.')
+        global_to_local_layer_number = {l: i for i,
+                                        l in enumerate(sorted(df.layer.unique()))}
+        df.loc[:, ['local_layer']] = df.layer.map(global_to_local_layer_number)
+
+    else:
+        df.loc[:, ['local_layer']] = df.layer
+
+    # while there is any layer whose post is not the same as the next layer's pre ----
+    while any([set(df[df.local_layer == i].post) != set(df[df.local_layer == (i+1)].pre) for i in range(1, df.local_layer.max())]):
         if keep is not None:
+            if type(keep) == str:
+                keep = [keep]
             keep = set(keep)
 
-            if all([set(df[df.layer == i].post).union(keep) == set(df[df.layer == (i+1)].pre).union(keep) for i in range(1, df.layer.max())]):
+            if all([set(df[df.local_layer == i].post).union(keep) == set(df[df.local_layer == (i+1)].pre).union(keep) for i in range(1, df.local_layer.max())]):
                 break
         else:
             keep = set()
@@ -227,26 +276,31 @@ def remove_excess_neurons(df, keep=None, target_indices=None, keep_targets_in_mi
             if target_indices is not None:
                 keep = keep.union(target_indices)
 
-        # start adding each layer to df_layers_update
+        # start adding each layer to df_layers_update ---
         df_layers_update = []
-        if df.layer.max() == 2:
-            df_layer = df[df.layer == 2]
-            df_prev_layer = df[df.layer == 1]
+        # if there are only two layers
+        if df.local_layer.max() == 2:
+            df_layer = df[df.local_layer == 2]
+            df_prev_layer = df[df.local_layer == 1]
 
+            # filter by pre in the second layer
             df_layers_update.append(
                 df_layer[df_layer.pre.isin(set(df_prev_layer.post).union(keep))])
+            # filter by post in the first layer
             df_layers_update.append(
                 df_prev_layer[df_prev_layer.post.isin(set(df_layer.pre).union(keep))])
             df = pd.concat(df_layers_update)
 
         else:
-            for i in range(2, df.layer.max()):
-                df_layer = df[df.layer == i]
-                df_next_layer = df[df.layer == i+1]
-                df_prev_layer = df[df.layer == i-1]
+            for i in range(2, df.local_layer.max()):
+                df_layer = df[df.local_layer == i]
+                df_next_layer = df[df.local_layer == i+1]
+                df_prev_layer = df[df.local_layer == i-1]
 
+                # pre that should be in the current layer: an intersection of previous layer's post; and current layer's pre
                 df_pre = set.intersection(
                     set(df_prev_layer.post) & set(df_layer.pre))
+                # post that should be in the current layer: an intersection of current layer's post; and next layer's pre
                 df_post = set.intersection(
                     set(df_layer.post), set(df_next_layer.pre))
 
@@ -258,12 +312,13 @@ def remove_excess_neurons(df, keep=None, target_indices=None, keep_targets_in_mi
 
                 df_layer = df_layer[df_layer.pre.isin(
                     df_pre.union(keep)) & df_layer.post.isin(df_post.union(keep))]
+
                 if df_layer.shape[0] == 0:
                     raise ValueError(
                         'No path found. Try lowering the threshold for the edges to be included in the path.')
                 df_layers_update.append(df_layer)
 
-                if i == (df.layer.max()-1):
+                if i == (df.local_layer.max()-1):
                     # add edges in the last layer
                     if target_indices is None:
                         df_next_layer = df_next_layer[df_next_layer.pre.isin(
@@ -274,6 +329,8 @@ def remove_excess_neurons(df, keep=None, target_indices=None, keep_targets_in_mi
                     df_layers_update.append(df_next_layer)
 
             df = pd.concat(df_layers_update)
+
+    df.drop(columns='local_layer', inplace=True)
 
     # in case we removed all the connections in the last layer
     if df.layer.max() != max_layer_num:
