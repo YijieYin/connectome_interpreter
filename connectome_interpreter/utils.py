@@ -356,13 +356,13 @@ def to_nparray(input_data):
     The input can be a single number, a list, a set, a numpy array, or a pandas Series.
 
     Args:
-        input_data: The input data to convert. Can be of type int, float, list, set, numpy.ndarray, or pandas.Series.
+        input_data: The input data to convert. Can be of type int (including numpy.int64 and numpy.int32), float, list, set, numpy.ndarray, or pandas.Series.
 
     Returns:
         numpy.ndarray: A unique numpy array created from the input data, with all NaN values removed.
     """
     # First, ensure the input is in array form and convert pd.Series to np.ndarray
-    if isinstance(input_data, (int, float)):
+    if isinstance(input_data, (int, float, np.int64, np.int32)):
         input_array = np.array([input_data])
     elif isinstance(input_data, (list, set, np.ndarray, pd.Series)):
         input_array = np.array(list(input_data))
@@ -855,3 +855,60 @@ def count_keys_per_value(d):
     for value in d.values():
         value_counts[value] += 1
     return dict(value_counts)
+
+
+def sc_connectivity_summary(df, inidx_map=None, outidx_map=None):
+    """
+    Single cell connectivity summary. For each group based on inidx_map, select the neuron with the strongest input to each postsynaptic group, and give value by the total weight from that presynaptic group for each average post-synaptic neuron. The output could be fed into `get_ngl_link()`. The idea of this function came from Dr Alexandra Fragniere. 
+
+    Args:
+        df (pd.DataFrame): A DataFrame with pre in the row indices, post in the column names, and weights as values. 
+        inidx_map (dict, optional): A mapping from the presynaptic indices to group identifiers. If None, the presynaptic indices themselves are used as group identifiers. Defaults to None.
+        outidx_map (dict, optional): A mapping from the postsynaptic indices to group identifiers. If None, the postsynaptic indices are used as group identifiers. Defaults to None.
+
+    Returns:
+        pd.DataFrame: A DataFrame, with values in `outidx_map` as column names. Row indices are a subset of the original row indices: the top input in each group. The values in the dataframe are the sum of the weights from each `inidx_map` group to an average member of the `outidx_map` group. 
+
+    """
+
+    if inidx_map is None:
+        inidx_map = {idx: str(idx) for idx in df.index}
+    if outidx_map is None:
+        outidx_map = {idx: str(idx) for idx in df.columns}
+
+    # calculate the average first for the post_grp
+    dft = df.T
+    dft.loc[:, ['group']] = dft.index.map(outidx_map)
+    df = dft.groupby('group').mean().T
+
+    df.loc[:, ['pre_grp']] = df.index.map(inidx_map)
+    # get values in the output of the function
+    values = df.groupby('pre_grp').sum().reset_index().melt(
+        id_vars=['pre_grp'], var_name='post', value_name='value')
+    # get indices (top input in each group) in the output of the function
+    indices = df.groupby('pre_grp').idxmax().reset_index().melt(
+        id_vars=['pre_grp'], var_name='post', value_name='index_value')
+    # put together, and make wide
+    merged_df = pd.merge(indices, values, on=['pre_grp', 'post'])
+    merged_df = merged_df.pivot(
+        index='index_value', columns='post', values='value')
+    merged_df.fillna(0, inplace=True)
+
+    return merged_df
+
+
+def check_consecutive_layers(df):
+    """
+    Check if the layers in the DataFrame are consecutive.
+
+    Args:
+        df (pd.DataFrame): A DataFrame containing the column 'layer' (integer).
+
+    Returns:
+        bool: True if the layers are consecutive, False otherwise
+    """
+
+    all_layers = sorted(df['layer'].unique())
+    consecutive_layers = all(all_layers[i] + 1 == all_layers[i + 1]
+                             for i in range(len(all_layers) - 1))
+    return consecutive_layers
