@@ -10,6 +10,7 @@ import matplotlib.colors as mcl
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import networkx as nx
+from IPython.display import display
 
 
 def dynamic_representation(tensor, density_threshold=0.2):
@@ -377,26 +378,24 @@ def to_nparray(input_data):
     return np.unique(cleaned_array)
 
 
-def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=None, source=None, normalise_within_column=True, include_postsynaptic_neuron=False, diff_colours_per_layer=False, colors=None, colormap='viridis'):
+def get_ngl_link(df, no_connection_invisible=True, group_by=None, colour_saturation=0.4, scene=None, source=None, normalise=None, include_postsynaptic_neuron=False, diff_colours_per_layer=False, colors=None, colormap='viridis',
+                 df_format='wide'):
     """
-    Generates a Neuroglancer link with layers, corresponding to each column in the df. The function
-    processes a dataframe, adding colour information to each neuron,
-    and then creates layers in a Neuroglancer scene for visualization. Separate layers
-    are created for each column in the DataFrame, with unique segment colors based on
-    the values in the DataFrame.
+    Generates a Neuroglancer link with layers based on the neuron ids and the values in `df`. 
 
     Args:
-        df (pandas.DataFrame): A DataFrame containing neuron metadata. The index should contain neuron identifiers (root_ids), and columns should represent different
-      attributes or categories.
+        df (pandas.DataFrame): A DataFrame containing neuron metadata. If `df_format` == `wide` (default), the index should contain neuron identifiers (root_ids), and columns should represent different
+      attributes, timesteps or categories. If `df_format` == `long`, the DataFrame should contain three columns: 'neuron_id', 'layer', and 'activation'.
         no_connection_invisible (bool, optional): Whether to make invisible neurons that are not connected. Default to True (invisible). 
         colour_saturation (float, optional): The saturation of the colours. Default to 0.4.
         scene (ngl.Scene, optional): A Neuroglancer scene object from nglscenes package. You can read a scene from clipboard like `scene = Scene.from_clipboard()`. 
         source (list, optional): The source of the Neuroglancer layers. Default to None, in which case Full Adult Fly Brain neurons are used. 
-        normalise_within_column (bool, optional): Whether to normalise the values within each column (the alternative is normalising by the min and max value in the entire dataframe). Default to True.
-        include_postsynaptic_neuron (bool, optional): Whether to include the postsynaptic neuron (column names of `df`) in the visualisation. Default to False.
+        normalise (str, optional): How to normalise the values. `layer` for normalising within each layer; `all` for normalising by the min and max value in the entire dataframe. Default to None.
+        include_postsynaptic_neuron (bool, optional): Whether to include the postsynaptic neuron (column names of `df`) in the visualisation. Default to False. Only works if `df_format` is 'wide'.
         diff_colours_per_layer (bool, optional): Whether to use different colours for each layer. Default to False.
         colors (list, optional): A list of colours to use for the neurons in each layer, if `diff_colours_per_layer` is True. If None, a default list of colours is used. Default to None.
         colormap (str, optional): The name of the colormap to use for colouring the neurons in every layer, if `diff_colours_per_layer` is False. Default to 'viridis'.
+        df_format (str, optional): The format of the DataFrame. Either 'wide' or 'long'. Default to 'wide'.
 
     Returns:
         str: A URL to the generated Neuroglancer scene.
@@ -449,10 +448,9 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
                   '#ffe66d', '#7bed9f', '#a9def9', '#f694c1', '#c7f0bd', '#ffc5a1', '#ff8c94', '#ffaaa6', '#ffd3b5', '#a8e6cf', '#a6d0e4', '#c1beff', '#f5b0cb']
 
     # Normalize the values in the DataFrame
-    if normalise_within_column:
-        df_norm = (df - df.min()) / (df.max() - df.min())
-    else:
-        df_norm = (df - df.min().min()) / (df.max().max() - df.min().min())
+    if normalise is not None:
+        if normalise == 'all':
+            df = (df - df.min().min()) / (df.max().max() - df.min().min())
 
     scene['layout'] = '3d'
 
@@ -460,7 +458,14 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
         source = ['precomputed://gs://flywire_v141_m783',
                   'precomputed://https://flyem.mrc-lmb.cam.ac.uk/flyconnectome/dynann/flytable-info-783-all']
 
-    for i, column in enumerate(df.columns):
+    if df_format == 'wide':
+        iterate_over = df.columns
+    elif df_format == 'long':
+        iterate_over = df.layer.unique()
+    else:
+        raise ValueError("df_format should be either 'wide' or 'long'")
+
+    for i, ite in enumerate(iterate_over):
         if diff_colours_per_layer:
             color = random.choice(colors)
             cmap = mcl.LinearSegmentedColormap.from_list(
@@ -468,35 +473,57 @@ def get_ngl_link(df, no_connection_invisible=True, colour_saturation=0.4, scene=
         else:
             cmap = plt.get_cmap(colormap)
 
-        df_group = df_norm[[column]]
-        if no_connection_invisible:
-            df_group = df_group[df_group.iloc[:, 0] > 0]
+        if df_format == 'wide':
+            df_group = df[[ite]]
+            if no_connection_invisible:
+                df_group = df_group[df_group.iloc[:, 0] > 0]
+        elif df_format == 'long':
+            df_group = df[df.layer == ite]
+            # make df_group: neuron_id in index, activation in the first column
+            df_group.set_index('neuron_id', inplace=True)
+            df_group = df_group[['activation']]
 
-        layer = ngl.SegmentationLayer(source=source, name=str(column))
-
-        layer['segments'] = list(df_group.index.astype(str))
-        if diff_colours_per_layer:
-            layer['segmentColors'] = {
-                # trick from Claud to make the colours more saturated
-                str(root_id): mcl.to_hex(cmap(colour_saturation + (1-colour_saturation)*value.values[0]))
-                for root_id, value in df_group.iterrows()
-            }
+        if group_by is None:
+            df_group.loc[:, ['group']] = ''
         else:
-            layer['segmentColors'] = {
-                str(root_id): mcl.to_hex(cmap(value.values[0]))
-                for root_id, value in df_group.iterrows()
-            }
-        # only the first layer is visible
-        if i == 0:
-            layer['visible'] = True
-        else:
-            layer['visible'] = False
+            df_group.loc[:, ['group']] = df_group.index.map(group_by)
 
-        if include_postsynaptic_neuron:
-            layer['segments'].append(str(df_group.columns[0]))
-            layer['segmentColors'][str(df_group.columns[0])] = '#43A7FF'
+        for grp in df_group.group.unique():
+            df_group_grp = df_group[df_group.group == grp]
 
-        scene.add_layers(layer)
+            layer = ngl.SegmentationLayer(
+                source=source, name=str(ite)+' '+str(grp))
+
+            if normalise is not None:
+                if normalise == 'layer':
+                    df_group_grp = (df_group_grp - df_group_grp.min()) / \
+                        (df_group_grp.max() - df_group_grp.min())
+
+            layer['segments'] = list(df_group_grp.index.astype(str))
+            if diff_colours_per_layer:
+                layer['segmentColors'] = {
+                    # trick from Claud to make the colours more saturated
+                    str(root_id): mcl.to_hex(cmap(colour_saturation + (1-colour_saturation)*value.values[0]))
+                    for root_id, value in df_group_grp.iterrows()
+                }
+            else:
+                layer['segmentColors'] = {
+                    str(root_id): mcl.to_hex(cmap(value.values[0]))
+                    for root_id, value in df_group_grp.iterrows()
+                }
+
+            # only the first layer is visible
+            if i == 0:
+                layer['visible'] = True
+            else:
+                layer['visible'] = False
+
+            if include_postsynaptic_neuron:
+                layer['segments'].append(str(df_group_grp.columns[0]))
+                layer['segmentColors'][str(
+                    df_group_grp.columns[0])] = '#43A7FF'
+
+            scene.add_layers(layer)
 
     if no_scene_provided:
         # add FAFB and NP layers at the end
@@ -912,3 +939,134 @@ def check_consecutive_layers(df):
     consecutive_layers = all(all_layers[i] + 1 == all_layers[i + 1]
                              for i in range(len(all_layers) - 1))
     return consecutive_layers
+
+
+def group_edge_by(edgelist, group_dict):
+    """
+    Group the edges in an edgelist by a dictionary. 
+
+    Args:
+        edgelist (pd.DataFrame): A DataFrame with columns 'pre', 'post' and 'weight' representing the edges. 
+        by (dict): A dictionary mapping the values in the 'pre' and 'post' columns of `edgelist` to the groups.
+
+    Returns:
+        pd.DataFrame: A DataFrame with columns 'pre' and 'post' representing the edges, and 'group_pre' and 'group_post' representing the groups. 
+    """
+    edgelist.loc[:, ['group_pre']] = edgelist.pre.map(group_dict)
+    edgelist.loc[:, ['group_post']] = edgelist.post.map(group_dict)
+    # group by pre, sum; group by post, average
+    # e.g. if group is cell type: the input proportion from type A to an average neuron in type B
+    edgelist = edgelist.groupby(  # sum across pre
+        ['group_pre', 'group_post', 'post']).weight.sum().reset_index()
+    edgelist = edgelist.groupby(  # average across post
+        ['group_pre', 'group_post']).weight.mean().reset_index()
+    edgelist.columns = ['pre', 'post', 'weight']
+
+    return edgelist
+
+
+def display_df(df, cmap='Blues'):
+    """
+    Thin wrapper around the `display` function to display a DataFrame with a background gradient.
+
+    Args:
+        df (pd.DataFrame): The DataFrame to display.
+        cmap (str, optional): The name of the colormap to use for the background gradient. Defaults to 'Blues'.
+
+    Returns:
+        None: This function displays the DataFrame using the `display` function
+    """
+    result_dp = df.style.background_gradient(cmap=cmap, vmin=df.min().min(),
+                                             vmax=df.max().max())
+    display(result_dp)
+
+
+def compare_connectivity(m1, m2,
+                         inidx1, outidx1, inidx2, outidx2,
+                         g1_pre=None, g1_post=None, g2_pre=None, g2_post=None, suffices=['_l', '_2'],
+                         remove_na_rows=True, display=True, threshold=0, sort_within='column', sort_by=None):
+    """
+    Compare the connectivity between two matrices. 
+
+    Args:
+        m1 (scipy.sparse matrix or numpy.ndarray): The first connectivity matrix.
+        m2 (scipy.sparse matrix or numpy.ndarray): The second connectivity matrix.
+        inidx1 (int, float, list, set, numpy.ndarray, or pandas.Series): The indices of the presynaptic neurons in the first matrix.
+        outidx1 (int, float, list, set, numpy.ndarray, or pandas.Series): The indices of the postsynaptic neurons in the first matrix.
+        inidx2 (int, float, list, set, numpy.ndarray, or pandas.Series): The indices of the presynaptic neurons in the second matrix.
+        outidx2 (int, float, list, set, numpy.ndarray, or pandas.Series): The indices of the postsynaptic neurons in the second matrix.
+        g1_pre (dict, optional): A dictionary mapping the presynaptic indices to groups in the first matrix. Defaults to None.
+        g1_post (dict, optional): A dictionary mapping the postsynaptic indices to groups in the first matrix. Defaults to None.
+        g2_pre (dict, optional): A dictionary mapping the presynaptic indices to groups in the second matrix. Defaults to None.
+        g2_post (dict, optional): A dictionary mapping the postsynaptic indices to groups in the second matrix. Defaults to None.
+        suffices (list, optional): A list of suffixes to append to the column names of the two matrices. Defaults to ['_l', '_2'].
+        remove_na_rows (bool, optional): Whether to remove rows with NaN values (where e.g. a connection exists in one matrix but not the other). Defaults to True.
+        display (bool, optional): Whether to display the resulting DataFrame in colour gradient. Defaults to True.
+        threshold (float, optional): The threshold below which to remove values. Defaults to 0.
+        sort_within (str, optional): Whether to sort the DataFrame with 'column' (across rows) or 'row' (across columns). Defaults to 'column'.
+        sort_by (str, optional): The column to sort by. Defaults to None.
+
+    Returns:
+        pd.DataFrame: A DataFrame containing the connectivity values from the two matrices, with columns suffixed by the values in `suffices`.
+
+    """
+
+    from .compress_paths import result_summary
+    df1 = result_summary(
+        m1, inidx1, outidx1, g1_pre, g1_post, display_output=False, display_threshold=threshold)
+    df2 = result_summary(
+        m2, inidx2, outidx2, g2_pre, g2_post, display_output=False, display_threshold=threshold)
+
+    df1.columns = [col + suffices[0] for col in df1.columns]
+    df2.columns = [col + suffices[1] for col in df2.columns]
+
+    # Join the dataframes on their index (row names), keeping all rows
+    df_merged = df1.merge(df2, left_index=True, right_index=True, how='outer')
+    # order the columns alphabetically
+    # Sort columns alphabetically
+    df_merged = df_merged.reindex(sorted(df_merged.columns), axis=1)
+    if remove_na_rows:
+        df_merged = df_merged.dropna()
+
+    if sort_within == 'column':
+        if sort_by is None:
+            sort_by = df_merged.columns[0]
+        df_merged = df_merged.sort_values(sort_by, ascending=False)
+    elif sort_within == 'row':
+        if sort_by is None:
+            sort_by = df_merged.index[0]
+        df_merged = df_merged.sort_values(sort_by, ascending=False, axis=1)
+    else:
+        raise ValueError("sort_within should be either 'column' or 'row'.")
+
+    if display:
+        display_df(df_merged)
+
+    return df_merged
+
+
+def path_for_ngl(path):
+    """
+    Convert a path DataFrame to a format suitable for Neuroglancer visualization (`get_ngl_link(df_format='long')`).
+
+    Args:
+        path (pd.DataFrame): A DataFrame containing the columns 'pre', 'post', 'layer', 'pre_activation', and 'post_activation' (standard output from function `activations_to_df()`).
+
+    Returns:
+        pd.DataFrame: A DataFrame with columns 'neuron_id', 'layer', and 'activation', suitable for Neuroglancer visualization.
+    """
+    dfs = []
+    for l in path.layer.unique():
+        path_l = path[path.layer == l]
+        if l == path.layer.min():
+            df = pd.DataFrame({'neuron_id': path_l.pre, 'layer': l,
+                               'activation': path_l.pre_activation})
+            # drop duplicate rows
+            df = df.drop_duplicates()
+            dfs.append(df)
+
+        df = pd.DataFrame({'neuron_id': path_l.post, 'layer': l +
+                           1, 'activation': path_l.post_activation})
+        df = df.drop_duplicates()
+        dfs.append(df)
+    return pd.concat(dfs)
