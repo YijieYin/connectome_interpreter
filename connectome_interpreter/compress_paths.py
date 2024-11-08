@@ -9,7 +9,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from IPython.display import display
 
-from .utils import dynamic_representation, torch_sparse_where, to_nparray, tensor_to_csc
+from .utils import dynamic_representation, torch_sparse_where, to_nparray, tensor_to_csc, group_edge_by
 
 
 def compress_paths(inprop, step_number, threshold=0, output_threshold=1e-4, root=False):
@@ -491,7 +491,8 @@ def effective_conn_from_paths(paths, group_dict=None, wide=True):
     # it will get confusing if we didn't use the same mapping for all layers
     # though it is true that this would increase the size of the matrix being multiplied
     local_idx_dict = {idx: i for i, idx in enumerate(
-        set(paths.pre).union(set(paths.post)))}
+        set(paths.pre).union(set(paths.post)))}  # give one index for each element in path; map from element to index
+    # map from index to element
     local_to_global_idx = {i: idx for idx, i in local_idx_dict.items()}
     paths.loc[:, ['pre_idx']] = paths.pre.map(local_idx_dict)
     paths.loc[:, ['post_idx']] = paths.post.map(local_idx_dict)
@@ -499,9 +500,9 @@ def effective_conn_from_paths(paths, group_dict=None, wide=True):
     # matmul with sparse matrices
     for i, layer in enumerate(sorted(paths.layer.unique())):
         if i == 0:
-            initial_el = paths[paths.layer == layer]
+            initial_el = paths[paths.layer == layer]  # edgelist
             csr = csr_matrix((initial_el.weight, (initial_el.pre_idx.values, initial_el.post_idx.values)),
-                             shape=(len(local_idx_dict), len(local_idx_dict)))
+                             shape=(len(local_idx_dict), len(local_idx_dict)))  # make sparse matrix of the shape all_elements, all_elements
 
         else:
             el = paths[paths.layer == layer]
@@ -516,15 +517,16 @@ def effective_conn_from_paths(paths, group_dict=None, wide=True):
     result_el.loc[:, ['post']] = result_el.post_idx.map(local_to_global_idx)
 
     if group_dict is not None:
-        result_el.loc[:, ['group_pre']] = result_el.pre.map(group_dict)
-        result_el.loc[:, ['group_post']] = result_el.post.map(group_dict)
-        # group by pre, sum; group by post, average
-        # e.g. if group is cell type: the input proportion from type A to an average neuron in type B
-        result_el = result_el.groupby(
-            ['group_pre', 'group_post', 'post']).weight.sum().reset_index()
-        result_el = result_el.groupby(
-            ['group_pre', 'group_post']).weight.mean().reset_index()
-        result_el.columns = ['pre', 'post', 'weight']
+        result_el = group_edge_by(result_el, group_dict)
+        # result_el.loc[:, ['group_pre']] = result_el.pre.map(group_dict)
+        # result_el.loc[:, ['group_post']] = result_el.post.map(group_dict)
+        # # group by pre, sum; group by post, average
+        # # e.g. if group is cell type: the input proportion from type A to an average neuron in type B
+        # result_el = result_el.groupby( # sum across pre
+        #     ['group_pre', 'group_post', 'post']).weight.sum().reset_index()
+        # result_el = result_el.groupby( # average across post
+        #     ['group_pre', 'group_post']).weight.mean().reset_index()
+        # result_el.columns = ['pre', 'post', 'weight']
 
     # pivot wider
     if wide:
@@ -533,3 +535,98 @@ def effective_conn_from_paths(paths, group_dict=None, wide=True):
         result_el.fillna(0, inplace=True)
 
     return result_el
+
+
+def signed_effective_conn_from_paths(paths, group_dict=None, wide=True, idx_to_nt=None):
+    """
+    Calculate the *signed* effective connectivity between (groups of) neurons based only on the provided `paths` between neurons. This function runs on CPU, and doesn't expect a big connectivity matrix as input. 
+
+    Args:
+        paths (pd.DataFrame): A dataframe representing the paths between neurons, with columns 'pre', 'post', 'weight', 'layer', and optionally 'sign'.
+        group_dict (dict, optional): A dictionary mapping neuron indices (values in columns `pre` and `post`) to groups. Defaults to None.
+        wide (bool, optional): Whether to pivot the output dataframe to a wide format. Defaults to True.
+        idx_to_nt (dict, optional): A dictionary mapping neuron indices (values in columns `pre` and `post`) to 1 (excitatory) / -1 (inhibitory). Defaults to None.
+
+    Returns: 
+        list: A list of two dataframes representing the effective connectivity between groups of neurons, one for effective excitation, the other inhibition.
+
+    """
+
+    if ('sign' not in paths.columns) & (idx_to_nt is None):
+        raise ValueError(
+            "Either 'sign' column must be present in paths or idx_to_nt must be provided.")
+
+    # setting local indices
+    # it will get confusing if we didn't use the same mapping for all layers
+    # though it is true that this would increase the size of the matrix being multiplied
+    local_idx_dict = {idx: i for i, idx in enumerate(
+        set(paths.pre).union(set(paths.post)))}
+    local_to_global_idx = {i: idx for idx, i in local_idx_dict.items()}
+    paths.loc[:, ['pre_idx']] = paths.pre.map(local_idx_dict)
+    paths.loc[:, ['post_idx']] = paths.post.map(local_idx_dict)
+
+    # make sure sign is in the column:
+    if 'sign' not in paths.columns:
+        if any(~paths.pre.isin(idx_to_nt)):
+            print(
+                'Warning: some neurons are not in idx_to_nt. Their outputs will be ignored')
+        paths.loc[:, 'sign'] = paths.pre.map(idx_to_nt)
+
+    # matmul with sparse matrices
+    for i, layer in enumerate(sorted(paths.layer.unique())):
+        if i == 0:
+            initial_el_e = paths[(paths.layer == layer) & (paths.sign == 1)]
+            initial_el_i = paths[(paths.layer == layer) & (paths.sign == -1)]
+            csr_e = csr_matrix((initial_el_e.weight,
+                                (initial_el_e.pre_idx.values, initial_el_e.post_idx.values)),
+                               shape=(len(local_idx_dict), len(local_idx_dict)))
+            csr_i = csr_matrix((initial_el_i.weight,
+                                (initial_el_i.pre_idx.values, initial_el_i.post_idx.values)),
+                               shape=(len(local_idx_dict), len(local_idx_dict)))
+
+        else:
+            el_e = paths[(paths.layer == layer) & (paths.sign == 1)]
+            el_i = paths[(paths.layer == layer) & (paths.sign == -1)]
+            this_csr_e = csr_matrix((el_e.weight, (el_e.pre_idx.values, el_e.post_idx.values)),
+                                    shape=(len(local_idx_dict), len(local_idx_dict)))
+            this_csr_i = csr_matrix((el_i.weight, (el_i.pre_idx.values, el_i.post_idx.values)),
+                                    shape=(len(local_idx_dict), len(local_idx_dict)))
+            # e = ee + ii
+            # make sure csr_e is not modified in place, so that we can use it for csr_i
+            csr_e_new = csr_e @ this_csr_e + csr_i @ this_csr_i
+            # i = ie + ei
+            csr_i = csr_e @ this_csr_i + csr_i @ this_csr_e
+            # now modify csr_e
+            csr_e = csr_e_new
+
+    coo_e = csr_e.tocoo()
+    coo_i = csr_i.tocoo()
+
+    # make dataframe based on the connectivity matrix
+    result_el_e = pd.DataFrame({'pre_idx': coo_e.row,
+                                'post_idx': coo_e.col,
+                                'weight': coo_e.data})
+    result_el_i = pd.DataFrame({'pre_idx': coo_i.row,
+                                'post_idx': coo_i.col,
+                                'weight': coo_i.data})
+    # change back to the global names
+    result_el_e.loc[:, ['pre']] = result_el_e.pre_idx.map(local_to_global_idx)
+    result_el_e.loc[:, ['post']] = result_el_e.post_idx.map(
+        local_to_global_idx)
+    result_el_i.loc[:, ['pre']] = result_el_i.pre_idx.map(local_to_global_idx)
+    result_el_i.loc[:, ['post']] = result_el_i.post_idx.map(
+        local_to_global_idx)
+
+    if group_dict is not None:
+        result_el_e = group_edge_by(result_el_e, group_dict)
+        result_el_i = group_edge_by(result_el_i, group_dict)
+
+    if wide:
+        result_el_e = result_el_e.pivot(
+            index='pre', columns='post', values='weight')
+        result_el_e.fillna(0, inplace=True)
+        result_el_i = result_el_i.pivot(
+            index='pre', columns='post', values='weight')
+        result_el_i.fillna(0, inplace=True)
+
+    return result_el_e, result_el_i
