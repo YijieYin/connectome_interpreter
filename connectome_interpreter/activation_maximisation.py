@@ -686,10 +686,14 @@ def activations_to_df(inprop, opt_in, out, sensory_indices,
             pre = all_act[layer-1]
             post = all_act[layer]
 
+        pre_stringkeys = {str(key): val for key, val in pre.items()}
+        post_stringkeys = {str(key): val for key, val in post.items()}
+
         if high_ram:
             # index the big connectivity matrix for this layer
             connections = conn_el[conn_el.pre.isin(
-                pre.keys()) & conn_el.post.isin(post.keys())]
+                pre_stringkeys.keys()) & conn_el.post.isin(post_stringkeys.keys())]
+
         else:
             # pre and post are already grouped by inidx and outidx_mapping
             # so need to recover the indices using pre, inidx_map, post, outidx_map
@@ -706,8 +710,10 @@ def activations_to_df(inprop, opt_in, out, sensory_indices,
 
         # so that direct connectivity is layer 1
         connections.loc[:, ['layer']] = layer+1
-        connections.loc[:, ['pre_activation']] = connections.pre.map(pre)
-        connections.loc[:, ['post_activation']] = connections.post.map(post)
+        connections.loc[:, ['pre_activation']
+                        ] = connections.pre.map(pre_stringkeys)
+        connections.loc[:, ['post_activation']
+                        ] = connections.post.map(post_stringkeys)
         if connections.shape[0] > 0:
             paths.append(connections)
         else:
