@@ -378,15 +378,18 @@ def to_nparray(input_data):
     return np.unique(cleaned_array)
 
 
-def get_ngl_link(df, no_connection_invisible=True, group_by=None, colour_saturation=0.4, scene=None, source=None, normalise=None, include_postsynaptic_neuron=False, diff_colours_per_layer=False, colors=None, colormap='viridis',
-                 df_format='wide'):
+def get_ngl_link(df: pd.DataFrame | pd.Series, no_connection_invisible: bool = True, group_by: dict = None, colour_saturation: float = 0.4,
+                 scene=None, source: list = None, normalise: str = None,
+                 include_postsynaptic_neuron: bool = False, diff_colours_per_layer: bool = False, colors: list = None, colormap: str = 'viridis',
+                 df_format: str = 'wide') -> str:
     """
     Generates a Neuroglancer link with layers based on the neuron ids and the values in `df`. 
 
     Args:
-        df (pandas.DataFrame): A DataFrame containing neuron metadata. If `df_format` == `wide` (default), the index should contain neuron identifiers (root_ids), and columns should represent different
+        df (pandas.DataFrame or pandas.Series): A DataFrame containing neuron metadata. If `df_format` == `wide` (default), the index should contain neuron identifiers (bodyId/root_ids), and columns should represent different
       attributes, timesteps or categories. If `df_format` == `long`, the DataFrame should contain three columns: 'neuron_id', 'layer', and 'activation'.
         no_connection_invisible (bool, optional): Whether to make invisible neurons that are not connected. Default to True (invisible). 
+        group_by (dict, optional): A dictionary mapping neuron identifiers to group names. Each group will have its own layer. Default to None.
         colour_saturation (float, optional): The saturation of the colours. Default to 0.4.
         scene (ngl.Scene, optional): A Neuroglancer scene object from nglscenes package. You can read a scene from clipboard like `scene = Scene.from_clipboard()`. 
         source (list, optional): The source of the Neuroglancer layers. Default to None, in which case Full Adult Fly Brain neurons are used. 
@@ -412,6 +415,10 @@ def get_ngl_link(df, no_connection_invisible=True, group_by=None, colour_saturat
     except ImportError:
         raise ImportError(
             "To use this function, please install the package by running 'pip3 install git+https://github.com/schlegelp/nglscenes@main'")
+
+    # if df is a pandas series, turn into dataframe
+    if isinstance(df, pd.Series):
+        df = df.to_frame()
 
     # define a scene if not given:
     if scene == None:
@@ -490,14 +497,17 @@ def get_ngl_link(df, no_connection_invisible=True, group_by=None, colour_saturat
 
         for grp in df_group.group.unique():
             df_group_grp = df_group[df_group.group == grp]
+            df_group_grp.drop('group', axis=1, inplace=True)
 
             layer = ngl.SegmentationLayer(
                 source=source, name=str(ite)+' '+str(grp))
 
             if normalise is not None:
                 if normalise == 'layer':
-                    df_group_grp = (df_group_grp - df_group_grp.min()) / \
-                        (df_group_grp.max() - df_group_grp.min())
+                    # if there is only one row, then keep it as is
+                    if df_group_grp.shape[0] > 1:
+                        df_group_grp = (df_group_grp - df_group_grp.min()) / \
+                            (df_group_grp.max() - df_group_grp.min())
 
             layer['segments'] = list(df_group_grp.index.astype(str))
             if diff_colours_per_layer:
