@@ -144,7 +144,7 @@ def find_path_iteratively(inprop_csc, steps_cpu, inidx, outidx, target_layer_num
     return pd.concat(dfs)
 
 
-def create_layered_positions(df, priority_indices=None, sort_dict=None):
+def create_layered_positions(df: pd.DataFrame, priority_indices=None, sort_dict: dict = None):
     """
     Creates a dictionary of positions for each neuron in the paths, so that the paths can be visualized in a layered manner. It assumes that `df` contains the columns 'layer', 'pre_layer', 'post_layer' (or 'layer', 'pre', 'post'). If a neuron exists in multiple layers, it is plotted multiple times.
     Args:
@@ -206,7 +206,7 @@ def create_layered_positions(df, priority_indices=None, sort_dict=None):
     return positions
 
 
-def remove_excess_neurons(df, keep=None, target_indices=None, keep_targets_in_middle=False):
+def remove_excess_neurons(df: pd.DataFrame, keep=None, target_indices=None, keep_targets_in_middle: bool = False) -> pd.DataFrame:
     """After filtering, some neurons are no longer on the paths between the input and output neurons. This function removes those neurons from the paths.
 
     Args:
@@ -218,6 +218,11 @@ def remove_excess_neurons(df, keep=None, target_indices=None, keep_targets_in_mi
     Returns:
         pd.Dataframe: a dataframe with similar structure as the result of `find_path_iteratively()`, with the excess neurons removed.
     """
+
+    if df.shape[0] == 0:
+        # raise error
+        raise ValueError('There are no connections! Threshold too high?')
+
     max_layer_num = df.layer.max()
     if max_layer_num == 1:
         return df
@@ -339,7 +344,7 @@ def remove_excess_neurons(df, keep=None, target_indices=None, keep_targets_in_mi
     return df
 
 
-def filter_paths(df, threshold=0, necessary_intermediate=None):
+def filter_paths(df: pd.DataFrame, threshold: float = 0, necessary_intermediate: dict = None) -> pd.DataFrame:
     """Filters the paths based on the weight threshold and the necessary intermediate neurons. The weight threshold refers to the direct connectivity between connected neurons in the path. It is recommended to not put too may neurons in necessary_intermediate, as it may be too stringent and remove all paths.
 
     Args:
@@ -396,13 +401,13 @@ def group_paths(paths, pre_group, post_group, intermediate_group=None):
 
     # add cell type information
     # first use intermediate_group, then modify specifically for pre at the first layer, and post at the last layer
-    paths['pre_type'] = paths.pre.map(intermediate_group)
-    paths['post_type'] = paths.post.map(intermediate_group)
+    paths['pre_type'] = paths.pre.map(intermediate_group).astype(str)
+    paths['post_type'] = paths.post.map(intermediate_group).astype(str)
 
     paths.loc[paths.layer == paths.layer.min(), 'pre_type'] = paths.loc[paths.layer ==
-                                                                        paths.layer.min(), 'pre'].map(pre_group)
+                                                                        paths.layer.min(), 'pre'].map(pre_group).astype(str)
     paths.loc[paths.layer == paths.layer.max(), 'post_type'] = paths.loc[paths.layer ==
-                                                                         paths.layer.max(), 'post'].map(post_group)
+                                                                         paths.layer.max(), 'post'].map(post_group).astype(str)
 
     # sometimes only one neuron in a type is connected to another type, so only this connection is in paths
     # but to calculate the average weight between two types, we should take into account all the neurons of the post-synaptic type
