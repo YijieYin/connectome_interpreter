@@ -1,5 +1,6 @@
 # Documentation build dependencies
 Sphinx>=7.2
+sphinx_rtd_theme
 
 # Project dependencies 
 numpy>=1.26
