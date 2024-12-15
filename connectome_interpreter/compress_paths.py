@@ -1,4 +1,5 @@
 import torch
+import math
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
@@ -8,8 +9,121 @@ import ipywidgets as widgets
 import seaborn as sns
 import matplotlib.pyplot as plt
 from IPython.display import display
+import sys
 
 from .utils import dynamic_representation, torch_sparse_where, to_nparray, tensor_to_csc, group_edge_by
+
+def compress_paths_memeff(inprop, step_number, threshold=0, output_threshold=1e-4, root=False, chunks=1):
+    """
+    Performs iterative multiplication of a sparse matrix `inprop` for a specified number of steps,
+    applying thresholding to filter out values below a certain `threshold` to optimize memory usage
+    and computation speed. The function is optimized to run on GPU if available. It needs >= size_of_inprop * 3 amount of GPU memory, for matrix multiplication, and thresholding.
+
+    This function multiplies the connectivity matrix (input in rows; output in columns) `inprop` with itself `step_number` times,
+    with each step's result being thresholded to zero out elements below a given threshold.
+    The function stores each step's result in a list, where each result is further
+    processed to drop values below the `output_threshold` to save memory.
+
+    Args:
+        inprop (scipy.sparse.matrix): The connectivity matrix as a scipy sparse matrix.
+        step_number (int): The number of iterations to perform the matrix multiplication.
+        threshold (float, optional): The threshold value to apply after each multiplication.
+                                     Values below this threshold are set to zero. Defaults to 0.
+        output_threshold (float, optional): The threshold value to apply to the final output,
+                                            used to reduce memory footprint. Defaults to 1e-4.
+        root (bool, optional): Whether to take the nth root of the output. This can be understood as "the average direct connection strength" (when root=True), as opposed to "the proportion of influence among all partners n steps away" (when root=False). Defaults to False.
+
+    Returns:
+        list: A list of scipy.sparse.csc_matrix objects, each representing connectivity from all neurons to all neurons n steps away.
+
+    Note:
+        This function requires PyTorch and is designed to automatically utilize CUDA-enabled GPU devices
+        if available to accelerate computations. The input matrix `inprop` is converted to a dense tensor
+        before processing.
+
+    Example:
+        >>> from scipy.sparse import csr_matrix
+        >>> import numpy as np
+        >>> inprop = csr_matrix(np.array([[0.1, 0.2], [0.3, 0.4]]))
+        >>> step_number = 2
+        >>> compressed_paths = compress_paths(inprop, step_number, threshold=0.1, output_threshold=0.01)
+        >>> print(compressed_paths)
+    """
+    steps_fast = []
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    inprop_tensor = torch.tensor(inprop.toarray())
+    size = inprop_tensor.size(dim=0)
+
+    import math
+    chunkSize = math.ceil(size / chunks)
+
+    # allocate memory on cuda device to save current column
+    out_col = torch.full((size,chunkSize), 0.0, dtype=torch.float32)
+    in_rows = torch.full((chunkSize, size), 0.0, dtype=torch.float32)
+    # the result submatrix 
+    out_chunk = torch.full((chunkSize,chunkSize), 0.0, dtype=torch.float32)
+    out_chunk.to(device)
+
+    run = torch.cuda.is_available()
+
+    if run: 
+        print("run is true")
+        with torch.no_grad():
+            for i in tqdm(range(step_number)): 
+                print(" \n")
+                if i==0:
+                    out_tensor = inprop_tensor.clone()
+                    inprop_tensor.to(device)
+                else:
+                    out_tensor_new = out_tensor.clone()
+                    colLow = 0
+                    colHigh = chunkSize
+                    for colChunk in range(chunks): # iterate chunks colwise
+                        out_col.to(device)
+                        #out_col = torch.full((size, chunkSize), 1.0*colChunk) 
+                        rowLow = 0
+                        rowHigh = chunkSize
+                        for rowChunk in range(chunks): # iterate chunks rowwise
+                            in_rows = out_tensor[rowLow:rowHigh, :]
+                            in_rows.to(device)
+                            #print(rowLow, rowHigh, colLow, colHigh)
+                            out_col[rowLow:rowHigh] = torch.matmul(in_rows, inprop_tensor[:,colLow:colHigh])
+                            #out_col[rowLow:rowHigh] = out_chunk
+                            rowLow += chunkSize
+                            rowHigh += chunkSize
+                            rowHigh = min(rowHigh, size)
+                        out_col.to('cpu')
+                        in_rows.to('cpu')
+                        out_tensor_new[:, colLow:colHigh] = out_col
+                        colLow += chunkSize
+                        colHigh += chunkSize
+                        colHigh = min(colHigh, size)
+                    out_tensor = out_tensor_new.clone()
+                print(out_tensor)
+                
+                
+                # Thresholding during matmul
+                if threshold != 0:
+                    out_tensor = torch.where(
+                        out_tensor >= threshold, out_tensor, torch.tensor(0.0))
+
+                # Convert to csc for output
+                out_csc = tensor_to_csc(out_tensor)
+                out_csc.eliminate_zeros()
+
+                if root:
+                    out_csc.data = np.power(out_csc.data, 1/(i+1))
+
+                if output_threshold > 0:
+                    out_csc.data = np.where(
+                        out_csc.data >= output_threshold, out_csc.data, 0)
+                    out_csc.eliminate_zeros()
+
+                steps_fast.append(out_csc)
+                torch.cuda.empty_cache()
+
+    return steps_fast
 
 
 def compress_paths(inprop, step_number, threshold=0, output_threshold=1e-4, root=False):
