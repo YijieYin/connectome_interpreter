@@ -74,7 +74,6 @@ def compress_paths_memeff(inprop, step_number, threshold=0, output_threshold=1e-
                 colHigh = chunkSize
                 for colChunk in range(chunks): # iterate chunks colwise
                     out_col = out_col.to(device)
-                    #out_col = torch.full((size, chunkSize), 1.0*colChunk)
                     rowLow = 0
                     rowHigh = chunkSize
                     for rowChunk in range(chunks): # iterate chunks rowwise
@@ -82,7 +81,6 @@ def compress_paths_memeff(inprop, step_number, threshold=0, output_threshold=1e-
                         in_rows = out_tensor[rowLow:rowHigh, :]
                         in_rows = in_rows.to(device)
                         out_col[rowLow:rowHigh] = torch.matmul(in_rows, inprop_tensor[:,colLow:colHigh])
-                        #print(rowLow, rowHigh, colLow, colHigh)
                         rowLow += chunkSize
                         rowHigh += chunkSize
                         rowHigh = min(rowHigh, size)
