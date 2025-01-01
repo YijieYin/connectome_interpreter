@@ -61,67 +61,62 @@ def compress_paths_memeff(inprop, step_number, threshold=0, output_threshold=1e-
     # allocate memory on cuda device to save current column
     out_col = torch.full((size,chunkSize), 0.0, dtype=torch.float32)
     in_rows = torch.full((chunkSize, size), 0.0, dtype=torch.float32)
-    # the result submatrix 
-    out_chunk = torch.full((chunkSize,chunkSize), 0.0, dtype=torch.float32)
-    out_chunk.to(device)
 
-    run = torch.cuda.is_available()
+    out_tensor_new = torch.full((size,size), 0.0, dtype=torch.float32)
 
-    if run: 
-        print("run is true")
-        with torch.no_grad():
-            for i in tqdm(range(step_number)): 
-                print(" \n")
-                if i==0:
-                    out_tensor = inprop_tensor.clone()
-                    inprop_tensor.to(device)
-                else:
-                    out_tensor_new = out_tensor.clone()
-                    colLow = 0
-                    colHigh = chunkSize
-                    for colChunk in range(chunks): # iterate chunks colwise
-                        out_col.to(device)
-                        #out_col = torch.full((size, chunkSize), 1.0*colChunk) 
-                        rowLow = 0
-                        rowHigh = chunkSize
-                        for rowChunk in range(chunks): # iterate chunks rowwise
-                            in_rows = out_tensor[rowLow:rowHigh, :]
-                            in_rows.to(device)
-                            #print(rowLow, rowHigh, colLow, colHigh)
-                            out_col[rowLow:rowHigh] = torch.matmul(in_rows, inprop_tensor[:,colLow:colHigh])
-                            #out_col[rowLow:rowHigh] = out_chunk
-                            rowLow += chunkSize
-                            rowHigh += chunkSize
-                            rowHigh = min(rowHigh, size)
-                        out_col.to('cpu')
-                        in_rows.to('cpu')
-                        out_tensor_new[:, colLow:colHigh] = out_col
-                        colLow += chunkSize
-                        colHigh += chunkSize
-                        colHigh = min(colHigh, size)
-                    out_tensor = out_tensor_new.clone()
+    with torch.no_grad():
+        for i in tqdm(range(step_number)):
+            if i==0:
+                out_tensor = inprop_tensor.clone()
+                inprop_tensor = inprop_tensor.to(device)
+            else:
+                colLow = 0
+                colHigh = chunkSize
+                for colChunk in range(chunks): # iterate chunks colwise
+                    out_col = out_col.to(device)
+                    #out_col = torch.full((size, chunkSize), 1.0*colChunk)
+                    rowLow = 0
+                    rowHigh = chunkSize
+                    for rowChunk in range(chunks): # iterate chunks rowwise
+                        torch.cuda.reset_peak_memory_stats()
+                        in_rows = out_tensor[rowLow:rowHigh, :]
+                        in_rows = in_rows.to(device)
+                        out_col[rowLow:rowHigh] = torch.matmul(in_rows, inprop_tensor[:,colLow:colHigh])
+                        #print(rowLow, rowHigh, colLow, colHigh)
+                        rowLow += chunkSize
+                        rowHigh += chunkSize
+                        rowHigh = min(rowHigh, size)
+                        print(f'max memory in {i}: {torch.cuda.max_memory_allocated()/ 1024**2:.2f} MB')
+                    out_col = out_col.to('cpu')
+                    in_rows = in_rows.to('cpu')
+                    out_tensor_new[:, colLow:colHigh] = out_col
+                    out_col = torch.full((size,chunkSize), 0.0, dtype=torch.float32)
+                    colLow += chunkSize
+                    colHigh += chunkSize
+                    colHigh = min(colHigh, size)
+                out_tensor = out_tensor_new.clone()
                 print(out_tensor)
-                
-                
-                # Thresholding during matmul
-                if threshold != 0:
-                    out_tensor = torch.where(
-                        out_tensor >= threshold, out_tensor, torch.tensor(0.0))
 
-                # Convert to csc for output
-                out_csc = tensor_to_csc(out_tensor)
-                out_csc.eliminate_zeros()
 
-                if root:
-                    out_csc.data = np.power(out_csc.data, 1/(i+1))
+    # Thresholding during matmul
+    if threshold != 0:
+        out_tensor = torch.where(
+            out_tensor >= threshold, out_tensor, torch.tensor(0.0))
 
-                if output_threshold > 0:
-                    out_csc.data = np.where(
-                        out_csc.data >= output_threshold, out_csc.data, 0)
-                    out_csc.eliminate_zeros()
+    # Convert to csc for output
+    out_csc = tensor_to_csc(out_tensor)
+    out_csc.eliminate_zeros()
 
-                steps_fast.append(out_csc)
-                torch.cuda.empty_cache()
+    if root:
+        out_csc.data = np.power(out_csc.data, 1/(i+1))
+
+    if output_threshold > 0:
+        out_csc.data = np.where(
+            out_csc.data >= output_threshold, out_csc.data, 0)
+        out_csc.eliminate_zeros()
+
+    steps_fast.append(out_csc)
+    torch.cuda.empty_cache()
 
     return steps_fast
 
