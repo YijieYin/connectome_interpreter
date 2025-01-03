@@ -1087,3 +1087,164 @@ def path_for_ngl(path):
         df = df.drop_duplicates()
         dfs.append(df)
     return pd.concat(dfs)
+
+
+def make_grid_inputs(v1, v2, num_layers: int, grid_size: int = 10, timepoints: int | list = 0, device=None) -> Tuple[torch.Tensor, List[Tuple[float, float]]]:
+    """
+    Make a batch of input using combinations of v1 and v2 at different strengths (0 to 1). 
+
+    Args:
+        v1 (np.ndarray): The first input vector.
+        v2 (np.ndarray): The second input vector. Its length should match that of `v1`.
+        num_layers (int): The number of layers in the model.
+        grid_size (int, optional): The number of points in the grid. Defaults to 10.
+        timepoints (int|list, optional): The timepoints at which combinations of v1 and v2 are used. Defaults to 0 (the first timepoint).
+        device (str, optional): The device to create the inputs on. If None, if GPU is available, the inputs are created on the GPU. Otherwise CPU.
+
+    Returns:
+        torch.Tensor: A tensor of shape (grid_size**2, len(v1), num_layers).
+        list: A list of grid coordinates.
+    """
+
+    # first check if length of v1 and v2 are the same
+    if len(v1) != len(v2):
+        raise ValueError("The length of v1 and v2 should be the same.")
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    sc1 = np.linspace(0, 1, grid_size)
+    sc2 = np.linspace(0, 1, grid_size)
+    sc1_grid, sc2_grid = np.meshgrid(sc1, sc2)
+
+    inputs = np.zeros((grid_size**2, len(v1), num_layers), dtype=np.float32)
+    for i, (s1, s2) in enumerate(zip(sc1_grid.ravel(), sc2_grid.ravel())):
+        inputs[i, :, timepoints] = v1 * s1 + v2 * s2
+
+    # Convert to torch tensor
+    inputs_tensor = torch.from_numpy(inputs).to(device)
+
+    # Create grid coordinates for reference
+    grid_coords = list(zip(sc1_grid.ravel(), sc2_grid.ravel()))
+
+    return inputs_tensor, grid_coords
+
+
+def plot_output_grid(grid_outputs: torch.Tensor, grid_coords: List[Tuple[float, float]], selected_index: int | List[int], figsize: tuple = (10, 8)):
+    """
+    Plot the output grid for selected indices.
+
+    Args:
+        grid_outputs (torch.Tensor): The output grid tensor of shape (grid_size**2, num_neurons, num_layers).
+        grid_coords (list): A list of grid coordinates. Best from function `make_grid_inputs()`.
+        selected_index (int|list): The index or indices to plot.
+        figsize (tuple, optional): The size of the figure. Defaults to (10, 8).
+    """
+    selected_index = to_nparray(selected_index)
+
+    def plot_heatmap(index):
+        # Create the plot
+        plt.figure(figsize=figsize)
+        im = plt.imshow(heatmaps[index-1], cmap='viridis', origin='lower',
+                        extent=[0, 1, 0, 1])
+        plt.colorbar(im, label='Output')
+        plt.xlabel('v1 Activation')
+        plt.ylabel('v2 Activation')
+        plt.title(f'Output Grid for {selected_index}')
+        plt.show()
+
+    heatmaps = []
+
+    for i in range(grid_outputs.shape[2]):
+        # Extract the selected index values
+        values = grid_outputs[:, selected_index,
+                              i].cpu().numpy().mean(axis=1)
+
+        # Reshape values to match the grid
+        grid_size = int(np.sqrt(len(grid_coords)))
+        values_grid = values.reshape((grid_size, grid_size))
+        heatmaps.append(values_grid)
+
+    slider = widgets.IntSlider(value=1, min=1, max=len(heatmaps), step=1,
+                               description='Timepoint', continuous_update=True)
+
+    # Link the slider to the plotting function
+    display(widgets.interactive(plot_heatmap, index=slider))
+    return plt
+
+
+@dataclass
+class XORCircuit:
+    # Input nodes
+    input1: list
+    input2: list
+    # Middle layer nodes
+    exciter1: str  # Takes input from input1 only
+    exciter2: str  # Takes input from input2 only
+    inhibitor: str        # Takes input from both inputs
+    # Output node
+    output: list
+
+
+def find_xor(paths: pd.DataFrame) -> List[XORCircuit]:
+    """
+    Find XOR-like circuits in a 3-layer network, based on [Wang et al. 2024](https://www.biorxiv.org/content/10.1101/2024.09.24.614724v2). Note: this function currently ignores middle excitatory neruons that receive both inputs.
+
+    Args:
+        paths: DataFrame with columns ['pre', 'post', 'sign', 'layer']
+        pre: source node
+        post: target node
+        sign: 1 (excitatory) or -1 (inhibitory)
+        layer: 1 (input->middle) or 2 (middle->output)
+
+    Returns:
+    List of XORCircuit objects, each representing a found XOR motif
+    """
+    # checking input ----
+    if set(paths.layer) != {1, 2}:
+        raise ValueError(
+            "The input DataFrame should have exactly 2 unique layers, 1 and 2")
+
+    # check column names of paths
+    if not {'pre', 'post', 'sign', 'layer'}.issubset(paths.columns):
+        raise ValueError(
+            "The input DataFrame should have columns ['pre', 'post', 'sign', 'layer']")
+
+    # check values of signs: if it's a subset of {1, -1}
+    if set(paths.sign) > {1, -1}:
+        raise ValueError(
+            f"The input DataFrame should have values 1 (excitatory) or -1 (inhibitory) in the 'sign' column, but got {set(paths.sign)}")
+
+    # define variables ----
+    circuits = []
+
+    exciters = paths.pre[(paths.layer == 2) & (paths.sign == 1)].unique()
+    inhibitors = paths.pre[(paths.layer == 2) & (paths.sign == -1)].unique()
+
+    l1 = paths[paths.layer == 1]
+    l2 = paths[paths.layer == 2]
+
+    exciter_us_dict = {exc: set(l1.pre[l1.post == exc]) for exc in exciters}
+    inhibitor_us_dict = {inh: set(l1.pre[l1.post == inh])
+                         for inh in inhibitors}
+
+    exciter_ds_dict = {exc: set(l2.post[l2.pre == exc]) for exc in exciters}
+    inhibitor_ds_dict = {inh: set(l2.post[l2.pre == inh])
+                         for inh in inhibitors}
+
+    # main algorithm ----
+    for e1, e2 in itertools.combinations(exciters, 2):
+        common = exciter_us_dict[e1] & exciter_us_dict[e2]
+        onlye1 = exciter_us_dict[e1] - common
+        onlye2 = exciter_us_dict[e2] - common
+
+        for i in inhibitors:
+            e1_i_intersect = onlye1 & inhibitor_us_dict[i]
+            e2_i_intersect = onlye2 & inhibitor_us_dict[i]
+            if (len(e1_i_intersect) != 0) and (len(e2_i_intersect) != 0):
+                targets = exciter_ds_dict[e1] & exciter_ds_dict[e2] & inhibitor_ds_dict[i]
+                if len(targets) > 0:
+                    circuits.append(XORCircuit(input1=list(e1_i_intersect), input2=list(e2_i_intersect),
+                                               exciter1=e1, exciter2=e2, inhibitor=i, output=list(targets)))
+
+    return circuits
