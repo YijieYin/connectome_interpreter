@@ -189,7 +189,7 @@ def activation_maximisation(
     """
     Performs activation maximisation on a given model to identify input patterns that result in the target activations.
 
-    This is done by adjusting `input_tensor` over `num_iterations` using gradient descent, while also regularising the overall input and output (to keep activated neurons sparse). The function supports early stopping based on a threshold to prevent unnecessary computations if the activation change becomes negligible.
+    This is done by adjusting the input tensor over `num_iterations` using gradient descent, while also regularising the overall input and output (to keep activated neurons sparse). The function supports early stopping based on a threshold to prevent unnecessary computations if the activation change becomes negligible.
 
     Args:
         model: A PyTorch model with `activations`, `sensory_indices`, and `threshold` attributes.
@@ -202,7 +202,7 @@ def activation_maximisation(
         out_reg_lambda (float, optional): The coefficient for output regularization. Defaults to 0.01.
         custom_reg_functions (Dict[str, Callable[[torch.Tensor], torch.Tensor]], optional): A dictionary with keys 'in' and 'out' that
             map to functions that calculate the input and output regularization losses, respectively. If None, the default
-            regularization function (L1+L2) is used. Defaults to None.
+            regularization function (L1 plus L2) is used. Defaults to None.
         early_stopping (bool, optional): Whether to stop the optimization early if the difference between the biggest and the smallest loss within the last n_runs falls below `stopping_threshold`.
             Defaults to True.
         stopping_threshold (float, optional): The threshold for early stopping. Defaults to 1e-6.
@@ -211,40 +211,48 @@ def activation_maximisation(
         print_output (bool, optional): Whether to print loss information during optimization. Defaults to True.
         report_memory_usage (bool, optional): Whether to report GPU memory usage during optimization. Defaults to False.
         device: The device to run the optimization on. If None, automatically selects a device. Defaults to None.
-        wandb (bool, optional): Whether to log optimization details to Weights & Biases. Defaults to True. Requires wandb to be installed.
+        wandb (bool, optional): Whether to log optimization details to Weights & Biases (https://wandb.ai/site/). Defaults to True. Requires wandb to be installed.
 
     Returns:
-        A tuple containing:
-        The optimized `input_tensor` as a numpy array.
-        The output of the model after optimization as a numpy array.
-        A list of output activation losses over iterations.
-        A list of input activation regularization losses over iterations.
-        A list of output activation regularization losses over iterations.
-        A list of input tensor snapshots taken during optimization.
+        tuple: A tuple containing:
+
+            - numpy.ndarray: The optimized input as a numpy array.
+            - numpy.ndarray: The output of the model after optimization as a numpy array.
+            - list(float): A list of output activation losses over iterations.
+            - list(float): A list of input activation regularization losses over iterations.
+            - list(float): A list of output activation regularization losses over iterations.
+            - list(numpy.ndarray): A list of input tensor snapshots taken during optimization.
+
 
     Examples:
-        # Single target for multiple batches
-        >>> targets_dict = {
-        ...     0: {1: 0.5, 2: 0.8},  # layer 0: neuron 1 -> 0.5, neuron 2 -> 0.8
-        ...     1: {0: 0.3}           # layer 1: neuron 0 -> 0.3
-        ... }
-        >>> targets = TargetActivation(targets=targets_dict, batch_size=4)
-        >>> inputs, outputs, *losses = activation_maximisation(model, targets)
 
-        # Different targets per batch using DataFrame
-        >>> targets_df = pd.DataFrame([
-        ...     {'batch': 0, 'layer': 0, 'neuron': 1, 'value': 0.5},
-        ...     {'batch': 0, 'layer': 0, 'neuron': 2, 'value': 0.8},
-        ...     {'batch': 1, 'layer': 1, 'neuron': 0, 'value': 0.3}
-        ... ])
-        >>> targets = TargetActivation(targets=targets_df)  # batch_size inferred
-        >>> results = activation_maximisation(model, targets)
+        .. code-block:: python
 
-        # Custom regularization
-        >>> def sparse_reg(x): return torch.sum(torch.abs(x))
-        >>> custom_reg = {'in': sparse_reg, 'out': sparse_reg}
-        >>> results = activation_maximisation(model, targets, 
-        ...                                  custom_reg_functions=custom_reg)
+            # Single target for multiple batches
+            targets_dict = {
+                0: {1: 0.5, 2: 0.8},  # layer 0: neuron 1 -> 0.5, neuron 2 -> 0.8
+                1: {0: 0.3}           # layer 1: neuron 0 -> 0.3
+            }
+            targets = TargetActivation(targets=targets_dict, batch_size=4)
+            inputs, outputs, *losses = activation_maximisation(model, targets)
+
+            # Different targets per batch using DataFrame
+            targets_df = pd.DataFrame([
+                {'batch': 0, 'layer': 0, 'neuron': 1, 'value': 0.5},
+                {'batch': 0, 'layer': 0, 'neuron': 2, 'value': 0.8},
+                {'batch': 1, 'layer': 1, 'neuron': 0, 'value': 0.3}
+            ])
+            targets = TargetActivation(targets=targets_df)  # batch_size inferred
+            results = activation_maximisation(model, targets)
+
+            # Custom regularization
+            def sparse_reg(x):
+                return torch.sum(torch.abs(x))
+            custom_reg = {'in': sparse_reg, 'out': sparse_reg}
+            results = activation_maximisation(
+                model, targets, custom_reg_functions=custom_reg
+            )
+
     """
 
     def default_reg(x):
@@ -406,7 +414,7 @@ def activation_maximisation(
             act_loss, out_reg_losses, in_reg_losses, input_snapshots)
 
 
-def activations_to_df(inprop, input: np.ndarray, out: np.ndarray, sensory_indices: List[int],
+def activations_to_df(inprop, model_input: np.ndarray, out: np.ndarray, sensory_indices: List[int],
                       inidx_mapping: dict = None, outidx_mapping: dict = None,
                       activation_threshold: float = 0, connectivity_threshold: float = 0,
                       high_ram: bool = True) -> pd.DataFrame:
@@ -418,7 +426,7 @@ def activations_to_df(inprop, input: np.ndarray, out: np.ndarray, sensory_indice
     Args:
         inprop (scipy.sparse matrix or numpy.ndarray): Matrix representing the synaptic strengths
             between neurons, can be dense or sparse. Presynaptic is in the rows, postsynaptic in the columns.
-        input (numpy.ndarray): A 2D array representing input to the network. Neurons are in the rows, timepoints in the columns. Only the first timepoint is used, since `out` is expected to have activity of all neurons, including input neurons.
+        model_input (numpy.ndarray): A 2D array representing input to the network. Neurons are in the rows, timepoints in the columns. Only the first timepoint is used, since `out` is expected to have activity of all neurons, including input neurons.
         out (numpy.ndarray): A 2D array representing the output from the network. The second dimension represents timepoints.
         sensory_indices (list of int): A list of indices corresponding to sensory neurons in `inprop`.
         inidx_mapping (dict, optional): A dictionary mapping indices in `inprop` to new indices (e.g. cell type). If None, indices are not remapped.
@@ -444,15 +452,15 @@ def activations_to_df(inprop, input: np.ndarray, out: np.ndarray, sensory_indice
         outidx_mapping = inidx_mapping
 
     # move to CPU in case it's still on GPU
-    if torch.is_tensor(input):
-        input = input.cpu().numpy()
+    if torch.is_tensor(model_input):
+        model_input = model_input.cpu().numpy()
     if torch.is_tensor(out):
         out = out.cpu().numpy()
 
     print('Getting activations...')
     # get activations from input and out, based on the mappings provided by inidx_mapping and outidx_mapping
     sensory_act = get_activations(
-        input, sensory_indices, inidx_mapping, threshold=activation_threshold)
+        model_input, sensory_indices, inidx_mapping, threshold=activation_threshold)
     all_act = get_activations(
         out, all_indices, outidx_mapping, threshold=activation_threshold)
 
