@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from scipy.sparse import issparse
+from tqdm import tqdm
 
 from .utils import to_nparray, count_keys_per_value, check_consecutive_layers
 
@@ -144,7 +145,7 @@ def find_path_iteratively(inprop_csc, steps_cpu, inidx, outidx, target_layer_num
     return pd.concat(dfs)
 
 
-def create_layered_positions(df: pd.DataFrame, priority_indices=None, sort_dict: dict = None):
+def create_layered_positions(df: pd.DataFrame, priority_indices=None, sort_dict: dict = None) -> dict:
     """
     Creates a dictionary of positions for each neuron in the paths, so that the paths can be visualized in a layered manner. It assumes that `df` contains the columns 'layer', 'pre_layer', 'post_layer' (or 'layer', 'pre', 'post'). If a neuron exists in multiple layers, it is plotted multiple times.
     Args:
@@ -221,7 +222,8 @@ def remove_excess_neurons(df: pd.DataFrame, keep=None, target_indices=None, keep
 
     if df.shape[0] == 0:
         # raise error
-        raise ValueError('There are no connections! Threshold too high?')
+        raise ValueError(
+            'There are no connections (`df` is empty)! Threshold too high?')
 
     max_layer_num = df.layer.max()
     if max_layer_num == 1:
@@ -229,10 +231,15 @@ def remove_excess_neurons(df: pd.DataFrame, keep=None, target_indices=None, keep
 
     # if target_indices are provided, first use this to filter the last layer ----
     if target_indices is not None:
-        # if it's a string, convert to list
-        if type(target_indices) == str:
+        # if it's a string or int, convert to list
+        if (type(target_indices) == str) or (type(target_indices) == int):
             target_indices = [target_indices]
         target_indices = set(target_indices)
+        # check if datatype is the same, between target_indices and post
+        if not all([type(i) == type(df.post.iloc[0]) for i in target_indices]):
+            raise ValueError(
+                f'The datatype in `target_indices` should be the same as the elements in `post` column of the DataFrame. Elements in `post` is {type(df.post.iloc[0])}.')
+
         if not target_indices.issubset(df[df.layer == df.layer.max()].post):
             raise ValueError('The target indices are not in the post-synaptic neurons of the last layer. Here are the indices of the last layer: ',
                              ', '.join(df[df.layer == df.layer.max()].post.unique()), '. Your target_indices should be a subset.')
@@ -344,6 +351,31 @@ def remove_excess_neurons(df: pd.DataFrame, keep=None, target_indices=None, keep
     return df
 
 
+def remove_excess_neurons_batched(df: pd.DataFrame, keep=None, target_indices=None, keep_targets_in_middle: bool = False) -> pd.DataFrame:
+    """Does the same thing as `remove_excess_neurons()`, but for batched input (i.e. assumes column `batch` in `df`). 
+
+    Args:
+        df (pd.DataFrame): a filtered dataframe with similar structure as the dataframe returned by `find_path_iteratively()`. Must contain a column `batch`.
+        keep (list, set, pd.Series, numpy.ndarray, str, optional): A list of neuron indices that should be kept in the paths, even if they don't connect between input and target in the last layer. Defaults to None.
+        target_indices (list, set, pd.Series, numpy.ndarray, str, optional): A list of target neuron indices that should be kept in the last layer. Defaults to None, in which case all neurons in the last layer in `df` would be kept.
+        keep_targets_in_middle (bool, optional): If True, the target_indices are kept in the middle layers as well, even if they don't connect between input and target in the last layer. Defaults to False.
+
+    Returns:
+        pd.DataFrame: The filtered DataFrame containing the path data, including the layer number, pre-synaptic index, post-synaptic index, and weight
+    """
+    # first check if 'batch' is in the columns
+    if 'batch' not in df.columns:
+        raise ValueError('The column `batch` is not in the DataFrame.')
+
+    dfs = []
+    for b in tqdm(df.batch.unique()):
+        df_batch = df[df.batch == b]
+        df_batch = remove_excess_neurons(
+            df_batch, keep, target_indices, keep_targets_in_middle)
+        dfs.append(df_batch)
+    return pd.concat(dfs)
+
+
 def filter_paths(df: pd.DataFrame, threshold: float = 0, necessary_intermediate: dict = None) -> pd.DataFrame:
     """Filters the paths based on the weight threshold and the necessary intermediate neurons. The weight threshold refers to the direct connectivity between connected neurons in the path. It is recommended to not put too may neurons in necessary_intermediate, as it may be too stringent and remove all paths.
 
@@ -382,7 +414,7 @@ def filter_paths(df: pd.DataFrame, threshold: float = 0, necessary_intermediate:
     return df
 
 
-def group_paths(paths, pre_group, post_group, intermediate_group=None):
+def group_paths(paths: pd.DataFrame, pre_group: dict, post_group: dict, intermediate_group: dict = None, avg_within_connected: bool = False) -> pd.DataFrame:
     """
     Group the paths by user-specified variable (e.g. cell type, cell class etc.). Weights are summed across presynaptic neurons of the same group and averaged across all postsynaptic neurons of the same group (even if some postsynaptic neurons are not in `paths`).
 
@@ -409,11 +441,15 @@ def group_paths(paths, pre_group, post_group, intermediate_group=None):
     paths.loc[paths.layer == paths.layer.max(), 'post_type'] = paths.loc[paths.layer ==
                                                                          paths.layer.max(), 'post'].map(post_group).astype(str)
 
-    # sometimes only one neuron in a type is connected to another type, so only this connection is in paths
-    # but to calculate the average weight between two types, we should take into account all the neurons of the post-synaptic type
-    # so let's count the number of neurons in each post-synaptic type
-    nneuron_per_type = count_keys_per_value(intermediate_group)
-    nneuron_per_type.update(count_keys_per_value(post_group))
+    if not avg_within_connected:
+        # sometimes only one neuron in a type is connected to another type, so only this connection is in paths
+        # but to calculate the average weight between two types, we should take into account all the neurons of the post-synaptic type
+        # so let's count the number of neurons in each post-synaptic type
+        nneuron_per_type = count_keys_per_value(intermediate_group)
+        nneuron_per_type.update(count_keys_per_value(post_group))
+    else:
+        # count number of unique neurons in each type
+        nneuron_per_type = paths.groupby('post_type').post.nunique().to_dict()
 
     # sum across presynaptic neurons of the same type
     paths = paths.groupby(
