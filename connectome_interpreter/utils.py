@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
 from collections import defaultdict
 import random
 import warnings
@@ -5,12 +7,13 @@ import warnings
 import torch
 import pandas as pd
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix, issparse
+from scipy.sparse import coo_matrix, issparse
 import matplotlib.colors as mcl
 import matplotlib.pyplot as plt
-from tqdm import tqdm
+import ipywidgets as widgets
 import networkx as nx
 from IPython.display import display
+import itertools
 
 
 def dynamic_representation(tensor, density_threshold=0.2):
@@ -351,13 +354,14 @@ def modify_coo_matrix(sparse_matrix, input_idx=None, output_idx=None, value=None
     # return csr.asformat(original_format)
 
 
-def to_nparray(input_data):
+def to_nparray(input_data: int | float | list | set | np.ndarray | pd.Series, unique: bool = True) -> np.ndarray:
     """
-    Converts the input data into a numpy array, filtering out any NaN values and duplicates. 
+    Converts the input data into a numpy array, filtering out any NaN values (and duplicates). 
     The input can be a single number, a list, a set, a numpy array, or a pandas Series.
 
     Args:
         input_data: The input data to convert. Can be of type int (including numpy.int64 and numpy.int32), float, list, set, numpy.ndarray, or pandas.Series.
+        unique (bool, optional): Whether to return only unique values. Default to True. NOTE: np.unique() sorts the array.
 
     Returns:
         numpy.ndarray: A unique numpy array created from the input data, with all NaN values removed.
@@ -375,7 +379,10 @@ def to_nparray(input_data):
     cleaned_array = input_array[~pd.isna(input_array)]
 
     # Finally, return unique values
-    return np.unique(cleaned_array)
+    if unique:
+        return np.unique(cleaned_array)
+    else:
+        return cleaned_array
 
 
 def get_ngl_link(df: pd.DataFrame | pd.Series, no_connection_invisible: bool = True, group_by: dict = None, colour_saturation: float = 0.4,
@@ -412,9 +419,9 @@ def get_ngl_link(df: pd.DataFrame | pd.Series, no_connection_invisible: bool = T
 
     try:
         import nglscenes as ngl
-    except ImportError:
+    except ImportError as exc:
         raise ImportError(
-            "To use this function, please install the package by running 'pip3 install git+https://github.com/schlegelp/nglscenes@main'")
+            "To use this function, please install the package by running 'pip3 install git+https://github.com/schlegelp/nglscenes@main'") from exc
 
     # if df is a pandas series, turn into dataframe
     if isinstance(df, pd.Series):
@@ -627,9 +634,9 @@ def get_activations(array, global_indices, idx_map=None, top_n=None, threshold=N
     return result
 
 
-def plot_layered_paths(path_df, figsize=(10, 8), priority_indices=None, sort_by_activation=False,
-                       fraction=0.03, pad=0.02, weight_decimals=2,
-                       neuron_to_sign=None, sign_color_map={1: 'red', -1: 'blue'}):
+def plot_layered_paths(path_df: pd.DataFrame, figsize: tuple = (10, 8), priority_indices=None, sort_by_activation: bool = False,
+                       fraction: float = 0.03, pad: float = 0.02, weight_decimals: int = 2,
+                       neuron_to_sign: dict = None, sign_color_map: dict = {1: 'red', -1: 'blue'}):
     """
     Plots a directed graph of layered paths with optional node coloring based on activation values.
 
@@ -993,8 +1000,8 @@ def display_df(df, cmap='Blues'):
 
 def compare_connectivity(m1, m2,
                          inidx1, outidx1, inidx2, outidx2,
-                         g1_pre=None, g1_post=None, g2_pre=None, g2_post=None, suffices=['_l', '_2'],
-                         remove_na_rows=True, display=True, threshold=0, sort_within='column', sort_by=None):
+                         g1_pre=None, g1_post=None, g2_pre=None, g2_post=None, suffices: List[str] = ['_l', '_2'],
+                         remove_na_rows: bool = True, display: bool = True, threshold=0, sort_within: str = 'column', sort_by: str = None):
     """
     Compare the connectivity between two matrices. 
 
