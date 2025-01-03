@@ -411,7 +411,7 @@ def contribution_by_path_lengths_heatmap(steps, inidx, outidx, inidx_map=None, o
                                          sort_by_index=True, sort_names=None,
                                          pre_in_column=False,
                                          display_threshold=0,
-                                         cmap='viridis'):
+                                         cmap='viridis', figsize=(30, 15)):
     """
     Display the contribution from inidx to outidx, grouped by inidx_map and outidx_map, across different path lengths.
 
@@ -426,6 +426,7 @@ def contribution_by_path_lengths_heatmap(steps, inidx, outidx, inidx_map=None, o
         pre_in_column (bool, optional): Whether to have the presynaptic neuron groups as columns. Defaults to False (pre in rows, post in columns).
         display_threshold (float, optional): The threshold for displaying the output. Defaults to 0.
         cmap (str, optional): The colormap to use for the heatmap. Defaults to 'viridis'.
+        figsize (tuple, optional): The size of the figure to display. Defaults to (30, 15).
 
     Returns:
         None: Displays an interactive heatmap showing the contribution from inidx to outidx, grouped by inidx_map and outidx_map, across different path lengths.
@@ -441,7 +442,7 @@ def contribution_by_path_lengths_heatmap(steps, inidx, outidx, inidx_map=None, o
         outidx_map = inidx_map
 
     def plot_heatmap(index):
-        plt.figure(figsize=(30, 15))
+        plt.figure(figsize=figsize)
         # plt.imshow(heatmaps[index], cmap='viridis', aspect = 'auto')
         # Use seaborn's heatmap function which is a higher-level API for Matplotlib's imshow
         sns.heatmap(heatmaps[index-1], annot=True, fmt=".2f",
