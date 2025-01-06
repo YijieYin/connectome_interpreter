@@ -7,6 +7,7 @@ import warnings
 import torch
 import pandas as pd
 import numpy as np
+import numpy.typing as npt
 from scipy.sparse import coo_matrix, issparse
 import matplotlib.colors as mcl
 import matplotlib.pyplot as plt
@@ -354,7 +355,7 @@ def modify_coo_matrix(sparse_matrix, input_idx=None, output_idx=None, value=None
     # return csr.asformat(original_format)
 
 
-def to_nparray(input_data: int | float | list | set | np.ndarray | pd.Series, unique: bool = True) -> np.ndarray:
+def to_nparray(input_data: int | float | list | set | npt.NDArray | pd.Series, unique: bool = True) -> npt.NDArray:
     """
     Converts the input data into a numpy array, filtering out any NaN values (and duplicates). 
     The input can be a single number, a list, a set, a numpy array, or a pandas Series.
@@ -1089,13 +1090,14 @@ def path_for_ngl(path):
     return pd.concat(dfs)
 
 
-def make_grid_inputs(v1, v2, num_layers: int, grid_size: int = 10, timepoints: int | list = 0, device=None) -> Tuple[torch.Tensor, List[Tuple[float, float]]]:
+def make_grid_inputs(v1: int | float | list | set | npt.ArrayLike | pd.Series, v2: int | float | list | set | npt.ArrayLike | pd.Series,
+                     num_layers: int, grid_size: int = 10, timepoints: int | list = 0, device=None) -> Tuple[torch.Tensor, List[Tuple[float, float]]]:
     """
     Make a batch of input using combinations of v1 and v2 at different strengths (0 to 1). 
 
     Args:
-        v1 (np.ndarray): The first input vector.
-        v2 (np.ndarray): The second input vector. Its length should match that of `v1`.
+        v1: The first input vector.
+        v2: The second input vector. Its length should match that of `v1`.
         num_layers (int): The number of layers in the model.
         grid_size (int, optional): The number of points in the grid. Defaults to 10.
         timepoints (int|list, optional): The timepoints at which combinations of v1 and v2 are used. Defaults to 0 (the first timepoint).
@@ -1105,8 +1107,15 @@ def make_grid_inputs(v1, v2, num_layers: int, grid_size: int = 10, timepoints: i
         torch.Tensor: A tensor of shape (grid_size**2, len(v1), num_layers).
         list: A list of grid coordinates.
     """
+    # first convert to np array
+    v1 = to_nparray(v1, unique=False)
+    v2 = to_nparray(v2, unique=False)
 
-    # first check if length of v1 and v2 are the same
+    # error if v1 and v2 have more than 1 dimension
+    if v1.ndim > 1 or v2.ndim > 1:
+        raise ValueError("v1 and v2 should be 1D arrays.")
+
+    # check if length of v1 and v2 are the same
     if len(v1) != len(v2):
         raise ValueError("The length of v1 and v2 should be the same.")
 
@@ -1130,27 +1139,35 @@ def make_grid_inputs(v1, v2, num_layers: int, grid_size: int = 10, timepoints: i
     return inputs_tensor, grid_coords
 
 
-def plot_output_grid(grid_outputs: torch.Tensor, grid_coords: List[Tuple[float, float]], selected_index: int | List[int], figsize: tuple = (10, 8)):
+def plot_output_grid(grid_outputs: torch.Tensor | npt.NDArray, grid_coords: List[Tuple[float, float]], selected_index: int | List[int], figsize: tuple = (10, 8),
+                     cmap: str = 'viridis', xlab: str = 'v1 Activation', ylab: str = 'v2 Activation', title: str = None):
     """
     Plot the output grid for selected indices.
 
     Args:
-        grid_outputs (torch.Tensor): The output grid tensor of shape (grid_size**2, num_neurons, num_layers).
+        grid_outputs (torch.Tensor|np.ndarray): The output grid tensor of shape (grid_size**2, num_neurons, num_layers).
         grid_coords (list): A list of grid coordinates. Best from function `make_grid_inputs()`.
         selected_index (int|list): The index or indices to plot.
         figsize (tuple, optional): The size of the figure. Defaults to (10, 8).
     """
     selected_index = to_nparray(selected_index)
 
-    def plot_heatmap(index):
-        # Create the plot
+    # if grid_outputs is tensor, convert to numpy
+    if isinstance(grid_outputs, torch.Tensor):
+        grid_outputs = grid_outputs.cpu().numpy()
+
+    if title is None:
+        title = f'Output Grid for {selected_index}'
+
+    def plot_heatmap(index, xlab, ylab, title):
+        # # Create the plot
         plt.figure(figsize=figsize)
-        im = plt.imshow(heatmaps[index-1], cmap='viridis', origin='lower',
+        im = plt.imshow(heatmaps[index-1], cmap=cmap, origin='lower',
                         extent=[0, 1, 0, 1])
         plt.colorbar(im, label='Output')
-        plt.xlabel('v1 Activation')
-        plt.ylabel('v2 Activation')
-        plt.title(f'Output Grid for {selected_index}')
+        plt.xlabel(xlab)
+        plt.ylabel(ylab)
+        plt.title(title)
         plt.show()
 
     heatmaps = []
@@ -1158,7 +1175,7 @@ def plot_output_grid(grid_outputs: torch.Tensor, grid_coords: List[Tuple[float, 
     for i in range(grid_outputs.shape[2]):
         # Extract the selected index values
         values = grid_outputs[:, selected_index,
-                              i].cpu().numpy().mean(axis=1)
+                              i].mean(axis=1)
 
         # Reshape values to match the grid
         grid_size = int(np.sqrt(len(grid_coords)))
@@ -1169,8 +1186,8 @@ def plot_output_grid(grid_outputs: torch.Tensor, grid_coords: List[Tuple[float, 
                                description='Timepoint', continuous_update=True)
 
     # Link the slider to the plotting function
-    display(widgets.interactive(plot_heatmap, index=slider))
-    return plt
+    display(widgets.interactive(plot_heatmap, index=slider,
+            xlab=xlab, ylab=ylab, title=title))
 
 
 @dataclass
