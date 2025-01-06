@@ -217,8 +217,3 @@ class TestFindXOR(unittest.TestCase):
         circuits = find_xor(df)
         max_possible = len(list(itertools.combinations(middles, 3)))
         self.assertLessEqual(len(circuits), max_possible)
-
-
-# Add these test cases to your test suite
-if __name__ == "__main__":
-    pytest.main([__file__])
