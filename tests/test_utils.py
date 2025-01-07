@@ -1,3 +1,4 @@
+import pytest
 import unittest
 from connectome_interpreter.utils import modify_coo_matrix
 from scipy.sparse import coo_matrix
