@@ -1,10 +1,6 @@
-import pytest
 import unittest
-from connectome_interpreter.utils import modify_coo_matrix
 from connectome_interpreter.path_finding import find_xor, XORCircuit
-from scipy.sparse import coo_matrix
 import pandas as pd
-import numpy as np
 import random
 import itertools
 
