@@ -4,6 +4,11 @@ from scipy.sparse import issparse
 from tqdm import tqdm
 
 from .utils import to_nparray, count_keys_per_value, check_consecutive_layers
+from typing import List
+
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import networkx as nx
 
 
 def find_path_once(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, top_n=-1, threshold=0):
@@ -462,3 +467,101 @@ def group_paths(paths: pd.DataFrame, pre_group: dict, post_group: dict, intermed
     paths.drop(columns='nneuron_post', inplace=True)
 
     return paths
+
+
+def compare_layered_paths(paths: List[pd.DataFrame],
+                          priority_indices=None,
+                          neuron_to_sign: dict = None,
+                          sign_color_map: dict = {1: 'red', -1: 'blue'},
+                          el_colours: List[str] = ['rosybrown', 'burlywood'],
+                          legend_labels: List[str] = ['Path 1', 'Path 2'],
+                          weight_decimals: int = 2,
+                          figsize: tuple = (10, 8)):
+    """
+    Compare two layered paths by overlaying them and annotating the weights. The paths should be in the format of the output from `find_path_iteratively()`.
+
+    Args:
+        paths (List[pd.DataFrame]): A list of two DataFrames containing the path data, including columns 'layer', 'pre', 'post', and 'weight'.
+        priority_indices (list, set, pd.Series, numpy.ndarray, optional): A list of neuron indices that should be plotted on top of each layer. Defaults to None.
+        neuron_to_sign (dict, optional): A dictionary that maps neuron indices to their signs. Defaults to None.
+        sign_color_map (dict, optional): A dictionary that maps neuron signs to their respective colors. Defaults to {1: 'red', -1: 'blue'}.
+        el_colours (List[str], optional): A list of two colors for the edge labels of the two paths. Defaults to ['rosybrown', 'burlywood'].
+        legend_labels (List[str], optional): A list of two labels for the legend. Defaults to ['Path 1', 'Path 2'].
+        weight_decimals (int, optional): The number of decimal places to round the edge weights to. Defaults to 2.
+        figsize (tuple, optional): The size of the figure. Defaults to (10, 8).
+
+    Returns:
+        None: The function plots the graph.
+    """
+    # add layer columns if necessary
+    new_paths = []
+    for path in paths:
+        # Create a 'post_layer' column to use as unique identifiers
+        if 'post_layer' not in path.columns:
+            path['post_layer'] = path['post'].astype(
+                str) + '_' + path['layer'].astype(str)
+        if 'pre_layer' not in path.columns:
+            path['pre_layer'] = path['pre'].astype(
+                str) + '_' + (path.layer-1).astype(str)
+        new_paths.append(path)
+
+    composite_paths = pd.concat(new_paths)
+    # get unique edges
+    composite_paths.drop_duplicates(['pre_layer', 'post_layer'], inplace=True)
+    composite_G = nx.from_pandas_edgelist(composite_paths, 'pre_layer', 'post_layer', [
+        'weight'], create_using=nx.DiGraph())
+
+    # Labels for nodes
+    labels = dict(zip(composite_paths.post_layer, composite_paths.post))
+    labels.update(dict(zip(composite_paths.pre_layer, composite_paths.pre)))
+
+    # Determine the width of the edges
+    weights = [composite_G[u][v]['weight'] for u, v in composite_G.edges()]
+    widths = [max(0.1, w * 5) for w in weights]  # Scale weights for visibility
+
+    # Generate positions
+    positions = create_layered_positions(composite_paths, priority_indices)
+
+    # Edge colors based on neuron signs
+    default_color = 'lightgrey'  # Default edge color
+
+    # specify edge colour based on pre-neuron sign, if available
+    edge_colors = []
+    for u, _ in composite_G.edges():
+        pre_neuron = labels[u]
+        if neuron_to_sign and pre_neuron in neuron_to_sign:
+            edge_colors.append(sign_color_map.get(
+                neuron_to_sign[pre_neuron], default_color))
+        else:
+            edge_colors.append(default_color)
+
+    # Plot the graph
+    _, ax = plt.subplots(figsize=figsize)
+
+    nx.draw(composite_G, pos=positions,
+            labels=labels,
+            with_labels=True, node_size=100,
+            node_color='lightblue', arrows=True, arrowstyle='-|>', arrowsize=10, font_size=8, width=widths, ax=ax, edge_color=edge_colors)
+
+    G1 = nx.from_pandas_edgelist(paths[0], 'pre_layer', 'post_layer', [
+        'weight'], create_using=nx.DiGraph())
+    G2 = nx.from_pandas_edgelist(paths[1], 'pre_layer', 'post_layer', [
+        'weight'], create_using=nx.DiGraph())
+    el1 = {(u, v): f'{data["weight"]:.{weight_decimals}f}' for u,
+                   v, data in G1.edges(data=True)}
+    el2 = {(u, v): f'{data["weight"]:.{weight_decimals}f}' for u,
+                   v, data in G2.edges(data=True)}
+    nx.draw_networkx_edge_labels(G1, pos=positions, edge_labels=el1,
+                                 horizontalalignment='left', verticalalignment='top',
+                                 font_color=el_colours[0],
+                                 ax=ax)
+    nx.draw_networkx_edge_labels(G2, pos=positions, edge_labels=el2,
+                                 horizontalalignment='right', verticalalignment='bottom',
+                                 font_color=el_colours[1],
+                                 ax=ax)
+
+    ax.set_ylim(0, 1)
+    # add lengend using the el_colours
+    ax.legend(handles=[mpatches.Patch(color=el_colours[0], label=legend_labels[0]),
+                       mpatches.Patch(color=el_colours[1], label=legend_labels[1])], loc='upper right')
+    plt.show()
