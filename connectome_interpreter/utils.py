@@ -1090,8 +1090,14 @@ def path_for_ngl(path):
     return pd.concat(dfs)
 
 
-def make_grid_inputs(v1: int | float | list | set | npt.ArrayLike | pd.Series, v2: int | float | list | set | npt.ArrayLike | pd.Series,
-                     num_layers: int, grid_size: int = 10, timepoints: int | list = 0, device=None) -> Tuple[torch.Tensor, List[Tuple[float, float]]]:
+def make_grid_inputs(
+    v1: arrayable,  # see above
+    v2: arrayable,
+    num_layers: int, 
+    grid_size: int = 10, 
+    timepoints: int | list = 0, 
+    device=None,  # type?
+) -> Tuple[torch.Tensor, List[Tuple[float, float]]]:
     """
     Make a batch of input using combinations of v1 and v2 at different strengths (0 to 1). 
 
