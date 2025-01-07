@@ -1248,7 +1248,7 @@ def find_xor(paths: pd.DataFrame) -> List[XORCircuit]:
             f"The input DataFrame should have values 1 (excitatory) or -1 (inhibitory) in the 'sign' column, but got {set(paths.sign)}")
 
     # define variables ----
-    circuits = []
+    circuits: list[XORCircuit] = []
 
     exciters = paths.pre[(paths.layer == 2) & (paths.sign == 1)].unique()
     inhibitors = paths.pre[(paths.layer == 2) & (paths.sign == -1)].unique()
