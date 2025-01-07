@@ -1,6 +1,5 @@
 from dataclasses import dataclass
-from typing import Union, Dict, Optional, Callable, Tuple, List, Collection
-from numbers import Real
+from typing import Union, Dict, Optional, Callable, Tuple, List
 
 import torch
 import torch.nn as nn
@@ -10,10 +9,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from .compress_paths import result_summary
-from .utils import adjacency_df_to_el, get_activations, to_nparray
-
-# types that can be made into a numeric numpy array
-arrayable = Real | Collection[Real]
+from .utils import adjacency_df_to_el, get_activations, to_nparray, arrayable
 
 
 class MultilayeredNetwork(nn.Module):

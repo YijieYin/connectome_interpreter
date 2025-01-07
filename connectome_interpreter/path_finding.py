@@ -4,19 +4,15 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import issparse
 from tqdm import tqdm
-from numbers import Real
-from typing import Collection, Dict, List
+from typing import Dict, List
 import itertools
 
-from .utils import to_nparray, count_keys_per_value, check_consecutive_layers
+from .utils import to_nparray, count_keys_per_value, check_consecutive_layers, arrayable
 from typing import List
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import networkx as nx
-
-# types that can be made into a numeric numpy array
-arrayable = Real | Collection[Real]
 
 
 def find_path_once(inprop_csc, steps_cpu, inidx: arrayable, outidx: arrayable, target_layer_number, top_n=-1, threshold=0):
