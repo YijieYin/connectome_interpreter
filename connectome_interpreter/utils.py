@@ -1145,8 +1145,17 @@ def make_grid_inputs(
     return inputs_tensor, grid_coords
 
 
-def plot_output_grid(grid_outputs: torch.Tensor | npt.NDArray, grid_coords: List[Tuple[float, float]], selected_index: int | List[int], figsize: tuple = (10, 8),
-                     cmap: str = 'viridis', xlab: str = 'v1 Activation', ylab: str = 'v2 Activation', title: str = None):
+def plot_output_grid(
+    grid_outputs: torch.Tensor | npt.NDArray,
+    grid_coords: List[Tuple[float, float]],
+    selected_index: int | List[int],
+    *,  # see note
+    figsize: tuple = (10, 8),
+    cmap: str = 'viridis', 
+    xlab: str = 'v1 Activation', 
+    ylab: str = 'v2 Activation', 
+    title: str | None = None,
+):
     """
     Plot the output grid for selected indices.
 
