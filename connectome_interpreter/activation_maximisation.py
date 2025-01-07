@@ -410,6 +410,10 @@ def activation_maximisation(
     output_after = model(input_tensor).cpu().detach().numpy()
     input_tensor = input_tensor.cpu().detach().numpy()
 
+    # clear the computational graph of activations
+    with torch.no_grad():
+        model.activations = model.activations.detach()
+
     if report_memory_usage:
         print('GPU memory after optimization:', torch.cuda.memory_allocated(
             device) / 1e9, 'GB')
