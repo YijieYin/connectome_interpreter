@@ -175,21 +175,21 @@ def create_layered_positions(df: pd.DataFrame, priority_indices=None, sort_dict:
             str) + '_' + df['layer'].astype(str)
     if 'pre_layer' not in df.columns:
         df['pre_layer'] = df['pre'].astype(
-            str) + '_' + (df.layer-1).astype(str)
+            str) + '_' + (df['layer']-1).astype(str)
 
     if priority_indices is not None:
         priority_indices = set(priority_indices)
 
-    number_of_layers = df.layer.nunique()
+    number_of_layers = df['layer'].nunique()
     layer_width = 1.0 / (number_of_layers + 1)
     positions = {}
 
-    name_to_idx = dict(zip(df.pre_layer, df.pre))
-    name_to_idx.update(dict(zip(df.post_layer, df.post)))
+    name_to_idx = dict(zip(df.pre_layer, df['pre']))
+    name_to_idx.update(dict(zip(df.post_layer, df['post'])))
 
     global_to_local_layer_number = {l: i for i,
-                                    l in enumerate(sorted(df.layer.unique()))}
-    df.loc[:, ['local_layer']] = df.layer.map(global_to_local_layer_number)
+                                    l in enumerate(sorted(df['layer'].unique()))}
+    df.loc[:, ['local_layer']] = df['layer'].map(global_to_local_layer_number)
 
     for layer in range(0, number_of_layers + 1):
         if layer != number_of_layers:
@@ -233,7 +233,7 @@ def remove_excess_neurons(df: pd.DataFrame, keep=None, target_indices=None, keep
         raise ValueError(
             'There are no connections (`df` is empty)! Threshold too high?')
 
-    max_layer_num = df.layer.max()
+    max_layer_num = df['layer'].max()
     if max_layer_num == 1:
         return df
 
@@ -244,50 +244,53 @@ def remove_excess_neurons(df: pd.DataFrame, keep=None, target_indices=None, keep
             target_indices = [target_indices]
         target_indices = set(target_indices)
         # check if datatype is the same, between target_indices and post
-        if not all([type(i) == type(df.post.iloc[0]) for i in target_indices]):
+        if not all([type(i) == type(df['post'].iloc[0]) for i in target_indices]):
             raise ValueError(
                 f'The datatype in `target_indices` should be the same as the elements in `post` column of the DataFrame. Elements in `post` is {type(df.post.iloc[0])}.')
 
-        if not target_indices.issubset(df[df.layer == df.layer.max()].post):
+        if not target_indices.issubset(df[df['layer'] == df['layer'].max()]['post']):
             raise ValueError('The target indices are not in the post-synaptic neurons of the last layer. Here are the indices of the last layer: ',
-                             ', '.join(df[df.layer == df.layer.max()].post.unique()), '. Your target_indices should be a subset.')
+                             ', '.join(df[df['layer'] == df['layer'].max()]['post'].unique()), '. Your target_indices should be a subset.')
 
-        df = df[(df.layer != df.layer.max()) | df.post.isin(target_indices)]
+        df = df[(df['layer'] != df['layer'].max())
+                | df['post'].isin(target_indices)]
 
     # check if all layer numbers are consecutive ----
     if not check_consecutive_layers(df):
         print('Warning: The layer numbers are not consecutive. Will only use the consecutive layers from the last one.')
         selected = []
         # get the consecutive layers from the last one
-        for l in range(df.layer.max(), 0, -1):
-            if l in df.layer.unique():
+        for l in range(df['layer'].max(), 0, -1):
+            if l in df['layer'].unique():
                 selected.append(l)
             else:
                 break
-        df = df[df.layer.isin(selected)]
+        df = df[df['layer'].isin(selected)]
 
         global_to_local_layer_number = {l: i for i,
-                                        l in enumerate(sorted(df.layer.unique()))}
-        df.loc[:, ['local_layer']] = df.layer.map(global_to_local_layer_number)
+                                        l in enumerate(sorted(df['layer'].unique()))}
+        df.loc[:, ['local_layer']] = df['layer'].map(
+            global_to_local_layer_number)
 
-    elif df.layer.min() != 1:
+    elif df['layer'].min() != 1:
         # if the layer numbers do not start from 1
         print('Warning: The layer numbers do not start from 1. Will only use the consecutive layers from the last one.')
         global_to_local_layer_number = {l: i for i,
-                                        l in enumerate(sorted(df.layer.unique()))}
-        df.loc[:, ['local_layer']] = df.layer.map(global_to_local_layer_number)
+                                        l in enumerate(sorted(df['layer'].unique()))}
+        df.loc[:, ['local_layer']] = df['layer'].map(
+            global_to_local_layer_number)
 
     else:
-        df.loc[:, ['local_layer']] = df.layer
+        df.loc[:, ['local_layer']] = df['layer']
 
     # while there is any layer whose post is not the same as the next layer's pre ----
-    while any([set(df[df.local_layer == i].post) != set(df[df.local_layer == (i+1)].pre) for i in range(1, df.local_layer.max())]):
+    while any([set(df[df.local_layer == i]['post']) != set(df[df.local_layer == (i+1)]['pre']) for i in range(1, df.local_layer.max())]):
         if keep is not None:
             if type(keep) == str:
                 keep = [keep]
             keep = set(keep)
 
-            if all([set(df[df.local_layer == i].post).union(keep) == set(df[df.local_layer == (i+1)].pre).union(keep) for i in range(1, df.local_layer.max())]):
+            if all([set(df[df.local_layer == i]['post']).union(keep) == set(df[df.local_layer == (i+1)]['pre']).union(keep) for i in range(1, df.local_layer.max())]):
                 break
         else:
             keep = set()
@@ -305,10 +308,10 @@ def remove_excess_neurons(df: pd.DataFrame, keep=None, target_indices=None, keep
 
             # filter by pre in the second layer
             df_layers_update.append(
-                df_layer[df_layer.pre.isin(set(df_prev_layer.post).union(keep))])
+                df_layer[df_layer['pre'].isin(set(df_prev_layer['post']).union(keep))])
             # filter by post in the first layer
             df_layers_update.append(
-                df_prev_layer[df_prev_layer.post.isin(set(df_layer.pre).union(keep))])
+                df_prev_layer[df_prev_layer['post'].isin(set(df_layer['pre']).union(keep))])
             df = pd.concat(df_layers_update)
 
         else:
@@ -319,19 +322,19 @@ def remove_excess_neurons(df: pd.DataFrame, keep=None, target_indices=None, keep
 
                 # pre that should be in the current layer: an intersection of previous layer's post; and current layer's pre
                 df_pre = set.intersection(
-                    set(df_prev_layer.post) & set(df_layer.pre))
+                    set(df_prev_layer['post']) & set(df_layer['pre']))
                 # post that should be in the current layer: an intersection of current layer's post; and next layer's pre
                 df_post = set.intersection(
-                    set(df_layer.post), set(df_next_layer.pre))
+                    set(df_layer['post']), set(df_next_layer['pre']))
 
                 if i == 2:
                     # add edges in the first layer
-                    df_prev_layer = df_prev_layer[df_prev_layer.post.isin(
+                    df_prev_layer = df_prev_layer[df_prev_layer['post'].isin(
                         df_pre.union(keep))]
                     df_layers_update.append(df_prev_layer)
 
-                df_layer = df_layer[df_layer.pre.isin(
-                    df_pre.union(keep)) & df_layer.post.isin(df_post.union(keep))]
+                df_layer = df_layer[df_layer['pre'].isin(
+                    df_pre.union(keep)) & df_layer['post'].isin(df_post.union(keep))]
 
                 if df_layer.shape[0] == 0:
                     raise ValueError(
@@ -341,10 +344,10 @@ def remove_excess_neurons(df: pd.DataFrame, keep=None, target_indices=None, keep
                 if i == (df.local_layer.max()-1):
                     # add edges in the last layer
                     if target_indices is None:
-                        df_next_layer = df_next_layer[df_next_layer.pre.isin(
+                        df_next_layer = df_next_layer[df_next_layer['pre'].isin(
                             df_post.union(keep))]
                     else:
-                        df_next_layer = df_next_layer[df_next_layer.pre.isin(
+                        df_next_layer = df_next_layer[df_next_layer['pre'].isin(
                             df_post.union(keep).union(target_indices))]
                     df_layers_update.append(df_next_layer)
 
@@ -353,7 +356,7 @@ def remove_excess_neurons(df: pd.DataFrame, keep=None, target_indices=None, keep
     df.drop(columns='local_layer', inplace=True)
 
     # in case we removed all the connections in the last layer
-    if df.layer.max() != max_layer_num:
+    if df['layer'].max() != max_layer_num:
         raise ValueError(
             'No path found. Try lowering the threshold for the edges to be included in the path. Currently no connections are found in the last layer.')
     return df
@@ -409,11 +412,11 @@ def filter_paths(df: pd.DataFrame, threshold: float = 0, necessary_intermediate:
                 # error: layer has to be an integer >=1
                 raise ValueError("Layer has to be an integer >=1")
 
-            if layer < (df.layer.max()+1):
-                df = df[df.pre.isin(indices) | (df.layer != layer)]
-            elif layer == (df.layer.max()+1):
+            if layer < (df['layer'].max()+1):
+                df = df[df['pre'].isin(indices) | (df['layer'] != layer)]
+            elif layer == (df['layer'].max()+1):
                 # filter for targets
-                df = df[df.post.isin(indices) | (df.layer != layer)]
+                df = df[df['post'].isin(indices) | (df['layer'] != layer)]
             else:
                 # error: layer number too big
                 raise ValueError("Layer number too big")
@@ -441,13 +444,13 @@ def group_paths(paths: pd.DataFrame, pre_group: dict, post_group: dict, intermed
 
     # add cell type information
     # first use intermediate_group, then modify specifically for pre at the first layer, and post at the last layer
-    paths['pre_type'] = paths.pre.map(intermediate_group).astype(str)
-    paths['post_type'] = paths.post.map(intermediate_group).astype(str)
+    paths['pre_type'] = paths['pre'].map(intermediate_group).astype(str)
+    paths['post_type'] = paths['post'].map(intermediate_group).astype(str)
 
-    paths.loc[paths.layer == paths.layer.min(), 'pre_type'] = paths.loc[paths.layer ==
-                                                                        paths.layer.min(), 'pre'].map(pre_group).astype(str)
-    paths.loc[paths.layer == paths.layer.max(), 'post_type'] = paths.loc[paths.layer ==
-                                                                         paths.layer.max(), 'post'].map(post_group).astype(str)
+    paths.loc[paths['layer'] == paths['layer'].min(), 'pre_type'] = paths.loc[paths['layer'] ==
+                                                                              paths['layer'].min(), 'pre'].map(pre_group).astype(str)
+    paths.loc[paths['layer'] == paths['layer'].max(), 'post_type'] = paths.loc[paths['layer'] ==
+                                                                               paths['layer'].max(), 'post'].map(post_group).astype(str)
 
     if not avg_within_connected:
         # sometimes only one neuron in a type is connected to another type, so only this connection is in paths
@@ -457,7 +460,8 @@ def group_paths(paths: pd.DataFrame, pre_group: dict, post_group: dict, intermed
         nneuron_per_type.update(count_keys_per_value(post_group))
     else:
         # count number of unique neurons in each type
-        nneuron_per_type = paths.groupby('post_type').post.nunique().to_dict()
+        nneuron_per_type = paths.groupby(
+            'post_type')['post'].nunique().to_dict()
 
     # sum across presynaptic neurons of the same type
     paths = paths.groupby(
@@ -500,7 +504,7 @@ def find_xor(paths: pd.DataFrame) -> List[XORCircuit]:
     List of XORCircuit objects, each representing a found XOR motif
     """
     # checking input ----
-    if set(paths.layer) != {1, 2}:
+    if set(paths['layer']) != {1, 2}:
         raise ValueError(
             "The input DataFrame should have exactly 2 unique layers, 1 and 2")
 
@@ -510,26 +514,29 @@ def find_xor(paths: pd.DataFrame) -> List[XORCircuit]:
             "The input DataFrame should have columns ['pre', 'post', 'sign', 'layer']")
 
     # check values of signs: if it's a subset of {1, -1}
-    if not set(paths.sign) <= {1, -1}:
+    if not set(paths['sign']) <= {1, -1}:
         raise ValueError(
-            f"The input DataFrame should have values 1 (excitatory) or -1 (inhibitory) in the 'sign' column, but got {set(paths.sign)}")
+            f"The input DataFrame should have values 1 (excitatory) or -1 (inhibitory) in the 'sign' column, but got {set(paths['sign'])}")
 
     # define variables ----
     circuits: list[XORCircuit] = []
 
-    exciters = paths.pre[(paths.layer == 2) & (paths.sign == 1)].unique()
-    inhibitors = paths.pre[(paths.layer == 2) & (paths.sign == -1)].unique()
+    exciters = paths['pre'][(paths['layer'] == 2) &
+                            (paths['sign'] == 1)].unique()
+    inhibitors = paths['pre'][(paths['layer'] == 2)
+                              & (paths['sign'] == -1)].unique()
 
-    l1 = paths[paths.layer == 1]
-    l2 = paths[paths.layer == 2]
+    l1 = paths[paths['layer'] == 1]
+    l2 = paths[paths['layer'] == 2]
 
     exciter_us_dict: dict[int | str, set[int | str]] = {
-        exc: set(l1.pre[l1.post == exc]) for exc in exciters}
-    inhibitor_us_dict = {inh: set(l1.pre[l1.post == inh])
+        exc: set(l1['pre'][l1['post'] == exc]) for exc in exciters}
+    inhibitor_us_dict = {inh: set(l1['pre'][l1['post'] == inh])
                          for inh in inhibitors}
 
-    exciter_ds_dict = {exc: set(l2.post[l2.pre == exc]) for exc in exciters}
-    inhibitor_ds_dict = {inh: set(l2.post[l2.pre == inh])
+    exciter_ds_dict = {exc: set(l2['post'][l2['pre'] == exc])
+                       for exc in exciters}
+    inhibitor_ds_dict = {inh: set(l2['post'][l2['pre'] == inh])
                          for inh in inhibitors}
 
     # main algorithm ----
