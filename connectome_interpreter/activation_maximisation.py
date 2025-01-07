@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import Union, Dict, Optional, Callable, Tuple, List
+from typing import Union, Dict, Optional, Callable, Tuple, List, Collection
+from numbers import Real
 
 import torch
 import torch.nn as nn
@@ -10,6 +11,9 @@ from tqdm import tqdm
 
 from .compress_paths import result_summary
 from .utils import adjacency_df_to_el, get_activations, to_nparray
+
+# types that can be made into a numeric numpy array
+arrayable = Real | Collection[Real]
 
 
 class MultilayeredNetwork(nn.Module):
@@ -613,58 +617,78 @@ def input_from_df(df: pd.DataFrame, sensory_indices: list, idx_to_group: dict, n
     return inarray
 
 
-def get_neuron_activation(output, batch_names: int | float | list | set | np.ndarray | pd.Series,
-                          neuron_indices: int | float | list | set | np.ndarray | pd.Series,
+def get_neuron_activation(output,
+                          neuron_indices: arrayable,
+                          batch_names: arrayable = None,
                           idx_to_group: dict = None) -> pd.DataFrame:
     '''
-    Get the activations for two groups of neurons.
+    Get the activations for specified indices across timepoints, include batch name and group information when available.
 
     Args:
-        output : torch.Tensor
-            (A subset of) The output of the model. Shape is (batch_size, num_neurons, num_timesteps).
-        batch_names : 
-            Names of the batches. Length has to be the same as output.shape[0]. And order has to be the same as the order of the batches in output.
-        neuron_indices : 
-            The indices of neurons of interest. Length has to be the same as output.shape[1]. To work with idx_to_group (if not None), the elements of neuron_indices has to be keys in idx_to_group.
-        idx_to_group : dict
-            A dictionary that maps indices to group.
+        output (torch.Tensor): The output tensor from the model. Shape should be (batch_size, num_neurons, num_timepoints) or (num_neurons, num_timepoints).
+        neuron_indices (arrayable): The indices of the neurons to get activations for.
+        batch_names (arrayable, optional): The names of the batches. Defaults to None. If output.ndim == 3, then this should be supplied. If not, batch names will be e.g. 'batch_0', 'batch_1', etc.
+        idx_to_group (dict, optional): A dictionary mapping indices to groups. Defaults to None.
 
     Returns:
         pd.DataFrame: The activations for the neurons, with the first columns being batch_names, neuron_indices, and group. The rest are the timesteps. 
     '''
     batch_names = list(to_nparray(batch_names, unique=False))
     neuron_indices = list(to_nparray(neuron_indices))
-    # make sure length matches
-    if output.shape[0] != len(batch_names):
-        raise ValueError(
-            'Length of batch_names has to be the same as output.shape[0].')
-    if output.shape[1] != len(neuron_indices):
-        raise ValueError(
-            'Length of neuron_indices has to be the same as output.shape[1].')
 
-    data = output.view(-1, output.shape[2]).cpu().numpy()
+    if output.ndim == 2:
+        # message if batch_names is not None
+        if batch_names is not None:
+            print('batch_names is ignored for 2D output.')
 
-    # Create indices for the first two dimensions
-    # in the end, we want output.shape[0] * output.shape[1] rows
-    # neuron_indices are the second dimension
-    # so multiply by output.shape[0]
-    neuron_indices = neuron_indices * output.shape[0]
-    batch_names = [o for o in batch_names for _ in range(output.shape[1])]
+        data = output[neuron_indices, :]
+        df = pd.DataFrame(data, columns=[f'time_{i}' for i in range(
+            output.shape[1])], index=neuron_indices)
+        df.index.name = 'idx'
+        if idx_to_group is not None:
+            df['group'] = [idx_to_group[idx] for idx in neuron_indices]
+        df.reset_index(inplace=True)
+        # re-order columns
+        if 'group' in df.columns:
+            df = df[['idx', 'group'] +
+                    [f'time_{i}' for i in range(output.shape[1])]]
+        else:
+            df = df[['idx'] + [f'time_{i}' for i in range(output.shape[1])]]
+        return df
 
-    # Combine indices and data into a DataFrame
-    df = pd.DataFrame(
-        data, columns=[f'time_{i}' for i in range(output.shape[2])])
-    df['batch_name'] = batch_names
-    df['idx'] = neuron_indices
-    if idx_to_group is not None:
-        df['group'] = [idx_to_group[idx] for idx in neuron_indices]
+    if output.ndim == 3:
+        if batch_names is None:
+            # make batch names
+            batch_names = [f'batch_{i}' for i in range(output.shape[0])]
 
-    # Reorder columns so indices are first
-    if 'group' in df.columns:
-        df = df[['batch_name', 'idx', 'group'] +
-                [f'time_{i}' for i in range(output.shape[2])]]
-    else:
-        df = df[['batch_name', 'idx'] +
-                [f'time_{i}' for i in range(output.shape[2])]]
+        # make sure length matches
+        if output.shape[0] != len(batch_names):
+            raise ValueError(
+                'Length of batch_names has to be the same as output.shape[0].')
+
+        data = output.view(-1, output.shape[2]).cpu().numpy()
+
+        # Create indices for the first two dimensions
+        # in the end, we want output.shape[0] * output.shape[1] rows
+        # neuron_indices are the second dimension
+        # so multiply by output.shape[0]
+        neuron_indices = neuron_indices * output.shape[0]
+        batch_names = [o for o in batch_names for _ in range(output.shape[1])]
+
+        # Combine indices and data into a DataFrame
+        df = pd.DataFrame(
+            data, columns=[f'time_{i}' for i in range(output.shape[2])])
+        df['batch_name'] = batch_names
+        df['idx'] = neuron_indices
+        if idx_to_group is not None:
+            df['group'] = [idx_to_group[idx] for idx in neuron_indices]
+
+        # Reorder columns so indices are first
+        if 'group' in df.columns:
+            df = df[['batch_name', 'idx', 'group'] +
+                    [f'time_{i}' for i in range(output.shape[2])]]
+        else:
+            df = df[['batch_name', 'idx'] +
+                    [f'time_{i}' for i in range(output.shape[2])]]
 
     return df
