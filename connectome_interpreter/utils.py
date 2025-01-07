@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from numbers import Real
+from typing import Dict, List, Tuple, Collection
 from collections import defaultdict
 import random
 import warnings
@@ -14,7 +14,10 @@ import matplotlib.pyplot as plt
 import ipywidgets as widgets
 import networkx as nx
 from IPython.display import display
-import itertools
+
+
+# types that can be made into a numeric numpy array
+arrayable = Real | Collection[Real]
 
 
 def dynamic_representation(tensor, density_threshold=0.2):
@@ -184,7 +187,12 @@ def adjacency_df_to_el(adjacency, threshold=None):
     return adjacency
 
 
-def modify_coo_matrix(sparse_matrix, input_idx=None, output_idx=None, value=None, updates_df=None, re_normalize=True):
+def modify_coo_matrix(sparse_matrix,
+                      input_idx: arrayable = None,
+                      output_idx: arrayable = None,
+                      value=None,
+                      updates_df: pd.DataFrame = None,
+                      re_normalize: bool = True):
     """
     Modify the values of a sparse matrix (either COO or CSR format) at specified indices.
 
@@ -355,7 +363,7 @@ def modify_coo_matrix(sparse_matrix, input_idx=None, output_idx=None, value=None
     # return csr.asformat(original_format)
 
 
-def to_nparray(input_data: int | float | list | set | npt.NDArray | pd.Series, unique: bool = True) -> npt.NDArray:
+def to_nparray(input_data: arrayable, unique: bool = True) -> npt.NDArray:
     """
     Converts the input data into a numpy array, filtering out any NaN values (and duplicates). 
     The input can be a single number, a list, a set, a numpy array, or a pandas Series.
@@ -551,7 +559,7 @@ def get_ngl_link(df: pd.DataFrame | pd.Series, no_connection_invisible: bool = T
     return scene.url
 
 
-def get_activations(array, global_indices, idx_map=None, top_n=None, threshold=None):
+def get_activations(array, global_indices: arrayable, idx_map: dict = None, top_n=None, threshold=None):
     """
     Get activation for neurons (in rows) in `array` for each time step (in columns). Optionally group neurons by `idx_map`, and filter by `top_n` or `threshold`.
 
@@ -1093,9 +1101,9 @@ def path_for_ngl(path):
 def make_grid_inputs(
     v1: arrayable,  # see above
     v2: arrayable,
-    num_layers: int, 
-    grid_size: int = 10, 
-    timepoints: int | list = 0, 
+    num_layers: int,
+    grid_size: int = 10,
+    timepoints: int | list = 0,
     device=None,  # type?
 ) -> Tuple[torch.Tensor, List[Tuple[float, float]]]:
     """
@@ -1148,12 +1156,12 @@ def make_grid_inputs(
 def plot_output_grid(
     grid_outputs: torch.Tensor | npt.NDArray,
     grid_coords: List[Tuple[float, float]],
-    selected_index: int | List[int],
+    selected_index: arrayable,
     *,  # see note
     figsize: tuple = (10, 8),
-    cmap: str = 'viridis', 
-    xlab: str = 'v1 Activation', 
-    ylab: str = 'v2 Activation', 
+    cmap: str = 'viridis',
+    xlab: str = 'v1 Activation',
+    ylab: str = 'v2 Activation',
     title: str | None = None,
 ):
     """
@@ -1203,90 +1211,3 @@ def plot_output_grid(
     # Link the slider to the plotting function
     display(widgets.interactive(plot_heatmap, index=slider,
             xlab=xlab, ylab=ylab, title=title))
-
-
-@dataclass
-class XORCircuit:
-    # Input nodes
-    input1: list
-    input2: list
-    # Middle layer nodes
-    exciter1: str  # Takes input from input1 only
-    exciter2: str  # Takes input from input2 only
-    inhibitor: str  # Takes input from both inputs
-    # Output node
-    output: list
-
-
-def find_xor(paths: pd.DataFrame) -> List[XORCircuit]:
-    """
-    Find XOR-like circuits in a 3-layer network, based on [Wang et al. 2024](https://www.biorxiv.org/content/10.1101/2024.09.24.614724v2). Note: this function currently ignores middle excitatory neruons that receive both inputs.
-
-    Args:
-        paths: DataFrame with columns ['pre', 'post', 'sign', 'layer']
-        pre: source node
-        post: target node
-        sign: 1 (excitatory) or -1 (inhibitory)
-        layer: 1 (input->middle) or 2 (middle->output)
-
-    Returns:
-    List of XORCircuit objects, each representing a found XOR motif
-    """
-    # checking input ----
-    if set(paths.layer) != {1, 2}:
-        raise ValueError(
-            "The input DataFrame should have exactly 2 unique layers, 1 and 2")
-
-    # check column names of paths
-    if not {'pre', 'post', 'sign', 'layer'}.issubset(paths.columns):
-        raise ValueError(
-            "The input DataFrame should have columns ['pre', 'post', 'sign', 'layer']")
-
-    # check values of signs: if it's a subset of {1, -1}
-    if set(paths.sign) > {1, -1}:
-        raise ValueError(
-            f"The input DataFrame should have values 1 (excitatory) or -1 (inhibitory) in the 'sign' column, but got {set(paths.sign)}")
-
-    # define variables ----
-    circuits: list[XORCircuit] = []
-
-    exciters = paths.pre[(paths.layer == 2) & (paths.sign == 1)].unique()
-    inhibitors = paths.pre[(paths.layer == 2) & (paths.sign == -1)].unique()
-
-    l1 = paths[paths.layer == 1]
-    l2 = paths[paths.layer == 2]
-
-    exciter_us_dict: dict[..., set[...]] = {exc: set(l1.pre[l1.post == exc]) for exc in exciters}
-    inhibitor_us_dict = {inh: set(l1.pre[l1.post == inh])
-                         for inh in inhibitors}
-
-    exciter_ds_dict = {exc: set(l2.post[l2.pre == exc]) for exc in exciters}
-    inhibitor_ds_dict = {inh: set(l2.post[l2.pre == inh])
-                         for inh in inhibitors}
-
-    # main algorithm ----
-    for e1, e2 in itertools.combinations(exciters, 2):
-        common = exciter_us_dict[e1] & exciter_us_dict[e2]
-        onlye1 = exciter_us_dict[e1] - common
-        onlye2 = exciter_us_dict[e2] - common
-
-        for i in inhibitors:
-            e1_i_intersect = onlye1 & inhibitor_us_dict[i]
-            e2_i_intersect = onlye2 & inhibitor_us_dict[i]
-            if (len(e1_i_intersect) == 0) or (len(e2_i_intersect) == 0):
-                continue
-            targets = exciter_ds_dict[e1] & exciter_ds_dict[e2] & inhibitor_ds_dict[i]
-            if not targets:
-                continue
-            circuits.append(
-                XORCircuit(
-                    input1=list(e1_i_intersect), 
-                    input2=list(e2_i_intersect),
-                    exciter1=e1, 
-                    exciter2=e2, 
-                    inhibitor=i, 
-                    output=list(targets)
-                )
-            )
-
-    return circuits

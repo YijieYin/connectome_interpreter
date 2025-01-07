@@ -1,12 +1,20 @@
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 from scipy.sparse import issparse
 from tqdm import tqdm
+from numbers import Real
+from typing import Collection, Dict, List
+import itertools
 
 from .utils import to_nparray, count_keys_per_value, check_consecutive_layers
 
+# types that can be made into a numeric numpy array
+arrayable = Real | Collection[Real]
 
-def find_path_once(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, top_n=-1, threshold=0):
+
+def find_path_once(inprop_csc, steps_cpu, inidx: arrayable, outidx: arrayable, target_layer_number, top_n=-1, threshold=0):
     """
     Finds the path once between input and output, of distance target_layer_number, returning indices
     of neurons in the previous layer that connect the input with the output. This works by taking the top_n direct upstream partners of the outidx neurons, and intersect those with neurons 'effectively' connected (through steps_cpu) to the inidx neurons.
@@ -93,7 +101,7 @@ def find_path_once(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, to
     return df
 
 
-def find_path_iteratively(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, top_n=-1, threshold=0):
+def find_path_iteratively(inprop_csc, steps_cpu, inidx: arrayable, outidx: arrayable, target_layer_number, top_n=-1, threshold=0):
     """
     Iteratively finds the path from the specified output (outidx) back to the input (inidx) across
     multiple layers, using the `find_path_once` function to traverse each layer.
@@ -376,7 +384,7 @@ def remove_excess_neurons_batched(df: pd.DataFrame, keep=None, target_indices=No
     return pd.concat(dfs)
 
 
-def filter_paths(df: pd.DataFrame, threshold: float = 0, necessary_intermediate: dict = None) -> pd.DataFrame:
+def filter_paths(df: pd.DataFrame, threshold: float = 0, necessary_intermediate: Dict[int, arrayable] = None) -> pd.DataFrame:
     """Filters the paths based on the weight threshold and the necessary intermediate neurons. The weight threshold refers to the direct connectivity between connected neurons in the path. It is recommended to not put too may neurons in necessary_intermediate, as it may be too stringent and remove all paths.
 
     Args:
@@ -462,3 +470,91 @@ def group_paths(paths: pd.DataFrame, pre_group: dict, post_group: dict, intermed
     paths.drop(columns='nneuron_post', inplace=True)
 
     return paths
+
+
+@dataclass
+class XORCircuit:
+    # Input nodes
+    input1: list
+    input2: list
+    # Middle layer nodes
+    exciter1: str  # Takes input from input1 only
+    exciter2: str  # Takes input from input2 only
+    inhibitor: str  # Takes input from both inputs
+    # Output node
+    output: list
+
+
+def find_xor(paths: pd.DataFrame) -> List[XORCircuit]:
+    """
+    Find XOR-like circuits in a 3-layer network, based on [Wang et al. 2024](https://www.biorxiv.org/content/10.1101/2024.09.24.614724v2). Note: this function currently ignores middle excitatory neruons that receive both inputs.
+
+    Args:
+        paths: DataFrame with columns ['pre', 'post', 'sign', 'layer']
+        pre: source node
+        post: target node
+        sign: 1 (excitatory) or -1 (inhibitory)
+        layer: 1 (input->middle) or 2 (middle->output)
+
+    Returns:
+    List of XORCircuit objects, each representing a found XOR motif
+    """
+    # checking input ----
+    if set(paths.layer) != {1, 2}:
+        raise ValueError(
+            "The input DataFrame should have exactly 2 unique layers, 1 and 2")
+
+    # check column names of paths
+    if not {'pre', 'post', 'sign', 'layer'}.issubset(paths.columns):
+        raise ValueError(
+            "The input DataFrame should have columns ['pre', 'post', 'sign', 'layer']")
+
+    # check values of signs: if it's a subset of {1, -1}
+    if not set(paths.sign) <= {1, -1}:
+        raise ValueError(
+            f"The input DataFrame should have values 1 (excitatory) or -1 (inhibitory) in the 'sign' column, but got {set(paths.sign)}")
+
+    # define variables ----
+    circuits: list[XORCircuit] = []
+
+    exciters = paths.pre[(paths.layer == 2) & (paths.sign == 1)].unique()
+    inhibitors = paths.pre[(paths.layer == 2) & (paths.sign == -1)].unique()
+
+    l1 = paths[paths.layer == 1]
+    l2 = paths[paths.layer == 2]
+
+    exciter_us_dict: dict[int | str, set[int | str]] = {
+        exc: set(l1.pre[l1.post == exc]) for exc in exciters}
+    inhibitor_us_dict = {inh: set(l1.pre[l1.post == inh])
+                         for inh in inhibitors}
+
+    exciter_ds_dict = {exc: set(l2.post[l2.pre == exc]) for exc in exciters}
+    inhibitor_ds_dict = {inh: set(l2.post[l2.pre == inh])
+                         for inh in inhibitors}
+
+    # main algorithm ----
+    for e1, e2 in itertools.combinations(exciters, 2):
+        common = exciter_us_dict[e1] & exciter_us_dict[e2]
+        onlye1 = exciter_us_dict[e1] - common
+        onlye2 = exciter_us_dict[e2] - common
+
+        for i in inhibitors:
+            e1_i_intersect = onlye1 & inhibitor_us_dict[i]
+            e2_i_intersect = onlye2 & inhibitor_us_dict[i]
+            if (len(e1_i_intersect) == 0) or (len(e2_i_intersect) == 0):
+                continue
+            targets = exciter_ds_dict[e1] & exciter_ds_dict[e2] & inhibitor_ds_dict[i]
+            if not targets:
+                continue
+            circuits.append(
+                XORCircuit(
+                    input1=list(e1_i_intersect),
+                    input2=list(e2_i_intersect),
+                    exciter1=e1,
+                    exciter2=e2,
+                    inhibitor=i,
+                    output=list(targets)
+                )
+            )
+
+    return circuits
