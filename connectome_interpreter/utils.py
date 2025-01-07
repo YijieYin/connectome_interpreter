@@ -1256,7 +1256,7 @@ def find_xor(paths: pd.DataFrame) -> List[XORCircuit]:
     l1 = paths[paths.layer == 1]
     l2 = paths[paths.layer == 2]
 
-    exciter_us_dict = {exc: set(l1.pre[l1.post == exc]) for exc in exciters}
+    exciter_us_dict: dict[..., set[...]] = {exc: set(l1.pre[l1.post == exc]) for exc in exciters}
     inhibitor_us_dict = {inh: set(l1.pre[l1.post == inh])
                          for inh in inhibitors}
 
