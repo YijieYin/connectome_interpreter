@@ -1273,10 +1273,20 @@ def find_xor(paths: pd.DataFrame) -> List[XORCircuit]:
         for i in inhibitors:
             e1_i_intersect = onlye1 & inhibitor_us_dict[i]
             e2_i_intersect = onlye2 & inhibitor_us_dict[i]
-            if (len(e1_i_intersect) != 0) and (len(e2_i_intersect) != 0):
-                targets = exciter_ds_dict[e1] & exciter_ds_dict[e2] & inhibitor_ds_dict[i]
-                if len(targets) > 0:
-                    circuits.append(XORCircuit(input1=list(e1_i_intersect), input2=list(e2_i_intersect),
-                                               exciter1=e1, exciter2=e2, inhibitor=i, output=list(targets)))
+            if (len(e1_i_intersect) == 0) or (len(e2_i_intersect) == 0):
+                continue
+            targets = exciter_ds_dict[e1] & exciter_ds_dict[e2] & inhibitor_ds_dict[i]
+            if not targets:
+                continue
+            circuits.append(
+                XORCircuit(
+                    input1=list(e1_i_intersect), 
+                    input2=list(e2_i_intersect),
+                    exciter1=e1, 
+                    exciter2=e2, 
+                    inhibitor=i, 
+                    output=list(targets)
+                )
+            )
 
     return circuits
