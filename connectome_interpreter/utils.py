@@ -1213,7 +1213,7 @@ class XORCircuit:
     # Middle layer nodes
     exciter1: str  # Takes input from input1 only
     exciter2: str  # Takes input from input2 only
-    inhibitor: str        # Takes input from both inputs
+    inhibitor: str  # Takes input from both inputs
     # Output node
     output: list
 
