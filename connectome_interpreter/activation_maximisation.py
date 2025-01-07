@@ -637,7 +637,6 @@ def get_neuron_activation(output,
     Returns:
         pd.DataFrame: The activations for the neurons, with the first columns being batch_names, neuron_indices, and group. The rest are the timesteps. 
     '''
-    batch_names = list(to_nparray(batch_names, unique=False))
     neuron_indices = list(to_nparray(neuron_indices))
 
     if output.ndim == 2:
@@ -658,6 +657,7 @@ def get_neuron_activation(output,
                     [f'time_{i}' for i in range(output.shape[1])]]
         else:
             df = df[['idx'] + [f'time_{i}' for i in range(output.shape[1])]]
+
         return df
 
     if output.ndim == 3:
@@ -665,19 +665,22 @@ def get_neuron_activation(output,
             # make batch names
             batch_names = [f'batch_{i}' for i in range(output.shape[0])]
 
+        batch_names = list(to_nparray(batch_names, unique=False))
+
         # make sure length matches
         if output.shape[0] != len(batch_names):
             raise ValueError(
                 'Length of batch_names has to be the same as output.shape[0].')
 
-        data = output.view(-1, output.shape[2]).cpu().numpy()
+        data = output[:, neuron_indices,
+                      :].view(-1, output.shape[2]).cpu().numpy()
 
         # Create indices for the first two dimensions
-        # in the end, we want output.shape[0] * output.shape[1] rows
-        # neuron_indices are the second dimension
-        # so multiply by output.shape[0]
+        # in the end, we want batch * n_indices rows
+        # that's output.shape[0] * len(neuron_indices) rows
+        batch_names = [
+            o for o in batch_names for _ in range(len(neuron_indices))]
         neuron_indices = neuron_indices * output.shape[0]
-        batch_names = [o for o in batch_names for _ in range(output.shape[1])]
 
         # Combine indices and data into a DataFrame
         df = pd.DataFrame(

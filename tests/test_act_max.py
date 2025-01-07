@@ -200,65 +200,80 @@ class TestActivationsToDFBatched(unittest.TestCase):
 
 
 class TestGetNeuronActivation(unittest.TestCase):
-    def setUp(self):
-        # Shape: (batch_size=3, num_neurons=4, num_timesteps=5)
-        self.output = torch.rand(3, 4, 5)
-        self.batch_names = ['batch1', 'batch2', 'batch3']
-        self.neuron_indices = [10, 11, 12, 13]
-        self.idx_to_group = {10: 'group1',
-                             11: 'group1', 12: 'group2', 13: 'group2'}
 
-    def test_valid_input_with_groups(self):
+    def test_2d_output_with_groups(self):
+        output = torch.tensor(
+            [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]])
+        neuron_indices = [0, 2]
+        idx_to_group = {0: 'A', 2: 'B'}
+
         df = get_neuron_activation(
-            self.output,
-            self.batch_names,
-            self.neuron_indices,
-            self.idx_to_group
-        )
-        self.assertEqual(df.shape, (12, 8))  # 3 batches * 4 neurons, 8 columns
-        self.assertListEqual(df['batch_name'].tolist()[:4], ['batch1'] * 4)
-        self.assertListEqual(df['idx'].tolist()[:4], [10, 11, 12, 13])
-        self.assertListEqual(df['group'].tolist()[:4], [
-                             'group1', 'group1', 'group2', 'group2'])
+            output, neuron_indices, idx_to_group=idx_to_group)
 
-    def test_valid_input_without_groups(self):
+        expected_df = pd.DataFrame({
+            'idx': [0, 2],
+            'group': ['A', 'B'],
+            'time_0': [0.1, 0.7],
+            'time_1': [0.2, 0.8],
+            'time_2': [0.3, 0.9]
+        })
+        pd.testing.assert_frame_equal(df, expected_df, check_dtype=False)
+
+    def test_2d_output_without_groups(self):
+        output = torch.tensor(
+            [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]])
+        neuron_indices = [1]
+
+        df = get_neuron_activation(output, neuron_indices)
+
+        expected_df = pd.DataFrame({
+            'idx': [1],
+            'time_0': [0.4],
+            'time_1': [0.5],
+            'time_2': [0.6]
+        })
+        pd.testing.assert_frame_equal(df, expected_df, check_dtype=False)
+
+    def test_3d_output_with_batch_names_and_groups(self):
+        output = torch.tensor(
+            [[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]])
+        neuron_indices = [0]
+        batch_names = ['batch_1', 'batch_2']
+        idx_to_group = {0: 'A'}
+
         df = get_neuron_activation(
-            self.output,
-            self.batch_names,
-            self.neuron_indices
-        )
-        self.assertEqual(df.shape, (12, 7))  # No 'group' column
-        self.assertNotIn('group', df.columns)
+            output, neuron_indices, batch_names=batch_names, idx_to_group=idx_to_group)
 
-    def test_mismatched_batch_names_length(self):
-        with self.assertRaises(ValueError) as context:
-            get_neuron_activation(
-                self.output,
-                ['batch1', 'batch2'],  # Incorrect length
-                self.neuron_indices
-            )
-        self.assertIn('Length of batch_names has to be the same as output.shape[0]', str(
-            context.exception))
+        expected_df = pd.DataFrame({
+            'batch_name': ['batch_1', 'batch_2'],
+            'idx': [0, 0],
+            'group': ['A', 'A'],
+            'time_0': [0.1, 0.5],
+            'time_1': [0.2, 0.6]
+        })
+        pd.testing.assert_frame_equal(df, expected_df, check_dtype=False)
 
-    def test_mismatched_neuron_indices_length(self):
-        with self.assertRaises(ValueError) as context:
-            get_neuron_activation(
-                self.output,
-                self.batch_names,
-                [10, 11]  # Incorrect length
-            )
-        self.assertIn('Length of neuron_indices has to be the same as output.shape[1]', str(
-            context.exception))
+    def test_3d_output_without_batch_names(self):
+        output = torch.tensor(
+            [[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]])
+        neuron_indices = [1]
 
-    def test_idx_to_group_key_error(self):
-        with self.assertRaises(KeyError):
-            get_neuron_activation(
-                self.output,
-                self.batch_names,
-                [14, 15, 16, 17],  # Indices not in idx_to_group
-                self.idx_to_group
-            )
+        df = get_neuron_activation(output, neuron_indices)
 
+        expected_df = pd.DataFrame({
+            'batch_name': ['batch_0', 'batch_1'],
+            'idx': [1, 1],
+            'time_0': [0.3, 0.7],
+            'time_1': [0.4, 0.8]
+        })
+        pd.testing.assert_frame_equal(df, expected_df, check_dtype=False)
 
-if __name__ == '__main__':
-    unittest.main()
+    def test_batch_names_mismatch(self):
+        output = torch.tensor(
+            [[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]])
+        neuron_indices = [1]
+        batch_names = ['batch_1']
+
+        with self.assertRaises(ValueError):
+            get_neuron_activation(output, neuron_indices,
+                                  batch_names=batch_names)
