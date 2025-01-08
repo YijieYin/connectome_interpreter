@@ -9,29 +9,28 @@ import ipywidgets as widgets
 import seaborn as sns
 import matplotlib.pyplot as plt
 from IPython.display import display
-import sys
 
 from .utils import dynamic_representation, torch_sparse_where, to_nparray, tensor_to_csc, group_edge_by
 
-def compress_paths_memeff(inprop, step_number, threshold=0, output_threshold=1e-4, root=False, chunks=1):
-    """
-    Performs iterative multiplication of a sparse matrix `inprop` for a specified number of steps,
-    applying thresholding to filter out values below a certain `threshold` to optimize memory usage
-    and computation speed. The function is optimized to run on GPU if available. It needs >= size_of_inprop * 3 amount of GPU memory, for matrix multiplication, and thresholding.
 
-    This function multiplies the connectivity matrix (input in rows; output in columns) `inprop` with itself `step_number` times,
-    with each step's result being thresholded to zero out elements below a given threshold.
-    The function stores each step's result in a list, where each result is further
-    processed to drop values below the `output_threshold` to save memory.
+def compress_paths_memeff(inprop: csr_matrix,
+                          step_number: int,
+                          threshold: float = 0,
+                          output_threshold: float = 1e-4,
+                          root: bool = False,
+                          chunkSize: int = 10000) -> list:
+    """
+    Performs iterative multiplication of a sparse matrix `inprop` for a specified number of steps. The function is optimized to run on GPU if available. It needs ~ (inprop.shape[0] * chunkSize * 2 + chunkSize **2) * 32 (bits) / 8 (bits per byte) / 1e6 (bytes per MB) MB of GPU memory for matrix multiplication. 
+
+    To prevent the output from being too big, there is by default a threshold of the results of matrix multiplications (`output_threshold`), and optionally a threshold during the matrix multiplication (`threshold`).
 
     Args:
         inprop (scipy.sparse.matrix): The connectivity matrix as a scipy sparse matrix.
-        step_number (int): The number of iterations to perform the matrix multiplication.
-        threshold (float, optional): The threshold value to apply after each multiplication.
-                                     Values below this threshold are set to zero. Defaults to 0.
-        output_threshold (float, optional): The threshold value to apply to the final output,
-                                            used to reduce memory footprint. Defaults to 1e-4.
+        step_number (int): The number of iterations to perform the matrix multiplication. Minimum value is 1, in which case the function returns the input matrix.
+        threshold (float, optional): The threshold value to apply after each multiplication. Values below this threshold are set to zero. Defaults to 0.
+        output_threshold (float, optional): The threshold value to apply to the final output, used to reduce memory consumption. Defaults to 1e-4.
         root (bool, optional): Whether to take the nth root of the output. This can be understood as "the average direct connection strength" (when root=True), as opposed to "the proportion of influence among all partners n steps away" (when root=False). Defaults to False.
+        chunkSize (int, optional): The size of the chunks to split the matrix into for matrix multiplication. Defaults to 10000.
 
     Returns:
         list: A list of scipy.sparse.csc_matrix objects, each representing connectivity from all neurons to all neurons n steps away.
@@ -52,68 +51,89 @@ def compress_paths_memeff(inprop, step_number, threshold=0, output_threshold=1e-
     steps_fast = []
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # check that step_number>0
+    if step_number < 1:
+        raise ValueError("step_number should be greater than 0")
+
     inprop_tensor = torch.tensor(inprop.toarray())
     size = inprop_tensor.size(dim=0)
 
-    import math
-    chunkSize = math.ceil(size / chunks)
+    chunks = math.ceil(size/chunkSize)
 
-    # allocate memory on cuda device to save current column
-    out_col = torch.full((size,chunkSize), 0.0, dtype=torch.float32)
-    in_rows = torch.full((chunkSize, size), 0.0, dtype=torch.float32)
-
-    out_tensor_new = torch.full((size,size), 0.0, dtype=torch.float32)
+    # print(
+    #     f'max memory before start: {torch.cuda.max_memory_allocated()/ 1024**2:.2f} MB')
 
     with torch.no_grad():
         for i in tqdm(range(step_number)):
-            if i==0:
+
+            if i == 0:
                 out_tensor = inprop_tensor.clone()
-                inprop_tensor = inprop_tensor.to(device)
             else:
+                # print(f'begin iteration {i}')
+                # print(torch.cuda.max_memory_allocated() / 1024**2)
+                out_tensor_new = torch.full(
+                    (size, size), 0.0, dtype=torch.float32)
                 colLow = 0
                 colHigh = chunkSize
-                for colChunk in range(chunks): # iterate chunks colwise
-                    out_col = out_col.to(device)
+                for colChunk in range(chunks):  # iterate chunks colwise
                     rowLow = 0
                     rowHigh = chunkSize
-                    for rowChunk in range(chunks): # iterate chunks rowwise
+
+                    in_col = inprop_tensor[:, colLow:colHigh].to(
+                        device)  # shape: size x chunkSize; on GPU
+                    # print('after setting in_col')
+                    # print(torch.cuda.max_memory_allocated() / 1024**2)
+
+                    for rowChunk in range(chunks):  # iterate chunks rowwise
                         torch.cuda.reset_peak_memory_stats()
-                        in_rows = out_tensor[rowLow:rowHigh, :]
-                        in_rows = in_rows.to(device)
-                        out_col[rowLow:rowHigh] = torch.matmul(in_rows, inprop_tensor[:,colLow:colHigh])
+                        in_rows = out_tensor[rowLow:rowHigh, :].to(
+                            device)  # shape: chunkSize x size; on GPU
+                        # print('after setting in_rows')
+                        # print(torch.cuda.max_memory_allocated() / 1024**2)
+                        out_tensor_new[rowLow:rowHigh, colLow:colHigh] = torch.matmul(
+                            in_rows, in_col).to('cpu')  # shape: chunkSize x chunkSize; on CPU
+                        # print('after matmul')
+                        # print(torch.cuda.max_memory_allocated() / 1024**2)
+
                         rowLow += chunkSize
                         rowHigh += chunkSize
                         rowHigh = min(rowHigh, size)
-                        print(f'max memory in {i}: {torch.cuda.max_memory_allocated()/ 1024**2:.2f} MB')
-                    out_col = out_col.to('cpu')
-                    in_rows = in_rows.to('cpu')
-                    out_tensor_new[:, colLow:colHigh] = out_col
-                    out_col = torch.full((size,chunkSize), 0.0, dtype=torch.float32)
+
+                        del in_rows
+                        # print(
+                        #     f'max memory in {i}: {torch.cuda.max_memory_allocated()/ 1024**2:.2f} MB')
+                    del in_col
                     colLow += chunkSize
                     colHigh += chunkSize
                     colHigh = min(colHigh, size)
-                out_tensor = out_tensor_new.clone()
-                print(out_tensor)
 
+                out_tensor = out_tensor_new
+                del out_tensor_new
+                # Clear PyTorch CUDA cache
+                torch.cuda.empty_cache()
 
-    # Thresholding during matmul
-    if threshold != 0:
-        out_tensor = torch.where(
-            out_tensor >= threshold, out_tensor, torch.tensor(0.0))
+            # Thresholding during matmul
+            if threshold != 0:
+                out_tensor = torch.where(
+                    out_tensor >= threshold, out_tensor, torch.tensor(0.0))
 
-    # Convert to csc for output
-    out_csc = tensor_to_csc(out_tensor)
-    out_csc.eliminate_zeros()
+            # Convert to csc for output
+            # print('converting to csc')
+            out_csc = tensor_to_csc(out_tensor)
+            out_csc.eliminate_zeros()
 
-    if root:
-        out_csc.data = np.power(out_csc.data, 1/(i+1))
+            if root:
+                out_csc.data = np.power(out_csc.data, 1/(i+1))
 
-    if output_threshold > 0:
-        out_csc.data = np.where(
-            out_csc.data >= output_threshold, out_csc.data, 0)
-        out_csc.eliminate_zeros()
+            if output_threshold > 0:
+                out_csc.data = np.where(
+                    out_csc.data >= output_threshold, out_csc.data, 0)
+                out_csc.eliminate_zeros()
 
-    steps_fast.append(out_csc)
+            steps_fast.append(out_csc)
+
+    # remove all variables
+    del out_tensor, inprop_tensor
     torch.cuda.empty_cache()
 
     return steps_fast
