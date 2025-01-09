@@ -29,7 +29,6 @@ dependencies = [
 
 [project.optional-dependencies]
 get_ngl_link = ["nglscenes"]
-map_to_experiment = ["scikit-learn"]
 wandb = ["wandb"]
 
 [tool.setuptools.dynamic]
