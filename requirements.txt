@@ -1,0 +1,7 @@
+-e .  # install this package, see setup.py
+
+# https://stackoverflow.com/questions/43658870/requirements-txt-vs-setup-py
+
+# Additional developer requirements here
+flake8
+pytest

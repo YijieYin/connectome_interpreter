@@ -1,3 +1,5 @@
+from numbers import Real
+from typing import Dict, List, Tuple, Collection
 from collections import defaultdict
 import random
 import warnings
@@ -5,12 +7,17 @@ import warnings
 import torch
 import pandas as pd
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix, issparse
+import numpy.typing as npt
+from scipy.sparse import coo_matrix, issparse
 import matplotlib.colors as mcl
 import matplotlib.pyplot as plt
-from tqdm import tqdm
+import ipywidgets as widgets
 import networkx as nx
 from IPython.display import display
+
+
+# types that can be made into a numeric numpy array
+arrayable = Real | Collection[Real]
 
 
 def dynamic_representation(tensor, density_threshold=0.2):
@@ -180,7 +187,12 @@ def adjacency_df_to_el(adjacency, threshold=None):
     return adjacency
 
 
-def modify_coo_matrix(sparse_matrix, input_idx=None, output_idx=None, value=None, updates_df=None, re_normalize=True):
+def modify_coo_matrix(sparse_matrix,
+                      input_idx: arrayable = None,
+                      output_idx: arrayable = None,
+                      value=None,
+                      updates_df: pd.DataFrame = None,
+                      re_normalize: bool = True):
     """
     Modify the values of a sparse matrix (either COO or CSR format) at specified indices.
 
@@ -351,13 +363,14 @@ def modify_coo_matrix(sparse_matrix, input_idx=None, output_idx=None, value=None
     # return csr.asformat(original_format)
 
 
-def to_nparray(input_data):
+def to_nparray(input_data: arrayable, unique: bool = True) -> npt.NDArray:
     """
-    Converts the input data into a numpy array, filtering out any NaN values and duplicates. 
+    Converts the input data into a numpy array, filtering out any NaN values (and duplicates). 
     The input can be a single number, a list, a set, a numpy array, or a pandas Series.
 
     Args:
         input_data: The input data to convert. Can be of type int (including numpy.int64 and numpy.int32), float, list, set, numpy.ndarray, or pandas.Series.
+        unique (bool, optional): Whether to return only unique values. Default to True. NOTE: np.unique() sorts the array.
 
     Returns:
         numpy.ndarray: A unique numpy array created from the input data, with all NaN values removed.
@@ -375,7 +388,10 @@ def to_nparray(input_data):
     cleaned_array = input_array[~pd.isna(input_array)]
 
     # Finally, return unique values
-    return np.unique(cleaned_array)
+    if unique:
+        return np.unique(cleaned_array)
+    else:
+        return cleaned_array
 
 
 def get_ngl_link(df: pd.DataFrame | pd.Series, no_connection_invisible: bool = True, group_by: dict = None, colour_saturation: float = 0.4,
@@ -412,9 +428,9 @@ def get_ngl_link(df: pd.DataFrame | pd.Series, no_connection_invisible: bool = T
 
     try:
         import nglscenes as ngl
-    except ImportError:
+    except ImportError as exc:
         raise ImportError(
-            "To use this function, please install the package by running 'pip3 install git+https://github.com/schlegelp/nglscenes@main'")
+            "To use this function, please install the package by running 'pip3 install git+https://github.com/schlegelp/nglscenes@main'") from exc
 
     # if df is a pandas series, turn into dataframe
     if isinstance(df, pd.Series):
@@ -543,7 +559,7 @@ def get_ngl_link(df: pd.DataFrame | pd.Series, no_connection_invisible: bool = T
     return scene.url
 
 
-def get_activations(array, global_indices, idx_map=None, top_n=None, threshold=None):
+def get_activations(array, global_indices: arrayable, idx_map: dict = None, top_n=None, threshold=None):
     """
     Get activation for neurons (in rows) in `array` for each time step (in columns). Optionally group neurons by `idx_map`, and filter by `top_n` or `threshold`.
 
@@ -627,9 +643,9 @@ def get_activations(array, global_indices, idx_map=None, top_n=None, threshold=N
     return result
 
 
-def plot_layered_paths(path_df, figsize=(10, 8), priority_indices=None, sort_by_activation=False,
-                       fraction=0.03, pad=0.02, weight_decimals=2,
-                       neuron_to_sign=None, sign_color_map={1: 'red', -1: 'blue'}):
+def plot_layered_paths(path_df: pd.DataFrame, figsize: tuple = (10, 8), priority_indices=None, sort_by_activation: bool = False,
+                       fraction: float = 0.03, pad: float = 0.02, weight_decimals: int = 2,
+                       neuron_to_sign: dict = None, sign_color_map: dict = {1: 'red', -1: 'blue'}):
     """
     Plots a directed graph of layered paths with optional node coloring based on activation values.
 
@@ -993,8 +1009,8 @@ def display_df(df, cmap='Blues'):
 
 def compare_connectivity(m1, m2,
                          inidx1, outidx1, inidx2, outidx2,
-                         g1_pre=None, g1_post=None, g2_pre=None, g2_post=None, suffices=['_l', '_2'],
-                         remove_na_rows=True, display=True, threshold=0, sort_within='column', sort_by=None):
+                         g1_pre=None, g1_post=None, g2_pre=None, g2_post=None, suffices: List[str] = ['_l', '_2'],
+                         remove_na_rows: bool = True, display: bool = True, threshold=0, sort_within: str = 'column', sort_by: str = None):
     """
     Compare the connectivity between two matrices. 
 
@@ -1080,3 +1096,118 @@ def path_for_ngl(path):
         df = df.drop_duplicates()
         dfs.append(df)
     return pd.concat(dfs)
+
+
+def make_grid_inputs(
+    v1: arrayable,  # see above
+    v2: arrayable,
+    num_layers: int,
+    grid_size: int = 10,
+    timepoints: int | list = 0,
+    device=None,  # type?
+) -> Tuple[torch.Tensor, List[Tuple[float, float]]]:
+    """
+    Make a batch of input using combinations of v1 and v2 at different strengths (0 to 1). 
+
+    Args:
+        v1: The first input vector.
+        v2: The second input vector. Its length should match that of `v1`.
+        num_layers (int): The number of layers in the model.
+        grid_size (int, optional): The number of points in the grid. Defaults to 10.
+        timepoints (int|list, optional): The timepoints at which combinations of v1 and v2 are used. Defaults to 0 (the first timepoint).
+        device (str, optional): The device to create the inputs on. If None, if GPU is available, the inputs are created on the GPU. Otherwise CPU.
+
+    Returns:
+        torch.Tensor: A tensor of shape (grid_size**2, len(v1), num_layers).
+        list: A list of grid coordinates.
+    """
+    # first convert to np array
+    v1 = to_nparray(v1, unique=False)
+    v2 = to_nparray(v2, unique=False)
+
+    # error if v1 and v2 have more than 1 dimension
+    if v1.ndim > 1 or v2.ndim > 1:
+        raise ValueError("v1 and v2 should be 1D arrays.")
+
+    # check if length of v1 and v2 are the same
+    if len(v1) != len(v2):
+        raise ValueError("The length of v1 and v2 should be the same.")
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    sc1 = np.linspace(0, 1, grid_size)
+    sc2 = np.linspace(0, 1, grid_size)
+    sc1_grid, sc2_grid = np.meshgrid(sc1, sc2)
+
+    inputs = np.zeros((grid_size**2, len(v1), num_layers), dtype=np.float32)
+    for i, (s1, s2) in enumerate(zip(sc1_grid.ravel(), sc2_grid.ravel())):
+        inputs[i, :, timepoints] = v1 * s1 + v2 * s2
+
+    # Convert to torch tensor
+    inputs_tensor = torch.from_numpy(inputs).to(device)
+
+    # Create grid coordinates for reference
+    grid_coords = list(zip(sc1_grid.ravel(), sc2_grid.ravel()))
+
+    return inputs_tensor, grid_coords
+
+
+def plot_output_grid(
+    grid_outputs: torch.Tensor | npt.NDArray,
+    grid_coords: List[Tuple[float, float]],
+    selected_index: arrayable,
+    *,  # see note
+    figsize: tuple = (10, 8),
+    cmap: str = 'viridis',
+    xlab: str = 'v1 Activation',
+    ylab: str = 'v2 Activation',
+    title: str | None = None,
+):
+    """
+    Plot the output grid for selected indices.
+
+    Args:
+        grid_outputs (torch.Tensor|np.ndarray): The output grid tensor of shape (grid_size**2, num_neurons, num_layers).
+        grid_coords (list): A list of grid coordinates. Best from function `make_grid_inputs()`.
+        selected_index (int|list): The index or indices to plot.
+        figsize (tuple, optional): The size of the figure. Defaults to (10, 8).
+    """
+    selected_index = to_nparray(selected_index)
+
+    # if grid_outputs is tensor, convert to numpy
+    if isinstance(grid_outputs, torch.Tensor):
+        grid_outputs = grid_outputs.cpu().numpy()
+
+    if title is None:
+        title = f'Output Grid for {selected_index}'
+
+    def plot_heatmap(index, xlab, ylab, title):
+        # # Create the plot
+        plt.figure(figsize=figsize)
+        im = plt.imshow(heatmaps[index-1], cmap=cmap, origin='lower',
+                        extent=[0, 1, 0, 1])
+        plt.colorbar(im, label='Output')
+        plt.xlabel(xlab)
+        plt.ylabel(ylab)
+        plt.title(title)
+        plt.show()
+
+    heatmaps = []
+
+    for i in range(grid_outputs.shape[2]):
+        # Extract the selected index values
+        values = grid_outputs[:, selected_index,
+                              i].mean(axis=1)
+
+        # Reshape values to match the grid
+        grid_size = int(np.sqrt(len(grid_coords)))
+        values_grid = values.reshape((grid_size, grid_size))
+        heatmaps.append(values_grid)
+
+    slider = widgets.IntSlider(value=1, min=1, max=len(heatmaps), step=1,
+                               description='Timepoint', continuous_update=True)
+
+    # Link the slider to the plotting function
+    display(widgets.interactive(plot_heatmap, index=slider,
+            xlab=xlab, ylab=ylab, title=title))

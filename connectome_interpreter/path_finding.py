@@ -1,11 +1,21 @@
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 from scipy.sparse import issparse
+from tqdm import tqdm
+from typing import Dict, List
+import itertools
 
-from .utils import to_nparray, count_keys_per_value, check_consecutive_layers
+from .utils import to_nparray, count_keys_per_value, check_consecutive_layers, arrayable
+from typing import List
+
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import networkx as nx
 
 
-def find_path_once(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, top_n=-1, threshold=0):
+def find_path_once(inprop_csc, steps_cpu, inidx: arrayable, outidx: arrayable, target_layer_number, top_n=-1, threshold=0):
     """
     Finds the path once between input and output, of distance target_layer_number, returning indices
     of neurons in the previous layer that connect the input with the output. This works by taking the top_n direct upstream partners of the outidx neurons, and intersect those with neurons 'effectively' connected (through steps_cpu) to the inidx neurons.
@@ -92,7 +102,7 @@ def find_path_once(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, to
     return df
 
 
-def find_path_iteratively(inprop_csc, steps_cpu, inidx, outidx, target_layer_number, top_n=-1, threshold=0):
+def find_path_iteratively(inprop_csc, steps_cpu, inidx: arrayable, outidx: arrayable, target_layer_number, top_n=-1, threshold=0):
     """
     Iteratively finds the path from the specified output (outidx) back to the input (inidx) across
     multiple layers, using the `find_path_once` function to traverse each layer.
@@ -144,7 +154,7 @@ def find_path_iteratively(inprop_csc, steps_cpu, inidx, outidx, target_layer_num
     return pd.concat(dfs)
 
 
-def create_layered_positions(df: pd.DataFrame, priority_indices=None, sort_dict: dict = None):
+def create_layered_positions(df: pd.DataFrame, priority_indices=None, sort_dict: dict = None) -> dict:
     """
     Creates a dictionary of positions for each neuron in the paths, so that the paths can be visualized in a layered manner. It assumes that `df` contains the columns 'layer', 'pre_layer', 'post_layer' (or 'layer', 'pre', 'post'). If a neuron exists in multiple layers, it is plotted multiple times.
     Args:
@@ -166,21 +176,21 @@ def create_layered_positions(df: pd.DataFrame, priority_indices=None, sort_dict:
             str) + '_' + df['layer'].astype(str)
     if 'pre_layer' not in df.columns:
         df['pre_layer'] = df['pre'].astype(
-            str) + '_' + (df.layer-1).astype(str)
+            str) + '_' + (df['layer']-1).astype(str)
 
     if priority_indices is not None:
         priority_indices = set(priority_indices)
 
-    number_of_layers = df.layer.nunique()
+    number_of_layers = df['layer'].nunique()
     layer_width = 1.0 / (number_of_layers + 1)
     positions = {}
 
-    name_to_idx = dict(zip(df.pre_layer, df.pre))
-    name_to_idx.update(dict(zip(df.post_layer, df.post)))
+    name_to_idx = dict(zip(df.pre_layer, df['pre']))
+    name_to_idx.update(dict(zip(df.post_layer, df['post'])))
 
     global_to_local_layer_number = {l: i for i,
-                                    l in enumerate(sorted(df.layer.unique()))}
-    df.loc[:, ['local_layer']] = df.layer.map(global_to_local_layer_number)
+                                    l in enumerate(sorted(df['layer'].unique()))}
+    df.loc[:, ['local_layer']] = df['layer'].map(global_to_local_layer_number)
 
     for layer in range(0, number_of_layers + 1):
         if layer != number_of_layers:
@@ -221,58 +231,67 @@ def remove_excess_neurons(df: pd.DataFrame, keep=None, target_indices=None, keep
 
     if df.shape[0] == 0:
         # raise error
-        raise ValueError('There are no connections! Threshold too high?')
+        raise ValueError(
+            'There are no connections (`df` is empty)! Threshold too high?')
 
-    max_layer_num = df.layer.max()
+    max_layer_num = df['layer'].max()
     if max_layer_num == 1:
         return df
 
     # if target_indices are provided, first use this to filter the last layer ----
     if target_indices is not None:
-        # if it's a string, convert to list
-        if type(target_indices) == str:
+        # if it's a string or int, convert to list
+        if (type(target_indices) == str) or (type(target_indices) == int):
             target_indices = [target_indices]
         target_indices = set(target_indices)
-        if not target_indices.issubset(df[df.layer == df.layer.max()].post):
-            raise ValueError('The target indices are not in the post-synaptic neurons of the last layer. Here are the indices of the last layer: ',
-                             ', '.join(df[df.layer == df.layer.max()].post.unique()), '. Your target_indices should be a subset.')
+        # check if datatype is the same, between target_indices and post
+        if not all([type(i) == type(df['post'].iloc[0]) for i in target_indices]):
+            raise ValueError(
+                f'The datatype in `target_indices` should be the same as the elements in `post` column of the DataFrame. Elements in `post` is {type(df.post.iloc[0])}.')
 
-        df = df[(df.layer != df.layer.max()) | df.post.isin(target_indices)]
+        if not target_indices.issubset(df[df['layer'] == df['layer'].max()]['post']):
+            raise ValueError('The target indices are not in the post-synaptic neurons of the last layer. Here are the indices of the last layer: ',
+                             ', '.join(df[df['layer'] == df['layer'].max()]['post'].unique()), '. Your target_indices should be a subset.')
+
+        df = df[(df['layer'] != df['layer'].max())
+                | df['post'].isin(target_indices)]
 
     # check if all layer numbers are consecutive ----
     if not check_consecutive_layers(df):
         print('Warning: The layer numbers are not consecutive. Will only use the consecutive layers from the last one.')
         selected = []
         # get the consecutive layers from the last one
-        for l in range(df.layer.max(), 0, -1):
-            if l in df.layer.unique():
+        for l in range(df['layer'].max(), 0, -1):
+            if l in df['layer'].unique():
                 selected.append(l)
             else:
                 break
-        df = df[df.layer.isin(selected)]
+        df = df[df['layer'].isin(selected)]
 
         global_to_local_layer_number = {l: i for i,
-                                        l in enumerate(sorted(df.layer.unique()))}
-        df.loc[:, ['local_layer']] = df.layer.map(global_to_local_layer_number)
+                                        l in enumerate(sorted(df['layer'].unique()))}
+        df.loc[:, ['local_layer']] = df['layer'].map(
+            global_to_local_layer_number)
 
-    elif df.layer.min() != 1:
+    elif df['layer'].min() != 1:
         # if the layer numbers do not start from 1
         print('Warning: The layer numbers do not start from 1. Will only use the consecutive layers from the last one.')
         global_to_local_layer_number = {l: i for i,
-                                        l in enumerate(sorted(df.layer.unique()))}
-        df.loc[:, ['local_layer']] = df.layer.map(global_to_local_layer_number)
+                                        l in enumerate(sorted(df['layer'].unique()))}
+        df.loc[:, ['local_layer']] = df['layer'].map(
+            global_to_local_layer_number)
 
     else:
-        df.loc[:, ['local_layer']] = df.layer
+        df.loc[:, ['local_layer']] = df['layer']
 
     # while there is any layer whose post is not the same as the next layer's pre ----
-    while any([set(df[df.local_layer == i].post) != set(df[df.local_layer == (i+1)].pre) for i in range(1, df.local_layer.max())]):
+    while any([set(df[df.local_layer == i]['post']) != set(df[df.local_layer == (i+1)]['pre']) for i in range(1, df.local_layer.max())]):
         if keep is not None:
             if type(keep) == str:
                 keep = [keep]
             keep = set(keep)
 
-            if all([set(df[df.local_layer == i].post).union(keep) == set(df[df.local_layer == (i+1)].pre).union(keep) for i in range(1, df.local_layer.max())]):
+            if all([set(df[df.local_layer == i]['post']).union(keep) == set(df[df.local_layer == (i+1)]['pre']).union(keep) for i in range(1, df.local_layer.max())]):
                 break
         else:
             keep = set()
@@ -290,10 +309,10 @@ def remove_excess_neurons(df: pd.DataFrame, keep=None, target_indices=None, keep
 
             # filter by pre in the second layer
             df_layers_update.append(
-                df_layer[df_layer.pre.isin(set(df_prev_layer.post).union(keep))])
+                df_layer[df_layer['pre'].isin(set(df_prev_layer['post']).union(keep))])
             # filter by post in the first layer
             df_layers_update.append(
-                df_prev_layer[df_prev_layer.post.isin(set(df_layer.pre).union(keep))])
+                df_prev_layer[df_prev_layer['post'].isin(set(df_layer['pre']).union(keep))])
             df = pd.concat(df_layers_update)
 
         else:
@@ -304,19 +323,19 @@ def remove_excess_neurons(df: pd.DataFrame, keep=None, target_indices=None, keep
 
                 # pre that should be in the current layer: an intersection of previous layer's post; and current layer's pre
                 df_pre = set.intersection(
-                    set(df_prev_layer.post) & set(df_layer.pre))
+                    set(df_prev_layer['post']) & set(df_layer['pre']))
                 # post that should be in the current layer: an intersection of current layer's post; and next layer's pre
                 df_post = set.intersection(
-                    set(df_layer.post), set(df_next_layer.pre))
+                    set(df_layer['post']), set(df_next_layer['pre']))
 
                 if i == 2:
                     # add edges in the first layer
-                    df_prev_layer = df_prev_layer[df_prev_layer.post.isin(
+                    df_prev_layer = df_prev_layer[df_prev_layer['post'].isin(
                         df_pre.union(keep))]
                     df_layers_update.append(df_prev_layer)
 
-                df_layer = df_layer[df_layer.pre.isin(
-                    df_pre.union(keep)) & df_layer.post.isin(df_post.union(keep))]
+                df_layer = df_layer[df_layer['pre'].isin(
+                    df_pre.union(keep)) & df_layer['post'].isin(df_post.union(keep))]
 
                 if df_layer.shape[0] == 0:
                     raise ValueError(
@@ -326,10 +345,10 @@ def remove_excess_neurons(df: pd.DataFrame, keep=None, target_indices=None, keep
                 if i == (df.local_layer.max()-1):
                     # add edges in the last layer
                     if target_indices is None:
-                        df_next_layer = df_next_layer[df_next_layer.pre.isin(
+                        df_next_layer = df_next_layer[df_next_layer['pre'].isin(
                             df_post.union(keep))]
                     else:
-                        df_next_layer = df_next_layer[df_next_layer.pre.isin(
+                        df_next_layer = df_next_layer[df_next_layer['pre'].isin(
                             df_post.union(keep).union(target_indices))]
                     df_layers_update.append(df_next_layer)
 
@@ -338,13 +357,38 @@ def remove_excess_neurons(df: pd.DataFrame, keep=None, target_indices=None, keep
     df.drop(columns='local_layer', inplace=True)
 
     # in case we removed all the connections in the last layer
-    if df.layer.max() != max_layer_num:
+    if df['layer'].max() != max_layer_num:
         raise ValueError(
             'No path found. Try lowering the threshold for the edges to be included in the path. Currently no connections are found in the last layer.')
     return df
 
 
-def filter_paths(df: pd.DataFrame, threshold: float = 0, necessary_intermediate: dict = None) -> pd.DataFrame:
+def remove_excess_neurons_batched(df: pd.DataFrame, keep=None, target_indices=None, keep_targets_in_middle: bool = False) -> pd.DataFrame:
+    """Does the same thing as `remove_excess_neurons()`, but for batched input (i.e. assumes column `batch` in `df`). 
+
+    Args:
+        df (pd.DataFrame): a filtered dataframe with similar structure as the dataframe returned by `find_path_iteratively()`. Must contain a column `batch`.
+        keep (list, set, pd.Series, numpy.ndarray, str, optional): A list of neuron indices that should be kept in the paths, even if they don't connect between input and target in the last layer. Defaults to None.
+        target_indices (list, set, pd.Series, numpy.ndarray, str, optional): A list of target neuron indices that should be kept in the last layer. Defaults to None, in which case all neurons in the last layer in `df` would be kept.
+        keep_targets_in_middle (bool, optional): If True, the target_indices are kept in the middle layers as well, even if they don't connect between input and target in the last layer. Defaults to False.
+
+    Returns:
+        pd.DataFrame: The filtered DataFrame containing the path data, including the layer number, pre-synaptic index, post-synaptic index, and weight
+    """
+    # first check if 'batch' is in the columns
+    if 'batch' not in df.columns:
+        raise ValueError('The column `batch` is not in the DataFrame.')
+
+    dfs = []
+    for b in tqdm(df.batch.unique()):
+        df_batch = df[df.batch == b]
+        df_batch = remove_excess_neurons(
+            df_batch, keep, target_indices, keep_targets_in_middle)
+        dfs.append(df_batch)
+    return pd.concat(dfs)
+
+
+def filter_paths(df: pd.DataFrame, threshold: float = 0, necessary_intermediate: Dict[int, arrayable] = None) -> pd.DataFrame:
     """Filters the paths based on the weight threshold and the necessary intermediate neurons. The weight threshold refers to the direct connectivity between connected neurons in the path. It is recommended to not put too may neurons in necessary_intermediate, as it may be too stringent and remove all paths.
 
     Args:
@@ -369,11 +413,11 @@ def filter_paths(df: pd.DataFrame, threshold: float = 0, necessary_intermediate:
                 # error: layer has to be an integer >=1
                 raise ValueError("Layer has to be an integer >=1")
 
-            if layer < (df.layer.max()+1):
-                df = df[df.pre.isin(indices) | (df.layer != layer)]
-            elif layer == (df.layer.max()+1):
+            if layer < (df['layer'].max()+1):
+                df = df[df['pre'].isin(indices) | (df['layer'] != layer)]
+            elif layer == (df['layer'].max()+1):
                 # filter for targets
-                df = df[df.post.isin(indices) | (df.layer != layer)]
+                df = df[df['post'].isin(indices) | (df['layer'] != layer)]
             else:
                 # error: layer number too big
                 raise ValueError("Layer number too big")
@@ -382,7 +426,7 @@ def filter_paths(df: pd.DataFrame, threshold: float = 0, necessary_intermediate:
     return df
 
 
-def group_paths(paths, pre_group, post_group, intermediate_group=None):
+def group_paths(paths: pd.DataFrame, pre_group: dict, post_group: dict, intermediate_group: dict = None, avg_within_connected: bool = False) -> pd.DataFrame:
     """
     Group the paths by user-specified variable (e.g. cell type, cell class etc.). Weights are summed across presynaptic neurons of the same group and averaged across all postsynaptic neurons of the same group (even if some postsynaptic neurons are not in `paths`).
 
@@ -401,19 +445,24 @@ def group_paths(paths, pre_group, post_group, intermediate_group=None):
 
     # add cell type information
     # first use intermediate_group, then modify specifically for pre at the first layer, and post at the last layer
-    paths['pre_type'] = paths.pre.map(intermediate_group).astype(str)
-    paths['post_type'] = paths.post.map(intermediate_group).astype(str)
+    paths['pre_type'] = paths['pre'].map(intermediate_group).astype(str)
+    paths['post_type'] = paths['post'].map(intermediate_group).astype(str)
 
-    paths.loc[paths.layer == paths.layer.min(), 'pre_type'] = paths.loc[paths.layer ==
-                                                                        paths.layer.min(), 'pre'].map(pre_group).astype(str)
-    paths.loc[paths.layer == paths.layer.max(), 'post_type'] = paths.loc[paths.layer ==
-                                                                         paths.layer.max(), 'post'].map(post_group).astype(str)
+    paths.loc[paths['layer'] == paths['layer'].min(), 'pre_type'] = paths.loc[paths['layer'] ==
+                                                                              paths['layer'].min(), 'pre'].map(pre_group).astype(str)
+    paths.loc[paths['layer'] == paths['layer'].max(), 'post_type'] = paths.loc[paths['layer'] ==
+                                                                               paths['layer'].max(), 'post'].map(post_group).astype(str)
 
-    # sometimes only one neuron in a type is connected to another type, so only this connection is in paths
-    # but to calculate the average weight between two types, we should take into account all the neurons of the post-synaptic type
-    # so let's count the number of neurons in each post-synaptic type
-    nneuron_per_type = count_keys_per_value(intermediate_group)
-    nneuron_per_type.update(count_keys_per_value(post_group))
+    if not avg_within_connected:
+        # sometimes only one neuron in a type is connected to another type, so only this connection is in paths
+        # but to calculate the average weight between two types, we should take into account all the neurons of the post-synaptic type
+        # so let's count the number of neurons in each post-synaptic type
+        nneuron_per_type = count_keys_per_value(intermediate_group)
+        nneuron_per_type.update(count_keys_per_value(post_group))
+    else:
+        # count number of unique neurons in each type
+        nneuron_per_type = paths.groupby(
+            'post_type')['post'].nunique().to_dict()
 
     # sum across presynaptic neurons of the same type
     paths = paths.groupby(
@@ -426,3 +475,192 @@ def group_paths(paths, pre_group, post_group, intermediate_group=None):
     paths.drop(columns='nneuron_post', inplace=True)
 
     return paths
+
+
+def compare_layered_paths(paths: List[pd.DataFrame],
+                          priority_indices=None,
+                          neuron_to_sign: dict = None,
+                          sign_color_map: dict = {1: 'red', -1: 'blue'},
+                          el_colours: List[str] = ['rosybrown', 'burlywood'],
+                          legend_labels: List[str] = ['Path 1', 'Path 2'],
+                          weight_decimals: int = 2,
+                          figsize: tuple = (10, 8)):
+    """
+    Compare two layered paths by overlaying them and annotating the weights. The paths should be in the format of the output from `find_path_iteratively()`.
+
+    Args:
+        paths (List[pd.DataFrame]): A list of two DataFrames containing the path data, including columns 'layer', 'pre', 'post', and 'weight'.
+        priority_indices (list, set, pd.Series, numpy.ndarray, optional): A list of neuron indices that should be plotted on top of each layer. Defaults to None.
+        neuron_to_sign (dict, optional): A dictionary that maps neuron indices to their signs. Defaults to None.
+        sign_color_map (dict, optional): A dictionary that maps neuron signs to their respective colors. Defaults to {1: 'red', -1: 'blue'}.
+        el_colours (List[str], optional): A list of two colors for the edge labels of the two paths. Defaults to ['rosybrown', 'burlywood'].
+        legend_labels (List[str], optional): A list of two labels for the legend. Defaults to ['Path 1', 'Path 2'].
+        weight_decimals (int, optional): The number of decimal places to round the edge weights to. Defaults to 2.
+        figsize (tuple, optional): The size of the figure. Defaults to (10, 8).
+
+    Returns:
+        None: The function plots the graph.
+    """
+    # add layer columns if necessary
+    new_paths = []
+    for path in paths:
+        # Create a 'post_layer' column to use as unique identifiers
+        if 'post_layer' not in path.columns:
+            path['post_layer'] = path['post'].astype(
+                str) + '_' + path['layer'].astype(str)
+        if 'pre_layer' not in path.columns:
+            path['pre_layer'] = path['pre'].astype(
+                str) + '_' + (path.layer-1).astype(str)
+        new_paths.append(path)
+
+    composite_paths = pd.concat(new_paths)
+    # get unique edges
+    composite_paths.drop_duplicates(['pre_layer', 'post_layer'], inplace=True)
+    composite_G = nx.from_pandas_edgelist(composite_paths, 'pre_layer', 'post_layer', [
+        'weight'], create_using=nx.DiGraph())
+
+    # Labels for nodes
+    labels = dict(zip(composite_paths.post_layer, composite_paths.post))
+    labels.update(dict(zip(composite_paths.pre_layer, composite_paths.pre)))
+
+    # Determine the width of the edges
+    weights = [composite_G[u][v]['weight'] for u, v in composite_G.edges()]
+    widths = [max(0.1, w * 5) for w in weights]  # Scale weights for visibility
+
+    # Generate positions
+    positions = create_layered_positions(composite_paths, priority_indices)
+
+    # Edge colors based on neuron signs
+    default_color = 'lightgrey'  # Default edge color
+
+    # specify edge colour based on pre-neuron sign, if available
+    edge_colors = []
+    for u, _ in composite_G.edges():
+        pre_neuron = labels[u]
+        if neuron_to_sign and pre_neuron in neuron_to_sign:
+            edge_colors.append(sign_color_map.get(
+                neuron_to_sign[pre_neuron], default_color))
+        else:
+            edge_colors.append(default_color)
+
+    # Plot the graph
+    _, ax = plt.subplots(figsize=figsize)
+
+    nx.draw(composite_G, pos=positions,
+            labels=labels,
+            with_labels=True, node_size=100,
+            node_color='lightblue', arrows=True, arrowstyle='-|>', arrowsize=10, font_size=8, width=widths, ax=ax, edge_color=edge_colors)
+
+    G1 = nx.from_pandas_edgelist(paths[0], 'pre_layer', 'post_layer', [
+        'weight'], create_using=nx.DiGraph())
+    G2 = nx.from_pandas_edgelist(paths[1], 'pre_layer', 'post_layer', [
+        'weight'], create_using=nx.DiGraph())
+    el1 = {(u, v): f'{data["weight"]:.{weight_decimals}f}' for u,
+                   v, data in G1.edges(data=True)}
+    el2 = {(u, v): f'{data["weight"]:.{weight_decimals}f}' for u,
+                   v, data in G2.edges(data=True)}
+    nx.draw_networkx_edge_labels(G1, pos=positions, edge_labels=el1,
+                                 horizontalalignment='left', verticalalignment='top',
+                                 font_color=el_colours[0],
+                                 ax=ax)
+    nx.draw_networkx_edge_labels(G2, pos=positions, edge_labels=el2,
+                                 horizontalalignment='right', verticalalignment='bottom',
+                                 font_color=el_colours[1],
+                                 ax=ax)
+
+    ax.set_ylim(0, 1)
+    # add lengend using the el_colours
+    ax.legend(handles=[mpatches.Patch(color=el_colours[0], label=legend_labels[0]),
+                       mpatches.Patch(color=el_colours[1], label=legend_labels[1])], loc='upper right')
+    plt.show()
+
+
+@dataclass
+class XORCircuit:
+    # Input nodes
+    input1: list
+    input2: list
+    # Middle layer nodes
+    exciter1: str  # Takes input from input1 only
+    exciter2: str  # Takes input from input2 only
+    inhibitor: str  # Takes input from both inputs
+    # Output node
+    output: list
+
+
+def find_xor(paths: pd.DataFrame) -> List[XORCircuit]:
+    """
+    Find XOR-like circuits in a 3-layer network, based on [Wang et al. 2024](https://www.biorxiv.org/content/10.1101/2024.09.24.614724v2). Note: this function currently ignores middle excitatory neruons that receive both inputs.
+
+    Args:
+        paths: DataFrame with columns ['pre', 'post', 'sign', 'layer']
+        pre: source node
+        post: target node
+        sign: 1 (excitatory) or -1 (inhibitory)
+        layer: 1 (input->middle) or 2 (middle->output)
+
+    Returns:
+    List of XORCircuit objects, each representing a found XOR motif
+    """
+    # checking input ----
+    if set(paths['layer']) != {1, 2}:
+        raise ValueError(
+            "The input DataFrame should have exactly 2 unique layers, 1 and 2")
+
+    # check column names of paths
+    if not {'pre', 'post', 'sign', 'layer'}.issubset(paths.columns):
+        raise ValueError(
+            "The input DataFrame should have columns ['pre', 'post', 'sign', 'layer']")
+
+    # check values of signs: if it's a subset of {1, -1}
+    if not set(paths['sign']) <= {1, -1}:
+        raise ValueError(
+            f"The input DataFrame should have values 1 (excitatory) or -1 (inhibitory) in the 'sign' column, but got {set(paths['sign'])}")
+
+    # define variables ----
+    circuits: list[XORCircuit] = []
+
+    exciters = paths['pre'][(paths['layer'] == 2) &
+                            (paths['sign'] == 1)].unique()
+    inhibitors = paths['pre'][(paths['layer'] == 2)
+                              & (paths['sign'] == -1)].unique()
+
+    l1 = paths[paths['layer'] == 1]
+    l2 = paths[paths['layer'] == 2]
+
+    exciter_us_dict: dict[int | str, set[int | str]] = {
+        exc: set(l1['pre'][l1['post'] == exc]) for exc in exciters}
+    inhibitor_us_dict = {inh: set(l1['pre'][l1['post'] == inh])
+                         for inh in inhibitors}
+
+    exciter_ds_dict = {exc: set(l2['post'][l2['pre'] == exc])
+                       for exc in exciters}
+    inhibitor_ds_dict = {inh: set(l2['post'][l2['pre'] == inh])
+                         for inh in inhibitors}
+
+    # main algorithm ----
+    for e1, e2 in itertools.combinations(exciters, 2):
+        common = exciter_us_dict[e1] & exciter_us_dict[e2]
+        onlye1 = exciter_us_dict[e1] - common
+        onlye2 = exciter_us_dict[e2] - common
+
+        for i in inhibitors:
+            e1_i_intersect = onlye1 & inhibitor_us_dict[i]
+            e2_i_intersect = onlye2 & inhibitor_us_dict[i]
+            if (len(e1_i_intersect) == 0) or (len(e2_i_intersect) == 0):
+                continue
+            targets = exciter_ds_dict[e1] & exciter_ds_dict[e2] & inhibitor_ds_dict[i]
+            if not targets:
+                continue
+            circuits.append(
+                XORCircuit(
+                    input1=list(e1_i_intersect),
+                    input2=list(e2_i_intersect),
+                    exciter1=e1,
+                    exciter2=e2,
+                    inhibitor=i,
+                    output=list(targets)
+                )
+            )
+
+    return circuits
