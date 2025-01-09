@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "connectome_interpreter"
+dynamic = ["version"]
+
+description = "A tool for connectomics data interpretation"
+authors = [{name = "Yijie Yin", email = "yy432@cam.ac.uk"}]
+keywords = ["connectomics", "neural network"]
+readme = "README.md"
+license = {file="LICENSE"}
+urls = {"Source & example notebooks" = "https://github.com/YijieYin/connectome_interpreter", "Documentation" = "https://connectome-interpreter.readthedocs.io/en/latest/"}
+
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "tqdm",
+    "plotly",
+    "matplotlib",
+    "networkx",
+    "seaborn",
+    "ipywidgets",
+    "IPython",
+    "torch",
+]
+
+[project.optional-dependencies]
+get_ngl_link = ["nglscenes"]
+wandb = ["wandb"]
+
+[tool.setuptools.dynamic]
+version = {attr = "connectome_interpreter._version.__version__"}
+
+[tool.setuptools.package-data]
+"connectome_interpreter" = ["data/*/*"]
+
+[tool.setuptools.packages.find]
+where = ["."]
