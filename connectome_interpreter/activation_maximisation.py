@@ -4,6 +4,7 @@ from typing import Union, Dict, Optional, Callable, Tuple, List
 import torch
 import torch.nn as nn
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 
 from tqdm import tqdm
@@ -617,7 +618,7 @@ def input_from_df(df: pd.DataFrame, sensory_indices: list, idx_to_group: dict, n
     return inarray
 
 
-def get_neuron_activation(output,
+def get_neuron_activation(output: torch.Tensor | npt.NDArray,
                           neuron_indices: arrayable,
                           batch_names: arrayable = None,
                           idx_to_group: dict = None) -> pd.DataFrame:
@@ -625,7 +626,7 @@ def get_neuron_activation(output,
     Get the activations for specified indices across timepoints, include batch name and group information when available.
 
     Args:
-        output (torch.Tensor): The output tensor from the model. Shape should be (batch_size, num_neurons, num_timepoints) or (num_neurons, num_timepoints).
+        output (torch.Tensor | numpy.ndarray): The output tensor from the model. Shape should be (batch_size, num_neurons, num_timepoints) or (num_neurons, num_timepoints).
         neuron_indices (arrayable): The indices of the neurons to get activations for.
         batch_names (arrayable, optional): The names of the batches. Defaults to None. If output.ndim == 3, then this should be supplied. If not, batch names will be e.g. 'batch_0', 'batch_1', etc.
         idx_to_group (dict, optional): A dictionary mapping indices to groups. Defaults to None.
@@ -634,6 +635,9 @@ def get_neuron_activation(output,
         pd.DataFrame: The activations for the neurons, with the first columns being batch_names, neuron_indices, and group. The rest are the timesteps. 
     '''
     neuron_indices = list(to_nparray(neuron_indices))
+
+    if isinstance(output, torch.Tensor):
+        output = output.cpu().detach().numpy()
 
     if output.ndim == 2:
         # message if batch_names is not None
@@ -668,8 +672,7 @@ def get_neuron_activation(output,
             raise ValueError(
                 'Length of batch_names has to be the same as output.shape[0].')
 
-        data = output[:, neuron_indices,
-                      :].view(-1, output.shape[2]).cpu().numpy()
+        data = output[:, neuron_indices, :].reshape(-1, output.shape[2])
 
         # Create indices for the first two dimensions
         # in the end, we want batch * n_indices rows
