@@ -1,8 +1,9 @@
 import unittest
-import torch
+
 import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix
+import torch
 
 from connectome_interpreter.activation_maximisation import (
     MultilayeredNetwork,

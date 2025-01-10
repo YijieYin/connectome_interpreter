@@ -1,8 +1,10 @@
 import unittest
-from connectome_interpreter.utils import modify_coo_matrix
-from scipy.sparse import coo_matrix
+
 import pandas as pd
 import numpy as np
+from scipy.sparse import coo_matrix
+
+from connectome_interpreter.utils import modify_coo_matrix
 
 
 class TestModifyCooMatrix(unittest.TestCase):
