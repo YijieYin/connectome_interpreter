@@ -61,9 +61,6 @@ def compress_paths(inprop: csr_matrix,
 
     chunks = math.ceil(size/chunkSize)
 
-    # print(
-    #     f'max memory before start: {torch.cuda.max_memory_allocated()/ 1024**2:.2f} MB')
-
     with torch.no_grad():
         for i in tqdm(range(step_number)):
 
