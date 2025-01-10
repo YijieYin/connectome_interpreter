@@ -186,7 +186,7 @@ def activation_maximisation(
         print_output: bool = True,
         report_memory_usage: bool = False,
         device: Optional[torch.device] = None,
-        wandb: bool = True) -> Tuple[np.ndarray, np.ndarray, List[float], List[float], List[float], List[np.ndarray]]:
+        wandb: bool = False) -> Tuple[np.ndarray, np.ndarray, List[float], List[float], List[float], List[np.ndarray]]:
     """
     Performs activation maximisation on a given model to identify input patterns that result in the target activations.
 
@@ -414,6 +414,12 @@ def activation_maximisation(
     if report_memory_usage:
         print('GPU memory after optimization:', torch.cuda.memory_allocated(
             device) / 1e9, 'GB')
+
+    # if there is only one batch, then drop the first dimension
+    if batch_size == 1:
+        input_tensor = input_tensor[0]
+        output_after = output_after[0]
+        input_snapshots = [snap[0] for snap in input_snapshots]
 
     return (input_tensor, output_after,
             act_loss, out_reg_losses, in_reg_losses, input_snapshots)
