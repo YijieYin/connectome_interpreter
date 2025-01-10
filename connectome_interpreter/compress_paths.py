@@ -88,8 +88,10 @@ def compress_paths(inprop: csr_matrix,
                         # shape: chunkSize x size; on GPU
                         # print('after setting in_rows')
                         # print(torch.cuda.max_memory_allocated() / 1024**2)
-                        out_tensor_new[rowLow:rowHigh, colLow:colHigh] = torch.matmul(
-                            in_rows, in_col).to('cpu')  # shape: chunkSize x chunkSize; on CPU
+                        out_tensor_new[rowLow:rowHigh, colLow:colHigh] = (
+                            torch.matmul(in_rows, in_col).to('cpu')
+                        )
+                        # shape: chunkSize x chunkSize; on CPU
                         # print('after matmul')
                         # print(torch.cuda.max_memory_allocated() / 1024**2)
 
