@@ -16,28 +16,33 @@ from .utils import adjacency_df_to_el, get_activations, to_nparray, arrayable
 class MultilayeredNetwork(nn.Module):
     """
     A PyTorch module representing a multilayered neural network model.
-    This network architecture is designed to process temporal sequences of sensory data
-    through multiple layers, with the initial layer handling only external inputs and subsequent
-    layers processing external+internal input. 
+    This network architecture is designed to process temporal sequences
+    of sensory data through multiple layers, with the initial layer
+    handling only external inputs and subsequent layers processing
+    external+internal input.
 
-    The forward pass of the network unrolls the connectome through time, with each layer
-    receiving its own time-specific sensory input.
+    The forward pass of the network unrolls the connectome through time,
+    with each layer receiving its own time-specific sensory input.
 
     Attributes:
-        all_weights (torch.nn.Parameter): The connectome. Input neurons are in the columns.
-        sensory_indices (list[int]): Indices indicating which rows/columns in the all_weights matrix
-            correspond to sensory neurons.
+        all_weights (torch.nn.Parameter): The connectome. Input neurons are in
+            the columns.
+        sensory_indices (list[int]): Indices indicating which rows/columns in
+            the all_weights matrix correspond to sensory neurons.
         num_layers (int): The number of layers in the network.
         threshold (float): The activation threshold for neurons in the network.
-        activations (numpy.ndarray): A 2D array storing the activations of all neurons (rows) across time steps (columns).
+        activations (numpy.ndarray): A 2D array storing the activations of all
+            neurons (rows) across time steps (columns).
 
     Args:
-        all_weights (torch.Tensor): The connectome. Input neurons are in the columns.
-        sensory_indices (list[int]): A list indicating the indices of sensory neurons
-            within the network.
-        num_layers (int, optional): The number of temporal layers to unroll the network through.
-            Defaults to 2.
-        threshold (float, optional): The threshold for activation of neurons. Defaults to 0.01.
+        all_weights (torch.Tensor): The connectome. Input neurons are in the
+            columns.
+        sensory_indices (list[int]): A list indicating the indices of sensory
+            neurons within the network.
+        num_layers (int, optional): The number of temporal layers to unroll the
+            network through.  Defaults to 2.
+        threshold (float, optional): The threshold for activation of neurons.
+            Defaults to 0.01.
     """
 
     def __init__(self, all_weights, sensory_indices, num_layers=2, threshold=0.01, tanh_steepness=5):
@@ -57,7 +62,8 @@ class MultilayeredNetwork(nn.Module):
         Process a single input sequence (2D tensor).
 
         Args:
-            inputs (torch.Tensor): A 2D tensor (number of sensory neurons, number of time steps)
+            inputs (torch.Tensor): A 2D tensor (number of sensory
+                neurons, number of time steps)
         """
         # Clear activations list at each forward pass
         acts = []
@@ -98,14 +104,16 @@ class MultilayeredNetwork(nn.Module):
 
     def forward(self, inputs: torch.Tensor):
         """
-        Process inputs through the network. Automatically handles both 2D and 3D inputs.
+        Process inputs through the network. Automatically handles both
+        2D and 3D inputs.
 
         Args:
-            inputs (torch.Tensor): Either a 2D tensor (num_input, time_steps) or 
-                                 a 3D tensor (batch_size, num_input, time_steps)
+            inputs (torch.Tensor): Either a 2D tensor (num_input, time_steps)
+                or a 3D tensor (batch_size, num_input, time_steps)
 
         Returns:
-            torch.Tensor: The activations of all neurons across time steps (in batches).
+            torch.Tensor: The activations of all neurons across time steps (in
+            batches).
         """
         if inputs.dim() == 2:
             self.activations = self._process_single(inputs)
@@ -188,31 +196,53 @@ def activation_maximisation(
         device: Optional[torch.device] = None,
         wandb: bool = False) -> Tuple[np.ndarray, np.ndarray, List[float], List[float], List[float], List[np.ndarray]]:
     """
-    Performs activation maximisation on a given model to identify input patterns that result in the target activations.
+    Performs activation maximisation on a given model to identify input
+    patterns that result in the target activations.
 
-    This is done by adjusting the input tensor over `num_iterations` using gradient descent, while also regularising the overall input and output (to keep activated neurons sparse). The function supports early stopping based on a threshold to prevent unnecessary computations if the activation change becomes negligible.
+    This is done by adjusting the input tensor over `num_iterations`
+    using gradient descent, while also regularising the overall input
+    and output (to keep activated neurons sparse). The function supports
+    early stopping based on a threshold to prevent unnecessary
+    computations if the activation change becomes negligible.
 
     Args:
-        model: A PyTorch model with `activations`, `sensory_indices`, and `threshold` attributes.
-        target_activations (TargetActivation): Target activations specification. 
-        input_tensor (torch.Tensor, optional): The initial tensor to optimize. If None, a random tensor is created.
-            Defaults to None.
-        num_iterations (int, optional): The number of iterations to run the optimization for. Defaults to 50.
-        learning_rate (float, optional): The learning rate for the optimizer. Defaults to 0.1.
-        in_reg_lambda (float, optional): The coefficient for input regularization. Defaults to 0.01. 
-        out_reg_lambda (float, optional): The coefficient for output regularization. Defaults to 0.01.
-        custom_reg_functions (Dict[str, Callable[[torch.Tensor], torch.Tensor]], optional): A dictionary with keys 'in' and 'out' that
-            map to functions that calculate the input and output regularization losses, respectively. If None, the default
-            regularization function (L1 plus L2) is used. Defaults to None.
-        early_stopping (bool, optional): Whether to stop the optimization early if the difference between the biggest and the smallest loss within the last n_runs falls below `stopping_threshold`.
-            Defaults to True.
-        stopping_threshold (float, optional): The threshold for early stopping. Defaults to 1e-6.
-        n_runs (int, optional): The number of runs to consider for early stopping. Defaults to 10.
-        use_tqdm (bool, optional): Whether to use tqdm progress bars to track optimization progress. Defaults to True.
-        print_output (bool, optional): Whether to print loss information during optimization. Defaults to True.
-        report_memory_usage (bool, optional): Whether to report GPU memory usage during optimization. Defaults to False.
-        device: The device to run the optimization on. If None, automatically selects a device. Defaults to None.
-        wandb (bool, optional): Whether to log optimization details to Weights & Biases (https://wandb.ai/site/). Defaults to True. Requires wandb to be installed.
+        model: A PyTorch model with `activations`, `sensory_indices`, and
+            `threshold` attributes.
+        target_activations (TargetActivation): Target activations
+            specification.
+        input_tensor (torch.Tensor, optional): The initial tensor to optimize.
+            If None, a random tensor is created.  Defaults to None.
+        num_iterations (int, optional): The number of iterations to run the
+            optimization for. Defaults to 50.
+        learning_rate (float, optional): The learning rate for the optimizer.
+            Defaults to 0.1.
+        in_reg_lambda (float, optional): The coefficient for input
+            regularization. Defaults to 0.01.
+        out_reg_lambda (float, optional): The coefficient for output
+            regularization. Defaults to 0.01.
+        custom_reg_functions (Dict[str, Callable[[torch.Tensor],
+            torch.Tensor]], optional): A dictionary with keys 'in' and 'out' that
+            map to functions that calculate the input and output regularization
+            losses, respectively. If None, the default regularization function (L1
+            plus L2) is used. Defaults to None.
+        early_stopping (bool, optional): Whether to stop the optimization early
+            if the difference between the biggest and the smallest loss within the
+            last n_runs falls below `stopping_threshold`. Defaults to True.
+        stopping_threshold (float, optional): The threshold for early stopping.
+            Defaults to 1e-6.
+        n_runs (int, optional): The number of runs to consider for early
+            stopping. Defaults to 10.
+        use_tqdm (bool, optional): Whether to use tqdm progress bars to track
+            optimization progress. Defaults to True.
+        print_output (bool, optional): Whether to print loss information during
+            optimization. Defaults to True.
+        report_memory_usage (bool, optional): Whether to report GPU memory
+            usage during optimization. Defaults to False.
+        device: The device to run the optimization on. If None, automatically
+            selects a device. Defaults to None.
+        wandb (bool, optional): Whether to log optimization details to Weights
+            & Biases (https://wandb.ai/site/). Defaults to True.  Requires wandb to
+            be installed.
 
     Returns:
         tuple: A tuple containing:
@@ -430,29 +460,50 @@ def activations_to_df(inprop, model_input: np.ndarray, out: np.ndarray, sensory_
                       activation_threshold: float = 0, connectivity_threshold: float = 0,
                       high_ram: bool = True) -> pd.DataFrame:
     """
-    Generates a dataframe representing the paths in a layered plot, filtering by activation and connectivity thresholds.
+    Generates a dataframe representing the paths in a layered plot,
+    filtering by activation and connectivity thresholds.
 
-    This function takes the direct connectivity matrix (inprop), input neuron activity, output neuron activity, indices for sensory neurons, and mapping between input and output indices to groups. It generates a dataframe that represents the paths through the network layers.
+    This function takes the direct connectivity matrix (inprop), input
+    neuron activity, output neuron activity, indices for sensory
+    neurons, and mapping between input and output indices to groups. It
+    generates a dataframe that represents the paths through the network
+    layers.
 
     Args:
-        inprop (scipy.sparse matrix or numpy.ndarray): Matrix representing the synaptic strengths
-            between neurons, can be dense or sparse. Presynaptic is in the rows, postsynaptic in the columns.
-        model_input (numpy.ndarray): A 2D array representing input to the network. Neurons are in the rows, timepoints in the columns. Only the first timepoint is used, since `out` is expected to have activity of all neurons, including input neurons.
-        out (numpy.ndarray): A 2D array representing the output from the network. The second dimension represents timepoints.
-        sensory_indices (list of int): A list of indices corresponding to sensory neurons in `inprop`.
-        inidx_mapping (dict, optional): A dictionary mapping indices in `inprop` to new indices (e.g. cell type). If None, indices are not remapped.
-                                       Defaults to None.
-        outidx_mapping (dict, optional): A dictionary mapping indices in `out` to new indices. If None, `inidx_mapping` is used for
-                                         mapping. Defaults to None.
-        activation_threshold (float, optional): A threshold value for activation. Neurons with activations below this threshold are
-                                                not considered. Defaults to 0.
-        connectivity_threshold (float, optional): A threshold for filtering connections. Connections with weights below this threshold
-                                                  are ignored. Defaults to 0.
-        high_ram (bool, optional): Whether to use a high RAM implementation (which is slightly faster). This implementation gets direct connections between *all* relevant neurons at once, instead of within each layer. Defaults to True.
+        inprop (scipy.sparse matrix or numpy.ndarray): Matrix
+            representing the synaptic strengths between neurons, can be
+            dense or sparse. Presynaptic is in the rows, postsynaptic in the
+            columns.
+        model_input (numpy.ndarray): A 2D array representing input to
+            the network. Neurons are in the rows, timepoints in the columns.
+            Only the first timepoint is used, since `out` is expected to
+            have activity of all neurons, including input neurons.
+        out (numpy.ndarray): A 2D array representing the output from the
+            network. The second dimension represents timepoints.
+        sensory_indices (list of int): A list of indices corresponding
+            to sensory neurons in `inprop`.
+        inidx_mapping (dict, optional): A dictionary mapping indices in
+            `inprop` to new indices (e.g. cell type). If None, indices are
+            not remapped. Defaults to None.
+        outidx_mapping (dict, optional): A dictionary mapping indices in `out`
+            to new indices. If None, `inidx_mapping` is used for mapping. Defaults
+            to None.
+        activation_threshold (float, optional): A threshold value for
+            activation. Neurons with activations below this threshold are not
+            considered. Defaults to 0.
+        connectivity_threshold (float, optional): A threshold for filtering
+            connections. Connections with weights below this threshold are ignored.
+            Defaults to 0.
+        high_ram (bool, optional): Whether to use a high RAM implementation
+            (which is slightly faster). This implementation gets direct connections
+            between *all* relevant neurons at once, instead of within each layer.
+            Defaults to True.
 
     Returns:
-        pandas.DataFrame: A dataframe representing the paths in the network. Each row is a connection, with columns for 'pre' and
-                          'post' neuron indices, 'layer', and their respective activations ('pre_activation', 'post_activation').
+        pandas.DataFrame: A dataframe representing the paths in the network.
+        Each row is a connection, with columns for 'pre' and 'post' neuron
+        indices, 'layer', and their respective activations ('pre_activation',
+        'post_activation').
     """
     all_indices = list(range(inprop.shape[0]))
 
@@ -552,29 +603,52 @@ def activations_to_df_batched(inprop, opt_in: np.ndarray, out: np.ndarray, senso
                               activation_threshold: float = 0, connectivity_threshold: float = 0,
                               high_ram: bool = True) -> pd.DataFrame:
     """
-    Generates a dataframe representing the paths in a layered plot, filtering by activation and connectivity thresholds.
+    Generates a dataframe representing the paths in a layered plot,
+    filtering by activation and connectivity thresholds.
 
-    This function takes the direct connectivity matrix (inprop), optimal input neuron activity, output neuron activity, indices for sensory neurons, and mapping between input and output indices to groups. It generates a dataframe that represents the paths through the network layers.
+    This function takes the direct connectivity matrix (inprop), optimal
+    input neuron activity, output neuron activity, indices for sensory
+    neurons, and mapping between input and output indices to groups. It
+    generates a dataframe that represents the paths through the network
+    layers.
 
     Args:
-        inprop (scipy.sparse matrix or numpy.ndarray): Matrix representing the synaptic strengths
-            between neurons, can be dense or sparse. Presynaptic is in the rows, postsynaptic in the columns.
-        opt_in (numpy.ndarray): A **3D** array representing optimal input to the network. The first dimension represents the batch size, the second dimension represents input neurons, and the third dimension represents timepoints. Only the first timepoint is used, since `out` is expected to have activity of all neurons, including input neurons.
-        out (numpy.ndarray): A **3D** array representing the activation of all neurons. The first dimension represents the batch size, the second dimension represents all neurons, and the third dimension represents timepoints.
-        sensory_indices (list of int): A list of indices corresponding to sensory neurons in `inprop`.
-        inidx_mapping (dict, optional): A dictionary mapping indices in `inprop` to new indices. If None, indices are not remapped.
-                                       Defaults to None.
-        outidx_mapping (dict, optional): A dictionary mapping indices in `out` to new indices. If None, `inidx_mapping` is used for
-                                         mapping. Defaults to None.
-        activation_threshold (float, optional): A threshold value for activation. Neurons with activations below this threshold are
-                                                not considered. Defaults to 0.
-        connectivity_threshold (float, optional): A threshold for filtering connections. Connections with weights below this threshold
-                                                  are ignored. Defaults to 0.
-        high_ram (bool, optional): Whether to use a high RAM implementation (which is slightly faster). This implementation gets direct connections between *all* relevant neurons at once, instead of within each layer. Defaults to True.
+        inprop (scipy.sparse matrix or numpy.ndarray): Matrix representing the
+            synaptic strengths between neurons, can be dense or sparse. Presynaptic
+            is in the rows, postsynaptic in the columns.
+        opt_in (numpy.ndarray): A **3D** array representing optimal input to
+            the network. The first dimension represents the batch size, the second
+            dimension represents input neurons, and the third dimension represents
+            timepoints. Only the first timepoint is used, since `out` is expected
+            to have activity of all neurons, including input neurons.
+        out (numpy.ndarray): A **3D** array representing the activation of all
+            neurons. The first dimension represents the batch size, the second
+            dimension represents all neurons, and the third dimension represents
+            timepoints.
+        sensory_indices (list of int): A list of indices corresponding to
+            sensory neurons in `inprop`.
+        inidx_mapping (dict, optional): A dictionary mapping indices in
+            `inprop` to new indices. If None, indices are not remapped.  Defaults
+            to None.
+        outidx_mapping (dict, optional): A dictionary mapping indices in `out`
+            to new indices. If None, `inidx_mapping` is used for mapping. Defaults
+            to None.
+        activation_threshold (float, optional): A threshold value for
+            activation. Neurons with activations below this threshold are not
+            considered. Defaults to 0.
+        connectivity_threshold (float, optional): A threshold for filtering
+            connections. Connections with weights below this threshold are
+            ignored. Defaults to 0.
+        high_ram (bool, optional): Whether to use a high RAM implementation
+            (which is slightly faster). This implementation gets direct connections
+            between *all* relevant neurons at once, instead of within each layer.
+            Defaults to True.
 
     Returns:
-        pandas.DataFrame: A dataframe representing the paths in the network. Each row is a connection, with columns for 'pre' and
-                          'post' neuron indices, 'layer', and their respective activations ('pre_activation', 'post_activation'). 
+        pandas.DataFrame: A dataframe representing the paths in the network.
+        Each row is a connection, with columns for 'pre' and 'post' neuron
+        indices, 'layer', and their respective activations ('pre_activation',
+        'post_activation').
     """
     # use activations_to_df for each batch
     paths = []
@@ -588,23 +662,33 @@ def activations_to_df_batched(inprop, opt_in: np.ndarray, out: np.ndarray, senso
 
 
 def input_from_df(df: pd.DataFrame, sensory_indices: list, idx_to_group: dict, num_layers: int, timepoints: Union[int, List[int], np.ndarray, set] = 0) -> np.ndarray:
-    '''
-    Make well-formatted input for the model, based on defined vectors of input neuron activation (df). The function returens a 3D tensor, with the first dimension being the batch size, the second dimension being the number of input neurons of the model, and the third dimension being the number of layers. 
+    """
+    Make well-formatted input for the model, based on defined vectors of
+    input neuron activation (df). The function returens a 3D tensor,
+    with the first dimension being the batch size, the second dimension
+    being the number of input neurons of the model, and the third
+    dimension being the number of layers.
 
     Args:
         df : pd.DataFrame
-            Rows correspond to the values in `idx_to_group`, and columns correspond to the batches (number of columns = number of batch). For instance, rows of df can be olfactory glomeruli, and columns can be odours. df is the reaction of each glomerulus to each odour.
+            Rows correspond to the values in `idx_to_group`, and columns
+            correspond to the batches (number of columns = number of batch).
+            For instance, rows of df can be olfactory glomeruli, and columns
+            can be odours. df is the reaction of each glomerulus to each odour.
         sensory_indices : list
-            The indices of sensory neurons. For instance, these could be the indices of individual olfactory receptor neurons.
+            The indices of sensory neurons. For instance, these could be the
+            indices of individual olfactory receptor neurons.
         idx_to_group : dict
-            A dictionary that maps indices to group. For instance, this could map from indices of indivudal olfactory receptor neuron to the glomerulus they innervate (rows of df).
+            A dictionary that maps indices to group. For instance, this could
+            map from indices of indivudal olfactory receptor neuron to the
+            glomerulus they innervate (rows of df).
         num_layers : int
             The number of layers in the model.
 
     Returns:
         np.ndarray: The input for the model.
 
-    '''
+    """
     # first initialise empty input
     inarray = np.zeros((df.shape[1], len(sensory_indices), num_layers))
 
@@ -628,18 +712,27 @@ def get_neuron_activation(output: torch.Tensor | npt.NDArray,
                           neuron_indices: arrayable,
                           batch_names: arrayable = None,
                           idx_to_group: dict = None) -> pd.DataFrame:
-    '''
-    Get the activations for specified indices across timepoints, include batch name and group information when available.
+    """
+    Get the activations for specified indices across timepoints, include
+    batch name and group information when available.
 
     Args:
-        output (torch.Tensor | numpy.ndarray): The output tensor from the model. Shape should be (batch_size, num_neurons, num_timepoints) or (num_neurons, num_timepoints).
-        neuron_indices (arrayable): The indices of the neurons to get activations for.
-        batch_names (arrayable, optional): The names of the batches. Defaults to None. If output.ndim == 3, then this should be supplied. If not, batch names will be e.g. 'batch_0', 'batch_1', etc.
-        idx_to_group (dict, optional): A dictionary mapping indices to groups. Defaults to None.
+        output (torch.Tensor | numpy.ndarray): The output tensor from
+            the model. Shape should be (batch_size, num_neurons,
+            num_timepoints) or (num_neurons, num_timepoints).
+        neuron_indices (arrayable): The indices of the neurons to get
+            activations for.
+        batch_names (arrayable, optional): The names of the batches.
+            Defaults to None. If output.ndim == 3, then this should be
+            supplied. If not, batch names will be e.g. 'batch_0', 'batch_1', etc.
+        idx_to_group (dict, optional): A dictionary mapping indices to
+            groups. Defaults to None.
 
     Returns:
-        pd.DataFrame: The activations for the neurons, with the first columns being batch_names, neuron_indices, and group. The rest are the timesteps. 
-    '''
+        pd.DataFrame: The activations for the neurons, with the first
+            columns being batch_names, neuron_indices, and group. The rest
+            are the timesteps.
+    """
     neuron_indices = list(to_nparray(neuron_indices))
 
     if isinstance(output, torch.Tensor):
