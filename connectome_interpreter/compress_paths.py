@@ -77,8 +77,8 @@ def compress_paths(inprop: csr_matrix,
                     rowLow = 0
                     rowHigh = chunkSize
 
-                    in_col = inprop_tensor[:, colLow:colHigh].to(
-                        device)  # shape: size x chunkSize; on GPU
+                    in_col = inprop_tensor[:, colLow:colHigh].to(device)
+                    # shape: size x chunkSize; on GPU
                     # print('after setting in_col')
                     # print(torch.cuda.max_memory_allocated() / 1024**2)
 
