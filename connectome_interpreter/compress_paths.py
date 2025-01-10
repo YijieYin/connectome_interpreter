@@ -70,8 +70,6 @@ def compress_paths(inprop: csr_matrix,
             if i == 0:
                 out_tensor = inprop_tensor.clone()
             else:
-                # print(f'begin iteration {i}')
-                # print(torch.cuda.max_memory_allocated() / 1024**2)
                 out_tensor_new = torch.full(
                     (size, size), 0.0, dtype=torch.float32)
                 colLow = 0
@@ -82,29 +80,20 @@ def compress_paths(inprop: csr_matrix,
 
                     in_col = inprop_tensor[:, colLow:colHigh].to(device)
                     # shape: size x chunkSize; on GPU
-                    # print('after setting in_col')
-                    # print(torch.cuda.max_memory_allocated() / 1024**2)
 
                     for rowChunk in range(chunks):  # iterate chunks rowwise
-                        torch.cuda.reset_peak_memory_stats()
                         in_rows = out_tensor[rowLow:rowHigh, :].to(device)
                         # shape: chunkSize x size; on GPU
-                        # print('after setting in_rows')
-                        # print(torch.cuda.max_memory_allocated() / 1024**2)
                         out_tensor_new[rowLow:rowHigh, colLow:colHigh] = (
                             torch.matmul(in_rows, in_col).to('cpu')
                         )
                         # shape: chunkSize x chunkSize; on CPU
-                        # print('after matmul')
-                        # print(torch.cuda.max_memory_allocated() / 1024**2)
 
                         rowLow += chunkSize
                         rowHigh += chunkSize
                         rowHigh = min(rowHigh, size)
 
                         del in_rows
-                        # print(
-                        #     f'max memory in {i}: {torch.cuda.max_memory_allocated()/ 1024**2:.2f} MB')
                     del in_col
                     colLow += chunkSize
                     colHigh += chunkSize
@@ -121,7 +110,6 @@ def compress_paths(inprop: csr_matrix,
                     out_tensor >= threshold, out_tensor, torch.tensor(0.0))
 
             # Convert to csc for output
-            # print('converting to csc')
             out_csc = tensor_to_csc(out_tensor)
             out_csc.eliminate_zeros()
 
