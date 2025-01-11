@@ -4,4 +4,5 @@
 
 # Additional developer requirements here
 flake8
+mypy
 pytest
