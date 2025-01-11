@@ -3,8 +3,10 @@
 # Error Conditions: Tests that ensure the function handles errors gracefully, such as bad input values.
 # Performance: If necessary, tests that evaluate the function’s performance to ensure it meets required standards.
 import unittest
+
 import numpy as np
 from scipy.sparse import csr_matrix
+
 # Adjust the import according to your package structure
 from connectome_interpreter.compress_paths import compress_paths
 

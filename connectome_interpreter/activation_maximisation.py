@@ -1,16 +1,15 @@
 from dataclasses import dataclass
-from typing import Union, Dict, Optional, Callable, Tuple, List
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
-import torch
-import torch.nn as nn
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
-
+import torch
+import torch.nn as nn
 from tqdm import tqdm
 
 from .compress_paths import result_summary
-from .utils import adjacency_df_to_el, get_activations, to_nparray, arrayable
+from .utils import adjacency_df_to_el, arrayable, get_activations, to_nparray
 
 
 class MultilayeredNetwork(nn.Module):
