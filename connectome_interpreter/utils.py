@@ -1,20 +1,21 @@
-from numbers import Real
-from typing import Dict, List, Tuple, Collection
-from collections import defaultdict
+# Standard library imports
 import random
 import warnings
+from collections import defaultdict
+from numbers import Real
+from typing import List, Tuple, Collection
 
-import torch
-import pandas as pd
-import numpy as np
-import numpy.typing as npt
-from scipy.sparse import coo_matrix, issparse
+# Third-party package imports
+from IPython.display import display
+import ipywidgets as widgets
 import matplotlib.colors as mcl
 import matplotlib.pyplot as plt
-import ipywidgets as widgets
 import networkx as nx
-from IPython.display import display
-
+import numpy as np
+import numpy.typing as npt
+import pandas as pd
+from scipy.sparse import coo_matrix, issparse
+import torch
 
 # types that can be made into a numeric numpy array
 arrayable = Real | Collection[Real]
