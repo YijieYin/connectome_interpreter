@@ -1,8 +1,10 @@
-import unittest
-from connectome_interpreter.path_finding import find_xor, XORCircuit
-import pandas as pd
-import random
 import itertools
+import random
+import unittest
+
+import pandas as pd
+
+from connectome_interpreter.path_finding import find_xor
 
 
 class TestFindXOR(unittest.TestCase):

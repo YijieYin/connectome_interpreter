@@ -1,16 +1,18 @@
 import unittest
-import torch
+
 import numpy as np
 import pandas as pd
+import torch
 from scipy.sparse import csr_matrix
+import torch
 
 from connectome_interpreter.activation_maximisation import (
     MultilayeredNetwork,
+    TargetActivation,
     activation_maximisation,
     activations_to_df,
     activations_to_df_batched,
-    TargetActivation,
-    get_neuron_activation
+    get_neuron_activation,
 )
 
 

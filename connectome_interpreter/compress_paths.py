@@ -1,44 +1,61 @@
-import torch
-from tqdm import tqdm
-import pandas as pd
-import numpy as np
-import plotly.express as px
-from scipy.sparse import issparse, csr_matrix
+# Standard library imports
+import math
+from typing import List
+
+# Third-party package imports
 import ipywidgets as widgets
-import seaborn as sns
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import seaborn as sns
+import torch
 from IPython.display import display
+from scipy.sparse import csr_matrix, issparse, csc_matrix
+from tqdm import tqdm
 
-from .utils import dynamic_representation, torch_sparse_where, to_nparray, tensor_to_csc, group_edge_by
+from .utils import (
+    dynamic_representation,
+    group_edge_by,
+    tensor_to_csc,
+    to_nparray,
+    torch_sparse_where,
+)
 
 
-def compress_paths(inprop, step_number, threshold=0, output_threshold=1e-4, root=False):
+def compress_paths(inprop: csr_matrix,
+                   step_number: int,
+                   threshold: float = 0,
+                   output_threshold: float = 1e-4,
+                   root: bool = False,
+                   chunkSize: int = 10000) -> list:
     """
-    Performs iterative multiplication of a sparse matrix `inprop` for a specified number of steps, 
-    applying thresholding to filter out values below a certain `threshold` to optimize memory usage 
-    and computation speed. The function is optimized to run on GPU if available. It needs >= size_of_inprop * 3 amount of GPU memory, for matrix multiplication, and thresholding. 
+    Performs iterative multiplication of a sparse matrix `inprop` for a specified number of steps,
+    applying thresholding to filter out values below a certain `threshold` to optimize memory usage
+    and computation speed. The function is optimized to run on GPU if available. It needs >= size_of_inprop * 3 amount of GPU memory, for matrix multiplication, and thresholding.
 
-    This function multiplies the connectivity matrix (input in rows; output in columns) `inprop` with itself `step_number` times, 
-    with each step's result being thresholded to zero out elements below a given threshold. 
-    The function stores each step's result in a list, where each result is further 
+    This function multiplies the connectivity matrix (input in rows; output in columns) `inprop` with itself `step_number` times,
+    with each step's result being thresholded to zero out elements below a given threshold.
+    The function stores each step's result in a list, where each result is further
     processed to drop values below the `output_threshold` to save memory.
 
     Args:
         inprop (scipy.sparse.matrix): The connectivity matrix as a scipy sparse matrix.
         step_number (int): The number of iterations to perform the matrix multiplication.
-        threshold (float, optional): The threshold value to apply after each multiplication. 
+        threshold (float, optional): The threshold value to apply after each multiplication.
                                      Values below this threshold are set to zero. Defaults to 0.
-        output_threshold (float, optional): The threshold value to apply to the final output, 
+        output_threshold (float, optional): The threshold value to apply to the final output,
                                             used to reduce memory footprint. Defaults to 1e-4.
         root (bool, optional): Whether to take the nth root of the output. This can be understood as "the average direct connection strength" (when root=True), as opposed to "the proportion of influence among all partners n steps away" (when root=False). Defaults to False.
+        chunkSize (int, optional): The size of the chunks to split the matrix into for matrix multiplication. Defaults to 10000.
 
     Returns:
-        list: A list of scipy.sparse.csc_matrix objects, each representing connectivity from all neurons to all neurons n steps away. 
+        list: A list of scipy.sparse.csc_matrix objects, each representing connectivity from all neurons to all neurons n steps away.
 
     Note:
-        This function requires PyTorch and is designed to automatically utilize CUDA-enabled GPU devices 
-        if available to accelerate computations. The input matrix `inprop` is converted to a dense tensor 
-        before processing. 
+        This function requires PyTorch and is designed to automatically utilize CUDA-enabled GPU devices
+        if available to accelerate computations. The input matrix `inprop` is converted to a dense tensor
+        before processing.
 
     Example:
         >>> from scipy.sparse import csr_matrix
@@ -47,6 +64,88 @@ def compress_paths(inprop, step_number, threshold=0, output_threshold=1e-4, root
         >>> step_number = 2
         >>> compressed_paths = compress_paths(inprop, step_number, threshold=0.1, output_threshold=0.01)
         >>> print(compressed_paths)
+    """
+    steps_fast: List[csc_matrix] = []
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # check that step_number>0
+    if step_number < 1:
+        raise ValueError("step_number should be greater than 0")
+
+    inprop_tensor = torch.tensor(inprop.toarray())
+    size = inprop_tensor.size(dim=0)
+
+    chunks = math.ceil(size/chunkSize)
+
+    with torch.no_grad():
+        for i in tqdm(range(step_number)):
+
+            if i == 0:
+                out_tensor = inprop_tensor.clone()
+            else:
+                out_tensor_new = torch.full(
+                    (size, size), 0.0, dtype=torch.float32)
+                colLow = 0
+                colHigh = chunkSize
+                for colChunk in range(chunks):  # iterate chunks colwise
+                    rowLow = 0
+                    rowHigh = chunkSize
+
+                    in_col = inprop_tensor[:, colLow:colHigh].to(device)
+                    # shape: size x chunkSize; on GPU
+
+                    for rowChunk in range(chunks):  # iterate chunks rowwise
+                        in_rows = out_tensor[rowLow:rowHigh, :].to(device)
+                        # shape: chunkSize x size; on GPU
+                        out_tensor_new[rowLow:rowHigh, colLow:colHigh] = (
+                            torch.matmul(in_rows, in_col).to('cpu')
+                        )
+                        # shape: chunkSize x chunkSize; on CPU
+
+                        rowLow += chunkSize
+                        rowHigh += chunkSize
+                        rowHigh = min(rowHigh, size)
+
+                        del in_rows
+                    del in_col
+                    colLow += chunkSize
+                    colHigh += chunkSize
+                    colHigh = min(colHigh, size)
+
+                out_tensor = out_tensor_new
+                del out_tensor_new
+                # Clear PyTorch CUDA cache
+                torch.cuda.empty_cache()
+
+            # Thresholding during matmul
+            if threshold != 0:
+                out_tensor = torch.where(
+                    out_tensor >= threshold, out_tensor, torch.tensor(0.0))
+
+            # Convert to csc for output
+            out_csc = tensor_to_csc(out_tensor)
+            out_csc.eliminate_zeros()
+
+            if root:
+                out_csc.data = np.power(out_csc.data, 1/(i+1))
+
+            if output_threshold > 0:
+                out_csc.data = np.where(
+                    out_csc.data >= output_threshold, out_csc.data, 0)
+                out_csc.eliminate_zeros()
+
+            steps_fast.append(out_csc)
+
+    # remove all variables
+    del out_tensor, inprop_tensor
+    torch.cuda.empty_cache()
+
+    return steps_fast
+
+
+# below: not chunked version
+def compress_paths_not_chunked(inprop, step_number, threshold=0, output_threshold=1e-4, root=False):
+    """ As above, but without chunking. This would be more demanding for GPU RAM. 
     """
     steps_fast = []
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -88,7 +187,7 @@ def compress_paths_signed(inprop, idx_to_sign, target_layer_number, threshold=0,
     Calculates the excitatory and inhibitory influences across specified layers of a neural network, using PyTorch for GPU acceleration. This function processes a connectivity matrix (where presynaptic neurons are represented by rows and postsynaptic neurons by columns) to distinguish and compute the influence of excitatory and inhibitory neurons at each layer.
 
     Args:
-        inprop (scipy.sparse.csc_matrix): The initial connectivity matrix representing direct connections between adjacent layers. 
+        inprop (scipy.sparse.csc_matrix): The initial connectivity matrix representing direct connections between adjacent layers.
         idx_to_sign (dict): A dictionary mapping neuron indices to their types (1 for excitatory, -1 for inhibitory), used to differentiate between excitatory and inhibitory influences.
         target_layer_number (int): The number of layers through which to calculate influences, starting from the second layer (with the first layer's influence, the direct connectivity, being defined by `inprop`).
         threshold (float, optional): A value to threshold the influences; influences below this value are set to zero, and not passed on in future layers. Defaults to 0.
@@ -96,7 +195,7 @@ def compress_paths_signed(inprop, idx_to_sign, target_layer_number, threshold=0,
         root (bool, optional): Whether to take the nth root of the output. This can be understood as "the average direct connection strength" (when root=True), as opposed to "the proportion of influence among all partners n steps away" (when root=False). Defaults to False.
 
     Returns:
-        Tuple[List[scipy.sparse.csc_matrix], List[scipy.sparse.csc_matrix]]: Two lists of sparse matrices representing the excitatory and inhibitory influences, respectively, up to the specified target layer. 
+        Tuple[List[scipy.sparse.csc_matrix], List[scipy.sparse.csc_matrix]]: Two lists of sparse matrices representing the excitatory and inhibitory influences, respectively, up to the specified target layer.
 
     Note:
         This function is ideal with GPU support. Ensure your environment supports CUDA and that PyTorch is correctly installed.
@@ -212,27 +311,27 @@ def result_summary(stepsn, inidx, outidx, inidx_map=None, outidx_map=None,
                    pre_in_column=False,
                    include_undefined_groups=False):
     """
-    Generates a summary of connections between different types of neurons, 
-    represented by their input and output indexes. The function calculates 
-    the total synaptic input from presynaptic neuron groups to an average neuron in each 
+    Generates a summary of connections between different types of neurons,
+    represented by their input and output indexes. The function calculates
+    the total synaptic input from presynaptic neuron groups to an average neuron in each
     postsynaptic neuron group.
 
     Args:
         stepsn (scipy.sparse matrix or numpy.ndarray): Matrix representing the synaptic strengths between neurons, can be dense or sparse.
         inidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of indices representing the input (presynaptic) neurons, used to subset stepsn. nan values are removed.
         outidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of indices representing the output (postsynaptic) neurons.
-        inidx_map (dict, optional): Mapping from indices to neuron groups for the input neurons. Defaults to None, in which case neurons are not grouped. 
+        inidx_map (dict, optional): Mapping from indices to neuron groups for the input neurons. Defaults to None, in which case neurons are not grouped.
         outidx_map (dict, optional): Mapping from indices to neuron groups for the output neurons. Defaults to None, in which case it is set to be the same as inidx_map.
         display_output (bool, optional): Whether to display the output in a coloured dataframe. Defaults to True.
-        display_threshold (float, optional): The minimum threshold for displaying the output. Defaults to 0. 
-        threshold_axis (str, optional): The axis to apply the display_threshold to. Defaults to 'row' (removing entire rows if no value exceeds display_threshold). 
+        display_threshold (float, optional): The minimum threshold for displaying the output. Defaults to 0.
+        threshold_axis (str, optional): The axis to apply the display_threshold to. Defaults to 'row' (removing entire rows if no value exceeds display_threshold).
         sort_within (str, optional): The axis to sort the output in. Defaults to 'column'.
-        sort_names (str or list, optional): the column/row name(s) to sort the result by. If none is provided, then sort by the first column/row. 
+        sort_names (str or list, optional): the column/row name(s) to sort the result by. If none is provided, then sort by the first column/row.
         pre_in_column (bool, optional): Whether to have the presynaptic neuron groups as columns. Defaults to False (pre in rows, post in columns).
         include_undefined_groups (bool, optional): Whether to include undefined groups in the output. Defaults to False.
 
     Returns:
-        pd.DataFrame: A dataframe representing the summed synaptic input from presynaptic neuron groups 
+        pd.DataFrame: A dataframe representing the summed synaptic input from presynaptic neuron groups
             to an average neuron in each postsynaptic neuron group. This dataframe is always returned, regardless of the
             value of display_output.
 
@@ -340,26 +439,26 @@ def result_summary(stepsn, inidx, outidx, inidx_map=None, outidx_map=None,
 
 def contribution_by_path_lengths(steps, inidx, outidx, outidx_map):
     """
-    Analyzes the contribution of presynaptic neurons to postsynaptic neuron groups across 
-    different path lengths. This function calculates and visualizes the average input 
-    received by a neuron in each postsynaptic neuron group from presynaptic ones, aggregated over specified 
+    Analyzes the contribution of presynaptic neurons to postsynaptic neuron groups across
+    different path lengths. This function calculates and visualizes the average input
+    received by a neuron in each postsynaptic neuron group from presynaptic ones, aggregated over specified
     path lengths. Direct connections are in path_length 1.
 
     Args:
-        steps (list of scipy.sparse matrices): List of sparse matrices, each representing 
+        steps (list of scipy.sparse matrices): List of sparse matrices, each representing
             synaptic strengths for a specific path length.
         inidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of indices representing input (presynaptic) neurons.
         outidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of indices representing output (postsynaptic) neurons.
         outidx_map (dict): Mapping from indices to postsynaptic neuron groups.
 
     Returns:
-        None: Displays a line plot with path lengths on the x-axis, the average input 
+        None: Displays a line plot with path lengths on the x-axis, the average input
             received on the y-axis, and lines differentiated by postsynaptic neuron groups.
-            The plot represents how different postsynaptic neuron groups are influenced by 
+            The plot represents how different postsynaptic neuron groups are influenced by
             presynaptic neurons over various path lengths.
 
-    The function iterates through each path length (each 'step'), computes the sum of inputs 
-    from presynaptic to each postsynaptic neuron. It then calculates the average for each postsynaptic group. It then generates a plot showing the relationship between path lengths and synaptic input 
+    The function iterates through each path length (each 'step'), computes the sum of inputs
+    from presynaptic to each postsynaptic neuron. It then calculates the average for each postsynaptic group. It then generates a plot showing the relationship between path lengths and synaptic input
     contribution for each postsynaptic neuron group.
     """
 
@@ -477,7 +576,7 @@ def contribution_by_path_lengths_heatmap(steps, inidx, outidx, inidx_map=None, o
 
 def effective_conn_from_paths(paths, group_dict=None, wide=True):
     """
-    Calculate the effective connectivity between (groups of) neurons based only on the provided `paths` between neurons. This function runs on CPU, and doesn't expect a big connectivity matrix as input. 
+    Calculate the effective connectivity between (groups of) neurons based only on the provided `paths` between neurons. This function runs on CPU, and doesn't expect a big connectivity matrix as input.
 
     Args:
         paths (pd.DataFrame): A dataframe representing the paths between neurons, with columns 'pre', 'post', 'weight', and 'layer'.
@@ -540,7 +639,7 @@ def effective_conn_from_paths(paths, group_dict=None, wide=True):
 
 def signed_effective_conn_from_paths(paths, group_dict=None, wide=True, idx_to_nt=None):
     """
-    Calculate the *signed* effective connectivity between (groups of) neurons based only on the provided `paths` between neurons. This function runs on CPU, and doesn't expect a big connectivity matrix as input. 
+    Calculate the *signed* effective connectivity between (groups of) neurons based only on the provided `paths` between neurons. This function runs on CPU, and doesn't expect a big connectivity matrix as input.
 
     Args:
         paths (pd.DataFrame): A dataframe representing the paths between neurons, with columns 'pre', 'post', 'weight', 'layer', and optionally 'sign'.
@@ -548,7 +647,7 @@ def signed_effective_conn_from_paths(paths, group_dict=None, wide=True, idx_to_n
         wide (bool, optional): Whether to pivot the output dataframe to a wide format. Defaults to True.
         idx_to_nt (dict, optional): A dictionary mapping neuron indices (values in columns `pre` and `post`) to 1 (excitatory) / -1 (inhibitory). Defaults to None.
 
-    Returns: 
+    Returns:
         list: A list of two dataframes representing the effective connectivity between groups of neurons, one for effective excitation, the other inhibition.
 
     """

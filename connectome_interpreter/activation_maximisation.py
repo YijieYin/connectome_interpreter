@@ -1,16 +1,15 @@
 from dataclasses import dataclass
-from typing import Union, Dict, Optional, Callable, Tuple, List
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
-import torch
-import torch.nn as nn
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
-
+import torch
+import torch.nn as nn
 from tqdm import tqdm
 
 from .compress_paths import result_summary
-from .utils import adjacency_df_to_el, get_activations, to_nparray, arrayable
+from .utils import adjacency_df_to_el, arrayable, get_activations, to_nparray
 
 
 class MultilayeredNetwork(nn.Module):
@@ -710,8 +709,8 @@ def input_from_df(df: pd.DataFrame, sensory_indices: list, idx_to_group: dict, n
 
 def get_neuron_activation(output: torch.Tensor | npt.NDArray,
                           neuron_indices: arrayable,
-                          batch_names: arrayable = None,
-                          idx_to_group: dict = None) -> pd.DataFrame:
+                          batch_names: arrayable | None = None,
+                          idx_to_group: dict | None = None) -> pd.DataFrame:
     """
     Get the activations for specified indices across timepoints, include
     batch name and group information when available.

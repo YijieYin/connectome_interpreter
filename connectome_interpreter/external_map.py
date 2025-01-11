@@ -1,27 +1,27 @@
-import pkgutil
 import io
+import pkgutil
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 
 def load_dataset(dataset):
     '''
-    Load the dataset from the package data folder. These datasets have been preprocessed to work with connectomics data. The preprocessing scripts are in this repository: https://github.com/YijieYin/interpret_connectome. 
+    Load the dataset from the package data folder. These datasets have been preprocessed to work with connectomics data. The preprocessing scripts are in this repository: https://github.com/YijieYin/interpret_connectome.
 
-    Args: 
+    Args:
         dataset : str
             The name of the dataset to load. Options are:
 
-            - 'DoOR_adult': mapping from glomeruli to chemicals, from Munch and Galizia DoOR dataset (https://www.nature.com/articles/srep21841).  
-            - 'DoOR_adult_sfr_subtracted': mapping from glomeruli to chemicals, with spontaneous firing rate subtracted. There are therefore negative values.  
-            - 'Dweck_adult_chem': mapping from glomeruli to chemicals extracted from fruits, from Dweck et al. 2018 (https://www.cell.com/cell-reports/abstract/S2211-1247(18)30663-6). Firing rates normalised to between 0 and 1.  
-            - 'Dweck_adult_fruit': mapping from glomeruli to fruits, from Dweck et al. 2018. Number of responses normalised to between 0 and 1.  
-            - 'Dweck_larva_chem': mapping from olfactory receptors to chemicals, from Dweck et al. 2018. Firing rates normalised to between 0 and 1.  
-            - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits, from Dweck et al. 2018. Number of responses normalised to between 0 and 1.  
+            - 'DoOR_adult': mapping from glomeruli to chemicals, from Munch and Galizia DoOR dataset (https://www.nature.com/articles/srep21841).
+            - 'DoOR_adult_sfr_subtracted': mapping from glomeruli to chemicals, with spontaneous firing rate subtracted. There are therefore negative values.
+            - 'Dweck_adult_chem': mapping from glomeruli to chemicals extracted from fruits, from Dweck et al. 2018 (https://www.cell.com/cell-reports/abstract/S2211-1247(18)30663-6). Firing rates normalised to between 0 and 1.
+            - 'Dweck_adult_fruit': mapping from glomeruli to fruits, from Dweck et al. 2018. Number of responses normalised to between 0 and 1.
+            - 'Dweck_larva_chem': mapping from olfactory receptors to chemicals, from Dweck et al. 2018. Firing rates normalised to between 0 and 1.
+            - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits, from Dweck et al. 2018. Number of responses normalised to between 0 and 1.
 
-    Returns: 
-        pd.DataFrame: The dataset as a pandas DataFrame. For the adult, the glomeruli are in the rows. For the larva, receptors are in the rows. 
+    Returns:
+        pd.DataFrame: The dataset as a pandas DataFrame. For the adult, the glomeruli are in the rows. For the larva, receptors are in the rows.
     '''
 
     if dataset == 'DoOR_adult':
@@ -59,17 +59,17 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
         dataset : str
             The name of the dataset to load. Options are:
 
-            - 'DoOR_adult': mapping from glomeruli to chemicals, from Munch and Galizia DoOR dataset (https://www.nature.com/articles/srep21841).  
-            - 'DoOR_adult_sfr_subtracted': mapping from glomeruli to chemicals, with spontaneous firing rate subtracted. There are therefore negative values.  
-            - 'Dweck_adult_chem': mapping from glomeruli to chemicals extracted from fruits, from Dweck et al. 2018 (https://www.cell.com/cell-reports/abstract/S2211-1247(18)30663-6). Firing rates normalised to between 0 and 1.  
-            - 'Dweck_adult_fruit': mapping from glomeruli to fruits, from Dweck et al. 2018. Number of responses normalised to between 0 and 1.  
-            - 'Dweck_larva_chem': mapping from olfactory receptors to chemicals, from Dweck et al. 2018. Firing rates normalised to between 0 and 1.  
-            - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits, from Dweck et al. 2018. Number of responses normalised to between 0 and 1.  
+            - 'DoOR_adult': mapping from glomeruli to chemicals, from Munch and Galizia DoOR dataset (https://www.nature.com/articles/srep21841).
+            - 'DoOR_adult_sfr_subtracted': mapping from glomeruli to chemicals, with spontaneous firing rate subtracted. There are therefore negative values.
+            - 'Dweck_adult_chem': mapping from glomeruli to chemicals extracted from fruits, from Dweck et al. 2018 (https://www.cell.com/cell-reports/abstract/S2211-1247(18)30663-6). Firing rates normalised to between 0 and 1.
+            - 'Dweck_adult_fruit': mapping from glomeruli to fruits, from Dweck et al. 2018. Number of responses normalised to between 0 and 1.
+            - 'Dweck_larva_chem': mapping from olfactory receptors to chemicals, from Dweck et al. 2018. Firing rates normalised to between 0 and 1.
+            - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits, from Dweck et al. 2018. Number of responses normalised to between 0 and 1.
         custom_experiment : pd.DataFrame
             A custom experimental dataset to compare the connectomics data to. The row indices of this dataframe must match the row indices of df. They are the units of comparison (e.g. glomeruli).
 
     Returns:
-        pd.DataFrame: The similarity between the connectomics data and the experimental data. Rows are neurons, columns are external stimulus. 
+        pd.DataFrame: The similarity between the connectomics data and the experimental data. Rows are neurons, columns are external stimulus.
     '''
 
     # try:
