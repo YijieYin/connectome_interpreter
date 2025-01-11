@@ -1,7 +1,9 @@
+# Standard library imports
 import itertools
 from dataclasses import dataclass
 from typing import Dict, List
 
+# Third-party package imports
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import networkx as nx

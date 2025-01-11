@@ -6,7 +6,6 @@ import numpy.typing as npt
 import pandas as pd
 import torch
 import torch.nn as nn
-from tqdm import tqdm
 
 from .compress_paths import result_summary
 from .utils import adjacency_df_to_el, arrayable, get_activations, to_nparray

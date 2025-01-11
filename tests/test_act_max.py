@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import torch
 from scipy.sparse import csr_matrix
+import torch
 
 from connectome_interpreter.activation_maximisation import (
     MultilayeredNetwork,
