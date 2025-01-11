@@ -839,14 +839,14 @@ def signed_effective_conn_from_paths(
     Args:
         paths (pd.DataFrame): A dataframe representing the paths between
             neurons, with columns 'pre', 'post', 'weight', 'layer', and
-                optionally 'sign'.
+            optionally 'sign'.
         group_dict (dict, optional): A dictionary mapping neuron indices
             (values in columns `pre` and `post`) to groups. Defaults to None.
         wide (bool, optional): Whether to pivot the output dataframe to a wide
             format. Defaults to True.
         idx_to_nt (dict, optional): A dictionary mapping neuron indices
             (values in columns `pre` and `post`) to 1 (excitatory) / -1
-                (inhibitory). Defaults to None.
+            (inhibitory). Defaults to None.
 
     Returns:
         list: A list of two dataframes representing the effective connectivity

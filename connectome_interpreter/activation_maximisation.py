@@ -35,22 +35,30 @@ class MultilayeredNetwork(nn.Module):
 
     Args:
         all_weights (torch.Tensor): The connectome. Input neurons are in the
-            columns.
+        columns.
         sensory_indices (list[int]): A list indicating the indices of sensory
             neurons within the network.
         num_layers (int, optional): The number of temporal layers to unroll the
-            network through.  Defaults to 2.
+           network through.  Defaults to 2.
         threshold (float, optional): The threshold for activation of neurons.
             Defaults to 0.01.
     """
 
-    def __init__(self, all_weights, sensory_indices, num_layers=2, threshold=0.01, tanh_steepness=5):
+    def __init__(
+        self,
+        all_weights,
+        sensory_indices,
+        num_layers=2,
+        threshold=0.01,
+        tanh_steepness=5,
+    ):
         super(MultilayeredNetwork, self).__init__()
 
         # num_neurons x num_neurons = e.g. 18k * 18k, ~1.2GB
         self.all_weights = all_weights  # this does not require grad
         self.sensory_indices = torch.tensor(
-            sensory_indices)  # shape: vector of sensory indices. These are the ones we manipulate
+            sensory_indices
+        )  # shape: vector of sensory indices. These are the ones we manipulate
         self.num_layers = num_layers
         self.threshold = threshold
         self.tanh_steepness = tanh_steepness
@@ -68,8 +76,9 @@ class MultilayeredNetwork(nn.Module):
         acts = []
 
         # thresholded relu and tanh
-        inputs = torch.where(inputs >= self.threshold,
-                             inputs, torch.zeros_like(inputs))
+        inputs = torch.where(
+            inputs >= self.threshold, inputs, torch.zeros_like(inputs)
+        )
         # Limit the range between 0 and 1
         inputs = torch.tanh(inputs)
 
@@ -84,9 +93,10 @@ class MultilayeredNetwork(nn.Module):
 
         # Process remaining layers
         for i in range(1, self.num_layers):
-            # shape: (all_neurons, all_neurons) * (all_neurons, 1) = (all_neurons, 1)
+            # shape: (all_neurons, all_neurons) * (all_neurons, 1) =
+            # (all_neurons, 1)
             x = self.all_weights @ x
-            x[self.sensory_indices, :] += inputs[:, i:i+1]
+            x[self.sensory_indices, :] += inputs[:, i : i + 1]
             # thresholded relu and tanh
             x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
             x = torch.tanh(self.tanh_steepness * x)
@@ -124,7 +134,8 @@ class MultilayeredNetwork(nn.Module):
             return self.activations
         else:
             raise ValueError(
-                f"Expected 2D or 3D input tensor, got {inputs.dim()}D")
+                f"Expected 2D or 3D input tensor, got {inputs.dim()}D"
+            )
 
 
 @dataclass
@@ -139,61 +150,76 @@ class TargetActivation:
             for layer, neurons in self.targets.items():
                 for neuron, value in neurons.items():
                     for batch in range(self.batch_size):
-                        rows.append({
-                            'batch': batch,
-                            'layer': layer,
-                            'neuron': neuron,
-                            'value': value
-                        })
+                        rows.append(
+                            {
+                                "batch": batch,
+                                "layer": layer,
+                                "neuron": neuron,
+                                "value": value,
+                            }
+                        )
             self.targets_df = pd.DataFrame(rows)
         else:
-            required_cols = ['layer', 'neuron', 'value']
+            required_cols = ["layer", "neuron", "value"]
             if not all(col in self.targets.columns for col in required_cols):
                 raise ValueError(
-                    f"DataFrame must contain columns: {required_cols}")
+                    f"DataFrame must contain columns: {required_cols}"
+                )
 
-            if 'batch' in self.targets.columns:
+            if "batch" in self.targets.columns:
                 self.batch_size = self.batch_size or (
-                    self.targets['batch'].max() + 1)
+                    self.targets["batch"].max() + 1
+                )
                 self.targets_df = self.targets.copy()
             else:
                 self.batch_size = self.batch_size or 1
-                self.targets_df = pd.DataFrame([
-                    {**row, 'batch': i}
-                    for i in range(self.batch_size)
-                    for _, row in self.targets.iterrows()
-                ])
+                self.targets_df = pd.DataFrame(
+                    [
+                        {**row, "batch": i}
+                        for i in range(self.batch_size)
+                        for _, row in self.targets.iterrows()
+                    ]
+                )
 
     def get_batch_targets(self, batch_idx: int) -> Dict[int, Dict[int, float]]:
-        batch_data = self.targets_df[self.targets_df['batch'] == batch_idx]
+        batch_data = self.targets_df[self.targets_df["batch"] == batch_idx]
         result = {}
         for _, row in batch_data.iterrows():
-            if row['layer'] not in result:
-                result[row['layer']] = {}
-            result[row['layer']][row['neuron']] = row['value']
+            if row["layer"] not in result:
+                result[row["layer"]] = {}
+            result[row["layer"]][row["neuron"]] = row["value"]
         return result
 
 
 def activation_maximisation(
-        model,
-        target_activations: TargetActivation,
-        input_tensor: Optional[torch.Tensor] = None,
-        num_iterations: int = 50,
-        learning_rate: float = 0.1,
-        # regularization
-        in_reg_lambda: float = 0.01,
-        out_reg_lambda: float = 0.01,
-        custom_reg_functions: Optional[Dict[str, Callable[[
-            torch.Tensor], torch.Tensor]]] = None,
-        # early stopping
-        early_stopping: bool = True,
-        stopping_threshold: float = 1e-5,
-        n_runs: int = 10,
-        use_tqdm: bool = True,
-        print_output: bool = True,
-        report_memory_usage: bool = False,
-        device: Optional[torch.device] = None,
-        wandb: bool = False) -> Tuple[np.ndarray, np.ndarray, List[float], List[float], List[float], List[np.ndarray]]:
+    model,
+    target_activations: TargetActivation,
+    input_tensor: Optional[torch.Tensor] = None,
+    num_iterations: int = 50,
+    learning_rate: float = 0.1,
+    # regularization
+    in_reg_lambda: float = 0.01,
+    out_reg_lambda: float = 0.01,
+    custom_reg_functions: Optional[
+        Dict[str, Callable[[torch.Tensor], torch.Tensor]]
+    ] = None,
+    # early stopping
+    early_stopping: bool = True,
+    stopping_threshold: float = 1e-5,
+    n_runs: int = 10,
+    use_tqdm: bool = True,
+    print_output: bool = True,
+    report_memory_usage: bool = False,
+    device: Optional[torch.device] = None,
+    wandb: bool = False,
+) -> Tuple[
+    np.ndarray,
+    np.ndarray,
+    List[float],
+    List[float],
+    List[float],
+    List[np.ndarray],
+]:
     """
     Performs activation maximisation on a given model to identify input
     patterns that result in the target activations.
@@ -219,14 +245,14 @@ def activation_maximisation(
             regularization. Defaults to 0.01.
         out_reg_lambda (float, optional): The coefficient for output
             regularization. Defaults to 0.01.
-        custom_reg_functions (Dict[str, Callable[[torch.Tensor],
-            torch.Tensor]], optional): A dictionary with keys 'in' and 'out' that
-            map to functions that calculate the input and output regularization
-            losses, respectively. If None, the default regularization function (L1
-            plus L2) is used. Defaults to None.
+        custom_reg_functions (Dict[str, Callable[[torch.Tensor]], optional):
+            A dictionary with keys 'in' and 'out' that map to functions that
+            calculate the input and output regularization losses, respectively.
+            If None, the default regularization function (L1 plus L2) is used.
+            Defaults to None.
         early_stopping (bool, optional): Whether to stop the optimization early
-            if the difference between the biggest and the smallest loss within the
-            last n_runs falls below `stopping_threshold`. Defaults to True.
+            if the difference between the biggest and the smallest loss within
+            the last n_runs falls below `stopping_threshold`. Defaults to True.
         stopping_threshold (float, optional): The threshold for early stopping.
             Defaults to 1e-6.
         n_runs (int, optional): The number of runs to consider for early
@@ -240,8 +266,8 @@ def activation_maximisation(
         device: The device to run the optimization on. If None, automatically
             selects a device. Defaults to None.
         wandb (bool, optional): Whether to log optimization details to Weights
-            & Biases (https://wandb.ai/site/). Defaults to True.  Requires wandb to
-            be installed.
+            & Biases (https://wandb.ai/site/). Defaults to True.  Requires
+            wandb to be installed.
 
     Returns:
         tuple: A tuple containing:
@@ -260,8 +286,10 @@ def activation_maximisation(
 
             # Single target for multiple batches
             targets_dict = {
-                0: {1: 0.5, 2: 0.8},  # layer 0: neuron 1 -> 0.5, neuron 2 -> 0.8
-                1: {0: 0.3}           # layer 1: neuron 0 -> 0.3
+                # layer 0: neuron 1 -> 0.5, neuron 2 -> 0.8
+                0: {1: 0.5, 2: 0.8},
+                # layer 1: neuron 0 -> 0.3
+                1: {0: 0.3}
             }
             targets = TargetActivation(targets=targets_dict, batch_size=4)
             inputs, outputs, *losses = activation_maximisation(model, targets)
@@ -272,7 +300,8 @@ def activation_maximisation(
                 {'batch': 0, 'layer': 0, 'neuron': 2, 'value': 0.8},
                 {'batch': 1, 'layer': 1, 'neuron': 0, 'value': 0.3}
             ])
-            targets = TargetActivation(targets=targets_df)  # batch_size inferred
+            # batch_size inferred
+            targets = TargetActivation(targets=targets_df)
             results = activation_maximisation(model, targets)
 
             # Custom regularization
@@ -298,8 +327,9 @@ def activation_maximisation(
 
         for layer, neuron_targets in batch_targets.items():
             for neuron_index, target_value in neuron_targets.items():
-                actual_value = activations[batch_idx,
-                                           int(neuron_index), int(layer)]
+                actual_value = activations[
+                    batch_idx, int(neuron_index), int(layer)
+                ]
                 loss += (actual_value - target_value) ** 2
                 # this scales with the number of neurons
                 # so need to divide by the number of neurons
@@ -318,9 +348,13 @@ def activation_maximisation(
 
         wandb.init(project="connectome_interpreter")
 
-        wandb.log({'learning_rate': learning_rate,
-                  'input_regularization_lambda': in_reg_lambda,
-                   'output_regularization_lambda': out_reg_lambda, })
+        wandb.log(
+            {
+                "learning_rate": learning_rate,
+                "input_regularization_lambda": in_reg_lambda,
+                "output_regularization_lambda": out_reg_lambda,
+            }
+        )
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -331,14 +365,21 @@ def activation_maximisation(
         # Make sure this function returns the correct input size for your model
         input_tensor = torch.rand(
             (batch_size, len(model.sensory_indices), model.num_layers),
-            requires_grad=True, device=device)
+            requires_grad=True,
+            device=device,
+        )
     else:
         # check the shape of the input tensor
-        if input_tensor.shape != (batch_size, len(model.sensory_indices), model.num_layers):
+        if input_tensor.shape != (
+            batch_size,
+            len(model.sensory_indices),
+            model.num_layers,
+        ):
             raise ValueError(
                 f"Expected input shape (batch_size={batch_size}, "
                 f"num_input_neurons={len(model.sensory_indices)}, "
-                f"num_layers={model.num_layers})")
+                f"num_layers={model.num_layers})"
+            )
 
     optimizer = torch.optim.Adam([input_tensor], lr=learning_rate)
 
@@ -350,8 +391,11 @@ def activation_maximisation(
     iteration_range = range(num_iterations)
 
     if report_memory_usage:
-        print('GPU memory before optimization:', torch.cuda.memory_allocated(
-            device) / 1e9, 'GB')
+        print(
+            "GPU memory before optimization:",
+            torch.cuda.memory_allocated(device) / 1e9,
+            "GB",
+        )
 
     if use_tqdm:
         iteration_range = tqdm(iteration_range)
@@ -363,30 +407,38 @@ def activation_maximisation(
 
         # Take a snapshot of the input tensor every 5 iterations
         if iteration % 5 == 0:
-            # Clone the current state of input_tensor and detach it from the computation graph
+            # Clone the current state of input_tensor and detach it from the
+            # computation graph
             snapshot = input_tensor.clone().detach().cpu().numpy()
-            snapshot = np.where(snapshot >= model.threshold,
-                                snapshot, 0)  # Thresholded ReLU
+            snapshot = np.where(
+                snapshot >= model.threshold, snapshot, 0
+            )  # Thresholded ReLU
             # Limit the range between 0 and 1
             snapshot = np.tanh(snapshot)
             input_snapshots.append(snapshot)
 
         # Calculate activation loss ----
-        activation_loss = torch.mean(torch.stack([
-            calculate_activation_loss(model.activations, batch_idx)
-            for batch_idx in range(batch_size)
-        ]))
+        activation_loss = torch.mean(
+            torch.stack(
+                [
+                    calculate_activation_loss(model.activations, batch_idx)
+                    for batch_idx in range(batch_size)
+                ]
+            )
+        )
 
         # regularisation loss ----
-        if custom_reg_functions and 'in' in custom_reg_functions:
-            in_reg_loss = in_reg_lambda * custom_reg_functions['in'](
-                input_tensor)
+        if custom_reg_functions and "in" in custom_reg_functions:
+            in_reg_loss = in_reg_lambda * custom_reg_functions["in"](
+                input_tensor
+            )
         else:
             in_reg_loss = in_reg_lambda * default_reg(input_tensor)
 
-        if custom_reg_functions and 'out' in custom_reg_functions:
-            out_reg_loss = out_reg_lambda * custom_reg_functions['out'](
-                model.activations)
+        if custom_reg_functions and "out" in custom_reg_functions:
+            out_reg_loss = out_reg_lambda * custom_reg_functions["out"](
+                model.activations
+            )
         else:
             out_reg_loss = out_reg_lambda * default_reg(model.activations)
 
@@ -394,15 +446,21 @@ def activation_maximisation(
         losses.append(loss.item())
 
         if early_stopping and (iteration > n_runs):
-            # when the difference between the max and the min < stopping_threshold
-            if np.max(losses[-n_runs:]) - np.min(losses[-n_runs:]) < stopping_threshold:
+            # when the difference between the max and the min is smaller than
+            # stopping_threshold
+            if (
+                np.max(losses[-n_runs:]) - np.min(losses[-n_runs:])
+                < stopping_threshold
+            ):
                 break
 
         if wandb:
-            dct = {"activation_loss": activation_loss.item(),
-                   "in_regularisation_loss": in_reg_loss.item(),
-                   'out_regularisation_loss': out_reg_loss.item(),
-                   "loss": loss.item()}
+            dct = {
+                "activation_loss": activation_loss.item(),
+                "in_regularisation_loss": in_reg_loss.item(),
+                "out_regularisation_loss": out_reg_loss.item(),
+                "loss": loss.item(),
+            }
             wandb.log(dct)
 
         act_loss.append(activation_loss.item())
@@ -416,20 +474,26 @@ def activation_maximisation(
         # Optional: Print information about the optimization process
         if print_output and iteration % 10 == 0:  # Print every 10 iterations
             print(
-                f"Iteration {iteration}: Activation Loss = {activation_loss.item()}, Input regularization Loss = {in_reg_loss.item()}, Output regularization Loss = {out_reg_loss.item()}")
+                f"Iteration {iteration}: Activation Loss = {activation_loss.item()}, Input regularization Loss = {in_reg_loss.item()}, Output regularization Loss = {out_reg_loss.item()}"
+            )
 
         if report_memory_usage and iteration % 10 == 0:
-            print(f'GPU memory at iteration {iteration}:', torch.cuda.memory_allocated(
-                device) / 1e9, 'GB')
+            print(
+                f"GPU memory at iteration {iteration}:",
+                torch.cuda.memory_allocated(device) / 1e9,
+                "GB",
+            )
 
         torch.cuda.empty_cache()
 
     # print final loss
     print(
-        f'Activation loss: {act_loss[-1]}, Input regularization loss: {in_reg_losses[-1]}, Output regularization loss: {out_reg_losses[-1]}')
+        f"Activation loss: {act_loss[-1]}, Input regularization loss: {in_reg_losses[-1]}, Output regularization loss: {out_reg_losses[-1]}"
+    )
 
-    input_tensor = torch.where(input_tensor >= model.threshold,
-                               input_tensor, 0)
+    input_tensor = torch.where(
+        input_tensor >= model.threshold, input_tensor, 0
+    )
     # Limit the range between 0 and 1
     input_tensor = torch.tanh(input_tensor)
 
@@ -441,8 +505,11 @@ def activation_maximisation(
         model.activations = model.activations.detach()
 
     if report_memory_usage:
-        print('GPU memory after optimization:', torch.cuda.memory_allocated(
-            device) / 1e9, 'GB')
+        print(
+            "GPU memory after optimization:",
+            torch.cuda.memory_allocated(device) / 1e9,
+            "GB",
+        )
 
     # if there is only one batch, then drop the first dimension
     if batch_size == 1:
@@ -450,17 +517,30 @@ def activation_maximisation(
         output_after = output_after[0]
         input_snapshots = [snap[0] for snap in input_snapshots]
 
-    return (input_tensor, output_after,
-            act_loss, out_reg_losses, in_reg_losses, input_snapshots)
+    return (
+        input_tensor,
+        output_after,
+        act_loss,
+        out_reg_losses,
+        in_reg_losses,
+        input_snapshots,
+    )
 
 
-def activations_to_df(inprop, model_input: np.ndarray, out: np.ndarray, sensory_indices: List[int],
-                      inidx_mapping: dict = None, outidx_mapping: dict = None,
-                      activation_threshold: float = 0, connectivity_threshold: float = 0,
-                      high_ram: bool = True) -> pd.DataFrame:
+def activations_to_df(
+    inprop,
+    model_input: np.ndarray,
+    out: np.ndarray,
+    sensory_indices: List[int],
+    inidx_mapping: dict = None,
+    outidx_mapping: dict = None,
+    activation_threshold: float = 0,
+    connectivity_threshold: float = 0,
+    high_ram: bool = True,
+) -> pd.DataFrame:
     """
-    Generates a dataframe representing the paths in a layered plot,
-    filtering by activation and connectivity thresholds.
+    Generates a dataframe representing the paths in a layered plot,filtering
+    by activation and connectivity thresholds.
 
     This function takes the direct connectivity matrix (inprop), input
     neuron activity, output neuron activity, indices for sensory
@@ -485,18 +565,18 @@ def activations_to_df(inprop, model_input: np.ndarray, out: np.ndarray, sensory_
             `inprop` to new indices (e.g. cell type). If None, indices are
             not remapped. Defaults to None.
         outidx_mapping (dict, optional): A dictionary mapping indices in `out`
-            to new indices. If None, `inidx_mapping` is used for mapping. Defaults
-            to None.
+            to new indices. If None, `inidx_mapping` is used for mapping.
+            Defaults to None.
         activation_threshold (float, optional): A threshold value for
             activation. Neurons with activations below this threshold are not
             considered. Defaults to 0.
         connectivity_threshold (float, optional): A threshold for filtering
-            connections. Connections with weights below this threshold are ignored.
-            Defaults to 0.
+            connections. Connections with weights below this threshold are
+            ignored. Defaults to 0.
         high_ram (bool, optional): Whether to use a high RAM implementation
-            (which is slightly faster). This implementation gets direct connections
-            between *all* relevant neurons at once, instead of within each layer.
-            Defaults to True.
+            (which is slightly faster). This implementation gets direct
+            connections between *all* relevant neurons at once, instead of
+            within each layer. Defaults to True.
 
     Returns:
         pandas.DataFrame: A dataframe representing the paths in the network.
@@ -518,36 +598,52 @@ def activations_to_df(inprop, model_input: np.ndarray, out: np.ndarray, sensory_
     if torch.is_tensor(out):
         out = out.cpu().numpy()
 
-    print('Getting activations...')
-    # get activations from input and out, based on the mappings provided by inidx_mapping and outidx_mapping
+    print("Getting activations...")
+    # get activations from input and out, based on the mappings provided by
+    # inidx_mapping and outidx_mapping
     sensory_act = get_activations(
-        model_input, sensory_indices, inidx_mapping, threshold=activation_threshold)
+        model_input,
+        sensory_indices,
+        inidx_mapping,
+        threshold=activation_threshold,
+    )
     all_act = get_activations(
-        out, all_indices, outidx_mapping, threshold=activation_threshold)
+        out, all_indices, outidx_mapping, threshold=activation_threshold
+    )
 
-    print('Getting connectivity... If this takes a while, consider increasing the connectivity/activation threshold.')
+    print(
+        "Getting connectivity... If this takes a while, consider increasing "
+        "the connectivity/activation threshold."
+    )
 
     if high_ram:
         # get all pre and post indices across layers
         post_groups = {key for _, d in all_act.items() for key in d}
         pre_groups = set(sensory_act[0].keys()).union(post_groups)
-        pre_indices = [idx for idx, key in inidx_mapping.items()
-                       if key in pre_groups]
-        post_indices = [idx for idx,
-                        key in outidx_mapping.items() if key in post_groups]
+        pre_indices = [
+            idx for idx, key in inidx_mapping.items() if key in pre_groups
+        ]
+        post_indices = [
+            idx for idx, key in outidx_mapping.items() if key in post_groups
+        ]
 
         # if there are literally no neurons
         if len(pre_indices) == 0 or len(post_indices) == 0:
             raise ValueError(
-                "No neurons found. Consider lowering the activation threshold.")
+                "No neurons found. Consider lowering the activation threshold."
+            )
 
         # get connectivity
-        conn = result_summary(inprop, inidx=pre_indices, outidx=post_indices,
-                              inidx_map=inidx_mapping, outidx_map=outidx_mapping,
-                              display_output=False)
+        conn = result_summary(
+            inprop,
+            inidx=pre_indices,
+            outidx=post_indices,
+            inidx_map=inidx_mapping,
+            outidx_map=outidx_mapping,
+            display_output=False,
+        )
         # turn to edgelist, and filter
-        conn_el = adjacency_df_to_el(
-            conn, threshold=connectivity_threshold)
+        conn_el = adjacency_df_to_el(conn, threshold=connectivity_threshold)
 
     # make paths df
     paths = []
@@ -558,7 +654,7 @@ def activations_to_df(inprop, model_input: np.ndarray, out: np.ndarray, sensory_
             post = all_act[layer]
         else:
             # all the input, not just the optimised external input
-            pre = all_act[layer-1]
+            pre = all_act[layer - 1]
             post = all_act[layer]
 
         pre_stringkeys = {str(key): val for key, val in pre.items()}
@@ -566,29 +662,45 @@ def activations_to_df(inprop, model_input: np.ndarray, out: np.ndarray, sensory_
 
         if high_ram:
             # index the big connectivity matrix for this layer
-            connections = conn_el[conn_el.pre.isin(
-                pre_stringkeys.keys()) & conn_el.post.isin(post_stringkeys.keys())]
+            connections = conn_el[
+                conn_el.pre.isin(pre_stringkeys.keys())
+                & conn_el.post.isin(post_stringkeys.keys())
+            ]
 
         else:
             # pre and post are already grouped by inidx and outidx_mapping
-            # so need to recover the indices using pre, inidx_map, post, outidx_map
-            pre_indices = [idx for idx,
-                           val in inidx_mapping.items() if val in pre.keys()]
-            post_indices = [idx for idx,
-                            val in outidx_mapping.items() if val in post.keys()]
+            # so need to recover the indices using pre, inidx_map, post,
+            # outidx_map
+            pre_indices = [
+                idx for idx, val in inidx_mapping.items() if val in pre.keys()
+            ]
+            post_indices = [
+                idx
+                for idx, val in outidx_mapping.items()
+                if val in post.keys()
+            ]
 
-            conn = result_summary(inprop, inidx=pre_indices,
-                                  outidx=post_indices, inidx_map=inidx_mapping, outidx_map=outidx_mapping, display_output=False)
+            conn = result_summary(
+                inprop,
+                inidx=pre_indices,
+                outidx=post_indices,
+                inidx_map=inidx_mapping,
+                outidx_map=outidx_mapping,
+                display_output=False,
+            )
             # turn to edgelist, and filter
             connections = adjacency_df_to_el(
-                conn, threshold=connectivity_threshold)
+                conn, threshold=connectivity_threshold
+            )
 
         # so that direct connectivity is layer 1
-        connections.loc[:, ['layer']] = layer+1
-        connections.loc[:, ['pre_activation']
-                        ] = connections.pre.map(pre_stringkeys)
-        connections.loc[:, ['post_activation']
-                        ] = connections.post.map(post_stringkeys)
+        connections.loc[:, ["layer"]] = layer + 1
+        connections.loc[:, ["pre_activation"]] = connections.pre.map(
+            pre_stringkeys
+        )
+        connections.loc[:, ["post_activation"]] = connections.post.map(
+            post_stringkeys
+        )
         if connections.shape[0] > 0:
             paths.append(connections)
         else:
@@ -597,10 +709,17 @@ def activations_to_df(inprop, model_input: np.ndarray, out: np.ndarray, sensory_
     return paths
 
 
-def activations_to_df_batched(inprop, opt_in: np.ndarray, out: np.ndarray, sensory_indices: List[int],
-                              inidx_mapping: dict = None, outidx_mapping: dict = None,
-                              activation_threshold: float = 0, connectivity_threshold: float = 0,
-                              high_ram: bool = True) -> pd.DataFrame:
+def activations_to_df_batched(
+    inprop,
+    opt_in: np.ndarray,
+    out: np.ndarray,
+    sensory_indices: List[int],
+    inidx_mapping: dict = None,
+    outidx_mapping: dict = None,
+    activation_threshold: float = 0,
+    connectivity_threshold: float = 0,
+    high_ram: bool = True,
+) -> pd.DataFrame:
     """
     Generates a dataframe representing the paths in a layered plot,
     filtering by activation and connectivity thresholds.
@@ -613,25 +732,26 @@ def activations_to_df_batched(inprop, opt_in: np.ndarray, out: np.ndarray, senso
 
     Args:
         inprop (scipy.sparse matrix or numpy.ndarray): Matrix representing the
-            synaptic strengths between neurons, can be dense or sparse. Presynaptic
-            is in the rows, postsynaptic in the columns.
+            synaptic strengths between neurons, can be dense or sparse.
+            Presynaptic is in the rows, postsynaptic in the columns.
         opt_in (numpy.ndarray): A **3D** array representing optimal input to
-            the network. The first dimension represents the batch size, the second
-            dimension represents input neurons, and the third dimension represents
-            timepoints. Only the first timepoint is used, since `out` is expected
-            to have activity of all neurons, including input neurons.
+            the network. The first dimension represents the batch size, the
+            second dimension represents input neurons, and the third dimension
+            represents timepoints. Only the first timepoint is used, since
+            `out` is expected to have activity of all neurons, including input
+            neurons.
         out (numpy.ndarray): A **3D** array representing the activation of all
             neurons. The first dimension represents the batch size, the second
-            dimension represents all neurons, and the third dimension represents
-            timepoints.
+            dimension represents all neurons, and the third dimension
+            represents timepoints.
         sensory_indices (list of int): A list of indices corresponding to
             sensory neurons in `inprop`.
         inidx_mapping (dict, optional): A dictionary mapping indices in
-            `inprop` to new indices. If None, indices are not remapped.  Defaults
-            to None.
+            `inprop` to new indices. If None, indices are not remapped.
+            Defaults to None.
         outidx_mapping (dict, optional): A dictionary mapping indices in `out`
-            to new indices. If None, `inidx_mapping` is used for mapping. Defaults
-            to None.
+            to new indices. If None, `inidx_mapping` is used for mapping.
+            Defaults to None.
         activation_threshold (float, optional): A threshold value for
             activation. Neurons with activations below this threshold are not
             considered. Defaults to 0.
@@ -639,9 +759,9 @@ def activations_to_df_batched(inprop, opt_in: np.ndarray, out: np.ndarray, senso
             connections. Connections with weights below this threshold are
             ignored. Defaults to 0.
         high_ram (bool, optional): Whether to use a high RAM implementation
-            (which is slightly faster). This implementation gets direct connections
-            between *all* relevant neurons at once, instead of within each layer.
-            Defaults to True.
+            (which is slightly faster). This implementation gets direct
+            connections between *all* relevant neurons at once, instead of
+            within each layer. Defaults to True.
 
     Returns:
         pandas.DataFrame: A dataframe representing the paths in the network.
@@ -653,14 +773,29 @@ def activations_to_df_batched(inprop, opt_in: np.ndarray, out: np.ndarray, senso
     paths = []
     # assume the first dimnesion of opt_in and out is the batch size
     for i in tqdm(range(opt_in.shape[0])):
-        path = activations_to_df(inprop, opt_in[i], out[i], sensory_indices,
-                                 inidx_mapping, outidx_mapping, activation_threshold, connectivity_threshold, high_ram)
-        path.loc[:, ['batch']] = i
+        path = activations_to_df(
+            inprop,
+            opt_in[i],
+            out[i],
+            sensory_indices,
+            inidx_mapping,
+            outidx_mapping,
+            activation_threshold,
+            connectivity_threshold,
+            high_ram,
+        )
+        path.loc[:, ["batch"]] = i
         paths.append(path)
     return pd.concat(paths)
 
 
-def input_from_df(df: pd.DataFrame, sensory_indices: list, idx_to_group: dict, num_layers: int, timepoints: Union[int, List[int], np.ndarray, set] = 0) -> np.ndarray:
+def input_from_df(
+    df: pd.DataFrame,
+    sensory_indices: list,
+    idx_to_group: dict,
+    num_layers: int,
+    timepoints: Union[int, List[int], np.ndarray, set] = 0,
+) -> np.ndarray:
     """
     Make well-formatted input for the model, based on defined vectors of
     input neuron activation (df). The function returens a 3D tensor,
@@ -700,17 +835,21 @@ def input_from_df(df: pd.DataFrame, sensory_indices: list, idx_to_group: dict, n
     for l in range(df.shape[1]):
         grp2act = df.iloc[:, l]
         grp2act = dict(zip(grp2act.index, grp2act.values.flatten()))
-        actvec = [grp2act[idx_to_group[idx]] if idx_to_group[idx]
-                  in grp2act else 0 for idx in sensory_indices]
+        actvec = [
+            grp2act[idx_to_group[idx]] if idx_to_group[idx] in grp2act else 0
+            for idx in sensory_indices
+        ]
         for t in timepoints:
             inarray[l, :, t] = actvec
     return inarray
 
 
-def get_neuron_activation(output: torch.Tensor | npt.NDArray,
-                          neuron_indices: arrayable,
-                          batch_names: arrayable | None = None,
-                          idx_to_group: dict | None = None) -> pd.DataFrame:
+def get_neuron_activation(
+    output: torch.Tensor | npt.NDArray,
+    neuron_indices: arrayable,
+    batch_names: arrayable | None = None,
+    idx_to_group: dict | None = None,
+) -> pd.DataFrame:
     """
     Get the activations for specified indices across timepoints, include
     batch name and group information when available.
@@ -723,7 +862,8 @@ def get_neuron_activation(output: torch.Tensor | npt.NDArray,
             activations for.
         batch_names (arrayable, optional): The names of the batches.
             Defaults to None. If output.ndim == 3, then this should be
-            supplied. If not, batch names will be e.g. 'batch_0', 'batch_1', etc.
+            supplied. If not, batch names will be e.g. 'batch_0', 'batch_1',
+            etc.
         idx_to_group (dict, optional): A dictionary mapping indices to
             groups. Defaults to None.
 
@@ -740,35 +880,41 @@ def get_neuron_activation(output: torch.Tensor | npt.NDArray,
     if output.ndim == 2:
         # message if batch_names is not None
         if batch_names is not None:
-            print('batch_names is ignored for 2D output.')
+            print("batch_names is ignored for 2D output.")
 
         data = output[neuron_indices, :]
-        df = pd.DataFrame(data, columns=[f'time_{i}' for i in range(
-            output.shape[1])], index=neuron_indices)
-        df.index.name = 'idx'
+        df = pd.DataFrame(
+            data,
+            columns=[f"time_{i}" for i in range(output.shape[1])],
+            index=neuron_indices,
+        )
+        df.index.name = "idx"
         if idx_to_group is not None:
-            df['group'] = [idx_to_group[idx] for idx in neuron_indices]
+            df["group"] = [idx_to_group[idx] for idx in neuron_indices]
         df.reset_index(inplace=True)
         # re-order columns
-        if 'group' in df.columns:
-            df = df[['idx', 'group'] +
-                    [f'time_{i}' for i in range(output.shape[1])]]
+        if "group" in df.columns:
+            df = df[
+                ["idx", "group"]
+                + [f"time_{i}" for i in range(output.shape[1])]
+            ]
         else:
-            df = df[['idx'] + [f'time_{i}' for i in range(output.shape[1])]]
+            df = df[["idx"] + [f"time_{i}" for i in range(output.shape[1])]]
 
         return df
 
     if output.ndim == 3:
         if batch_names is None:
             # make batch names
-            batch_names = [f'batch_{i}' for i in range(output.shape[0])]
+            batch_names = [f"batch_{i}" for i in range(output.shape[0])]
 
         batch_names = list(to_nparray(batch_names, unique=False))
 
         # make sure length matches
         if output.shape[0] != len(batch_names):
             raise ValueError(
-                'Length of batch_names has to be the same as output.shape[0].')
+                "Length of batch_names has to be the same as output.shape[0]."
+            )
 
         data = output[:, neuron_indices, :].reshape(-1, output.shape[2])
 
@@ -776,23 +922,29 @@ def get_neuron_activation(output: torch.Tensor | npt.NDArray,
         # in the end, we want batch * n_indices rows
         # that's output.shape[0] * len(neuron_indices) rows
         batch_names = [
-            o for o in batch_names for _ in range(len(neuron_indices))]
+            o for o in batch_names for _ in range(len(neuron_indices))
+        ]
         neuron_indices = neuron_indices * output.shape[0]
 
         # Combine indices and data into a DataFrame
         df = pd.DataFrame(
-            data, columns=[f'time_{i}' for i in range(output.shape[2])])
-        df['batch_name'] = batch_names
-        df['idx'] = neuron_indices
+            data, columns=[f"time_{i}" for i in range(output.shape[2])]
+        )
+        df["batch_name"] = batch_names
+        df["idx"] = neuron_indices
         if idx_to_group is not None:
-            df['group'] = [idx_to_group[idx] for idx in neuron_indices]
+            df["group"] = [idx_to_group[idx] for idx in neuron_indices]
 
         # Reorder columns so indices are first
-        if 'group' in df.columns:
-            df = df[['batch_name', 'idx', 'group'] +
-                    [f'time_{i}' for i in range(output.shape[2])]]
+        if "group" in df.columns:
+            df = df[
+                ["batch_name", "idx", "group"]
+                + [f"time_{i}" for i in range(output.shape[2])]
+            ]
         else:
-            df = df[['batch_name', 'idx'] +
-                    [f'time_{i}' for i in range(output.shape[2])]]
+            df = df[
+                ["batch_name", "idx"]
+                + [f"time_{i}" for i in range(output.shape[2])]
+            ]
 
     return df
