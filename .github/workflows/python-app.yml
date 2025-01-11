@@ -40,7 +40,7 @@ jobs:
     - name: Run type checker
       run: |
         pip install -r requirements-types.txt
-        mypy || true
+        mypy --non-interactive || true
 
     - name: Test with pytest
       run: |
