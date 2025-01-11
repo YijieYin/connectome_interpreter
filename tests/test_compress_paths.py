@@ -8,7 +8,7 @@ import numpy as np
 from scipy.sparse import csr_matrix, csc_matrix
 import torch
 
-from connectome_interpreter.compress_paths import compress_paths
+from connectome_interpreter.compress_paths import compress_paths, compress_paths_not_chunked
 
 
 class TestCompressPaths(unittest.TestCase):
@@ -103,6 +103,29 @@ class TestCompressPaths(unittest.TestCase):
         for m1, m2 in zip(result1, result2):
             self.assertTrue(np.allclose(m1.toarray(), m2.toarray()))
 
+    def test_output_correctness(self):
+        input_matrix = []
+        if torch.cuda.is_available():
+            # Very large sparse matrix
+            size = 10000
+            data = np.random.random(size * 3)  # Create some random data
+            rows = np.random.randint(0, size, size * 3)
+            cols = np.random.randint(0, size, size * 3)
+            input_matrix = csr_matrix(
+                (data, (rows, cols)), shape=(size, size))
+        else:
+            input_matrix = self.large_matrix
+        """Test non chunked and chunked version of path compression produce same results."""
+        result1 = compress_paths(input_matrix,
+                                 step_number=2,
+                                 chunkSize=20)
+        result2 = compress_paths_not_chunked(input_matrix,
+                                 step_number=2)
+
+        # Results should be the same regardless of chunk size
+        for m1, m2 in zip(result1, result2):
+            self.assertTrue(np.allclose(m1.toarray(), m2.toarray()))
+
     def test_zero_matrix(self):
         """Test behavior with zero matrix input."""
         result = compress_paths(self.zero_matrix, step_number=2)
@@ -137,3 +160,4 @@ class TestCompressPaths(unittest.TestCase):
         with unittest.mock.patch('torch.cuda.is_available', return_value=True):
             result = compress_paths(self.simple_matrix, step_number=2)
             self.assertEqual(len(result), 2)
+
