@@ -5,3 +5,4 @@
 # Additional developer requirements here
 flake8
 pytest
+pytest-cov
