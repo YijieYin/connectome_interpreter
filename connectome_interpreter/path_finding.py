@@ -1,6 +1,6 @@
 # Standard library imports
-from dataclasses import dataclass
 import itertools
+from dataclasses import dataclass
 from typing import Dict, List
 
 # Third-party package imports
@@ -12,8 +12,7 @@ import pandas as pd
 from scipy.sparse import issparse
 from tqdm import tqdm
 
-# Your own code imports
-from .utils import to_nparray, count_keys_per_value, check_consecutive_layers, arrayable
+from .utils import arrayable, check_consecutive_layers, count_keys_per_value, to_nparray
 
 
 def find_path_once(inprop_csc, steps_cpu, inidx: arrayable, outidx: arrayable, target_layer_number, top_n=-1, threshold=0):
@@ -365,7 +364,7 @@ def remove_excess_neurons(df: pd.DataFrame, keep=None, target_indices=None, keep
 
 
 def remove_excess_neurons_batched(df: pd.DataFrame, keep=None, target_indices=None, keep_targets_in_middle: bool = False) -> pd.DataFrame:
-    """Does the same thing as `remove_excess_neurons()`, but for batched input (i.e. assumes column `batch` in `df`). 
+    """Does the same thing as `remove_excess_neurons()`, but for batched input (i.e. assumes column `batch` in `df`).
 
     Args:
         df (pd.DataFrame): a filtered dataframe with similar structure as the dataframe returned by `find_path_iteratively()`. Must contain a column `batch`.

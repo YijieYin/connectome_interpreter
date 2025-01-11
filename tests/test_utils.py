@@ -1,7 +1,7 @@
 import unittest
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 from scipy.sparse import coo_matrix
 
 from connectome_interpreter.utils import modify_coo_matrix

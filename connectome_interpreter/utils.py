@@ -3,10 +3,8 @@ import random
 import warnings
 from collections import defaultdict
 from numbers import Real
-from typing import List, Tuple, Collection
+from typing import Collection, List, Tuple
 
-# Third-party package imports
-from IPython.display import display
 import ipywidgets as widgets
 import matplotlib.colors as mcl
 import matplotlib.pyplot as plt
@@ -14,8 +12,9 @@ import networkx as nx
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
-from scipy.sparse import coo_matrix, issparse
 import torch
+from IPython.display import display
+from scipy.sparse import coo_matrix, issparse
 
 # types that can be made into a numeric numpy array
 arrayable = Real | Collection[Real]
@@ -366,7 +365,7 @@ def modify_coo_matrix(sparse_matrix,
 
 def to_nparray(input_data: arrayable, unique: bool = True) -> npt.NDArray:
     """
-    Converts the input data into a numpy array, filtering out any NaN values (and duplicates). 
+    Converts the input data into a numpy array, filtering out any NaN values (and duplicates).
     The input can be a single number, a list, a set, a numpy array, or a pandas Series.
 
     Args:
@@ -400,16 +399,16 @@ def get_ngl_link(df: pd.DataFrame | pd.Series, no_connection_invisible: bool = T
                  include_postsynaptic_neuron: bool = False, diff_colours_per_layer: bool = False, colors: list = None, colormap: str = 'viridis',
                  df_format: str = 'wide') -> str:
     """
-    Generates a Neuroglancer link with layers based on the neuron ids and the values in `df`. 
+    Generates a Neuroglancer link with layers based on the neuron ids and the values in `df`.
 
     Args:
         df (pandas.DataFrame or pandas.Series): A DataFrame containing neuron metadata. If `df_format` == `wide` (default), the index should contain neuron identifiers (bodyId/root_ids), and columns should represent different
       attributes, timesteps or categories. If `df_format` == `long`, the DataFrame should contain three columns: 'neuron_id', 'layer', and 'activation'.
-        no_connection_invisible (bool, optional): Whether to make invisible neurons that are not connected. Default to True (invisible). 
+        no_connection_invisible (bool, optional): Whether to make invisible neurons that are not connected. Default to True (invisible).
         group_by (dict, optional): A dictionary mapping neuron identifiers to group names. Each group will have its own layer. Default to None.
         colour_saturation (float, optional): The saturation of the colours. Default to 0.4.
-        scene (ngl.Scene, optional): A Neuroglancer scene object from nglscenes package. You can read a scene from clipboard like `scene = Scene.from_clipboard()`. 
-        source (list, optional): The source of the Neuroglancer layers. Default to None, in which case Full Adult Fly Brain neurons are used. 
+        scene (ngl.Scene, optional): A Neuroglancer scene object from nglscenes package. You can read a scene from clipboard like `scene = Scene.from_clipboard()`.
+        source (list, optional): The source of the Neuroglancer layers. Default to None, in which case Full Adult Fly Brain neurons are used.
         normalise (str, optional): How to normalise the values. `layer` for normalising within each layer; `all` for normalising by the min and max value in the entire dataframe. Default to None.
         include_postsynaptic_neuron (bool, optional): Whether to include the postsynaptic neuron (column names of `df`) in the visualisation. Default to False. Only works if `df_format` is 'wide'.
         diff_colours_per_layer (bool, optional): Whether to use different colours for each layer. Default to False.
@@ -567,7 +566,7 @@ def get_activations(array, global_indices: arrayable, idx_map: dict = None, top_
     Args:
         array (np.ndarray): 2D array of neuron activations, where rows represent neurons
             and columns represent different time steps.
-        global_indices (int, list, set, np.ndarray, pd.Series): Array of global neuron indices corresponding to keys in `idx_map`. 
+        global_indices (int, list, set, np.ndarray, pd.Series): Array of global neuron indices corresponding to keys in `idx_map`.
         idx_map (dict, optional): Mapping from neuron index (`global_indices`) to neuron identifier. If not None, and if multiple neurons map to the same identifier, the activations are averaged. Defaults to None.
         top_n (int, optional): Number of top activations to return for each column. If None,
             all activations above the threshold are returned. Defaults to None.
@@ -579,7 +578,7 @@ def get_activations(array, global_indices: arrayable, idx_map: dict = None, top_
             in the top n, above the threshold, or both.
 
     Note:
-        The global_indices have to be in the same order as the indices in defining the original model. 
+        The global_indices have to be in the same order as the indices in defining the original model.
         If both `n` and `threshold` are provided, the function returns up to top n activations
         that are also above the threshold for each column.
     """
@@ -655,7 +654,7 @@ def plot_layered_paths(path_df: pd.DataFrame, figsize: tuple = (10, 8), priority
     missing, a default color is used for all nodes. The edges are weighted, and their labels represent the weight values.
 
     Args:
-        path_df (pandas.DataFrame): A dataframe containing the columns 'pre', 'post', 'layer', 'weight', and optionally 
+        path_df (pandas.DataFrame): A dataframe containing the columns 'pre', 'post', 'layer', 'weight', and optionally
                                     'pre_activation', 'post_activation', 'pre_layer', 'post_layer'. Each row represents an
                                     edge in the graph. The 'pre' and 'post' columns refer to the source and target nodes, respectively.
                                     The 'layer' column is used to place nodes in layers, and 'weight' indicates the edge weight.
@@ -663,7 +662,7 @@ def plot_layered_paths(path_df: pd.DataFrame, figsize: tuple = (10, 8), priority
                                     their activation values.
         figsize (tuple, optional): A tuple indicating the size of the matplotlib figure. Defaults to (10, 8).
         priority_indices (list, optional): A list of indices to prioritize when creating the layered positions. Nodes with these
-                                    indices will be placed at the top of their respective layers. Defaults to None. 
+                                    indices will be placed at the top of their respective layers. Defaults to None.
         sort_by_activation (bool, optional): A flag to sort the nodes based on their activation values (after grouping by priority). Defaults to False.
         fraction (float, optional): The fraction of the figure width to use for the colorbar. Defaults to 0.03.
         pad (float, optional): The padding between the colorbar and the plot. Defaults to 0.02.
@@ -824,8 +823,8 @@ def plot_layered_paths(path_df: pd.DataFrame, figsize: tuple = (10, 8), priority
 def change_model_weights(model, df, mode, coefficient=0.1, offset=0, normalise=True):
     """
     Change the weights of the model based on the provided DataFrame.
-    The DataFrame should contain columns 'pre' and 'post', and optionally 'conditional', which contain indices of the connectivity weights in model. The weights are modified proportional to: 
-    1. The similarity of pre and post activations (i.e. the sum of element-wise multiplication of activations across time), and 
+    The DataFrame should contain columns 'pre' and 'post', and optionally 'conditional', which contain indices of the connectivity weights in model. The weights are modified proportional to:
+    1. The similarity of pre and post activations (i.e. the sum of element-wise multiplication of activations across time), and
     2. The coefficient provided.
     3. The similarity of conditional activations (if provided). `offset` specifies the time lag between the conditional neurons and the pre and post neurons.
     The 'mode' column should specify whether the weight change is ltp or ltd.
@@ -913,15 +912,15 @@ def count_keys_per_value(d):
 
 def sc_connectivity_summary(df, inidx_map=None, outidx_map=None):
     """
-    Single cell connectivity summary. For each group based on inidx_map, select the neuron with the strongest input to each postsynaptic group, and give value by the total weight from that presynaptic group for each average post-synaptic neuron. The output could be fed into `get_ngl_link()`. The idea of this function came from Dr Alexandra Fragniere. 
+    Single cell connectivity summary. For each group based on inidx_map, select the neuron with the strongest input to each postsynaptic group, and give value by the total weight from that presynaptic group for each average post-synaptic neuron. The output could be fed into `get_ngl_link()`. The idea of this function came from Dr Alexandra Fragniere.
 
     Args:
-        df (pd.DataFrame): A DataFrame with pre in the row indices, post in the column names, and weights as values. 
+        df (pd.DataFrame): A DataFrame with pre in the row indices, post in the column names, and weights as values.
         inidx_map (dict, optional): A mapping from the presynaptic indices to group identifiers. If None, the presynaptic indices themselves are used as group identifiers. Defaults to None.
         outidx_map (dict, optional): A mapping from the postsynaptic indices to group identifiers. If None, the postsynaptic indices are used as group identifiers. Defaults to None.
 
     Returns:
-        pd.DataFrame: A DataFrame, with values in `outidx_map` as column names. Row indices are a subset of the original row indices: the top input in each group. The values in the dataframe are the sum of the weights from each `inidx_map` group to an average member of the `outidx_map` group. 
+        pd.DataFrame: A DataFrame, with values in `outidx_map` as column names. Row indices are a subset of the original row indices: the top input in each group. The values in the dataframe are the sum of the weights from each `inidx_map` group to an average member of the `outidx_map` group.
 
     """
 
@@ -970,14 +969,14 @@ def check_consecutive_layers(df):
 
 def group_edge_by(edgelist, group_dict):
     """
-    Group the edges in an edgelist by a dictionary. 
+    Group the edges in an edgelist by a dictionary.
 
     Args:
-        edgelist (pd.DataFrame): A DataFrame with columns 'pre', 'post' and 'weight' representing the edges. 
+        edgelist (pd.DataFrame): A DataFrame with columns 'pre', 'post' and 'weight' representing the edges.
         by (dict): A dictionary mapping the values in the 'pre' and 'post' columns of `edgelist` to the groups.
 
     Returns:
-        pd.DataFrame: A DataFrame with columns 'pre' and 'post' representing the edges, and 'group_pre' and 'group_post' representing the groups. 
+        pd.DataFrame: A DataFrame with columns 'pre' and 'post' representing the edges, and 'group_pre' and 'group_post' representing the groups.
     """
     edgelist.loc[:, ['group_pre']] = edgelist.pre.map(group_dict)
     edgelist.loc[:, ['group_post']] = edgelist.post.map(group_dict)
@@ -1013,7 +1012,7 @@ def compare_connectivity(m1, m2,
                          g1_pre=None, g1_post=None, g2_pre=None, g2_post=None, suffices: List[str] = ['_l', '_2'],
                          remove_na_rows: bool = True, display: bool = True, threshold=0, sort_within: str = 'column', sort_by: str = None):
     """
-    Compare the connectivity between two matrices. 
+    Compare the connectivity between two matrices.
 
     Args:
         m1 (scipy.sparse matrix or numpy.ndarray): The first connectivity matrix.
@@ -1108,7 +1107,7 @@ def make_grid_inputs(
     device=None,  # type?
 ) -> Tuple[torch.Tensor, List[Tuple[float, float]]]:
     """
-    Make a batch of input using combinations of v1 and v2 at different strengths (0 to 1). 
+    Make a batch of input using combinations of v1 and v2 at different strengths (0 to 1).
 
     Args:
         v1: The first input vector.
