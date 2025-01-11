@@ -44,4 +44,4 @@ jobs:
 
     - name: Test with pytest
       run: |
-        pytest
+        pytest -v --cov=connectome_interpreter --cov-report=term

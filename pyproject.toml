@@ -40,6 +40,10 @@ version = {attr = "connectome_interpreter._version.__version__"}
 [tool.setuptools.packages.find]
 where = ["."]
 
+
+[tool.pytest.ini_options]
+addopts = ""  # Add arguments here
+
 [tool.mypy]
 packages = ["connectome_interpreter", "tests"]
 install_types = true
@@ -48,3 +52,4 @@ pretty = true
 show_error_context = true
 show_column_numbers = true
 show_error_code_links = true
+
