@@ -1,0 +1,4 @@
+# Packages for the type checker
+pandas-stubs
+scipy-stubs
+types-tqdm

@@ -710,8 +710,8 @@ def input_from_df(df: pd.DataFrame, sensory_indices: list, idx_to_group: dict, n
 
 def get_neuron_activation(output: torch.Tensor | npt.NDArray,
                           neuron_indices: arrayable,
-                          batch_names: arrayable = None,
-                          idx_to_group: dict = None) -> pd.DataFrame:
+                          batch_names: arrayable | None = None,
+                          idx_to_group: dict | None = None) -> pd.DataFrame:
     """
     Get the activations for specified indices across timepoints, include
     batch name and group information when available.
