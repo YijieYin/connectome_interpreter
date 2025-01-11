@@ -1,4 +1,3 @@
- optimize-imports
 # Standard library imports
 import math
 from typing import List
@@ -12,7 +11,7 @@ import plotly.express as px
 import seaborn as sns
 import torch
 from IPython.display import display
-from scipy.sparse import csr_matrix, issparse
+from scipy.sparse import csr_matrix, issparse, csc_matrix
 from tqdm import tqdm
 
 from .utils import (
