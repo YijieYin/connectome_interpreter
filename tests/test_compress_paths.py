@@ -104,6 +104,7 @@ class TestCompressPaths(unittest.TestCase):
             self.assertTrue(np.allclose(m1.toarray(), m2.toarray()))
 
     def test_output_correctness(self):
+        """Test non chunked and chunked version of path compression produce same results."""
         input_matrix = []
         if torch.cuda.is_available():
             # Very large sparse matrix
@@ -115,7 +116,6 @@ class TestCompressPaths(unittest.TestCase):
                 (data, (rows, cols)), shape=(size, size))
         else:
             input_matrix = self.large_matrix
-        """Test non chunked and chunked version of path compression produce same results."""
         result1 = compress_paths(input_matrix,
                                  step_number=2,
                                  chunkSize=20)
