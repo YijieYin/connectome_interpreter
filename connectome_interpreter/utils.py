@@ -188,10 +188,10 @@ def adjacency_df_to_el(adjacency, threshold=None):
 
 
 def modify_coo_matrix(sparse_matrix,
-                      input_idx: arrayable = None,
-                      output_idx: arrayable = None,
+                      input_idx: arrayable | None = None,
+                      output_idx: arrayable | None = None,
                       value=None,
-                      updates_df: pd.DataFrame = None,
+                      updates_df: pd.DataFrame | None = None,
                       re_normalize: bool = True):
     """
     Modify the values of a sparse matrix (either COO or CSR format) at specified indices.
@@ -394,9 +394,9 @@ def to_nparray(input_data: arrayable, unique: bool = True) -> npt.NDArray:
         return cleaned_array
 
 
-def get_ngl_link(df: pd.DataFrame | pd.Series, no_connection_invisible: bool = True, group_by: dict = None, colour_saturation: float = 0.4,
-                 scene=None, source: list = None, normalise: str = None,
-                 include_postsynaptic_neuron: bool = False, diff_colours_per_layer: bool = False, colors: list = None, colormap: str = 'viridis',
+def get_ngl_link(df: pd.DataFrame | pd.Series, no_connection_invisible: bool = True, group_by: dict | None = None, colour_saturation: float = 0.4,
+                 scene=None, source: list | None = None, normalise: str | None = None,
+                 include_postsynaptic_neuron: bool = False, diff_colours_per_layer: bool = False, colors: list | None = None, colormap: str = 'viridis',
                  df_format: str = 'wide') -> str:
     """
     Generates a Neuroglancer link with layers based on the neuron ids and the values in `df`.
@@ -559,7 +559,7 @@ def get_ngl_link(df: pd.DataFrame | pd.Series, no_connection_invisible: bool = T
     return scene.url
 
 
-def get_activations(array, global_indices: arrayable, idx_map: dict = None, top_n=None, threshold=None):
+def get_activations(array, global_indices: arrayable, idx_map: dict | None = None, top_n=None, threshold=None):
     """
     Get activation for neurons (in rows) in `array` for each time step (in columns). Optionally group neurons by `idx_map`, and filter by `top_n` or `threshold`.
 
@@ -645,7 +645,7 @@ def get_activations(array, global_indices: arrayable, idx_map: dict = None, top_
 
 def plot_layered_paths(path_df: pd.DataFrame, figsize: tuple = (10, 8), priority_indices=None, sort_by_activation: bool = False,
                        fraction: float = 0.03, pad: float = 0.02, weight_decimals: int = 2,
-                       neuron_to_sign: dict = None, sign_color_map: dict = {1: 'red', -1: 'blue'}):
+                       neuron_to_sign: dict | None = None, sign_color_map: dict = {1: 'red', -1: 'blue'}):
     """
     Plots a directed graph of layered paths with optional node coloring based on activation values.
 
@@ -1010,7 +1010,7 @@ def display_df(df, cmap='Blues'):
 def compare_connectivity(m1, m2,
                          inidx1, outidx1, inidx2, outidx2,
                          g1_pre=None, g1_post=None, g2_pre=None, g2_post=None, suffices: List[str] = ['_l', '_2'],
-                         remove_na_rows: bool = True, display: bool = True, threshold=0, sort_within: str = 'column', sort_by: str = None):
+                         remove_na_rows: bool = True, display: bool = True, threshold=0, sort_within: str = 'column', sort_by: str | None = None):
     """
     Compare the connectivity between two matrices.
 
