@@ -154,7 +154,7 @@ def find_path_iteratively(inprop_csc, steps_cpu, inidx: arrayable, outidx: array
     return pd.concat(dfs)
 
 
-def create_layered_positions(df: pd.DataFrame, priority_indices=None, sort_dict: dict = None) -> dict:
+def create_layered_positions(df: pd.DataFrame, priority_indices=None, sort_dict: dict | None = None) -> dict:
     """
     Creates a dictionary of positions for each neuron in the paths, so that the paths can be visualized in a layered manner. It assumes that `df` contains the columns 'layer', 'pre_layer', 'post_layer' (or 'layer', 'pre', 'post'). If a neuron exists in multiple layers, it is plotted multiple times.
     Args:
@@ -388,7 +388,7 @@ def remove_excess_neurons_batched(df: pd.DataFrame, keep=None, target_indices=No
     return pd.concat(dfs)
 
 
-def filter_paths(df: pd.DataFrame, threshold: float = 0, necessary_intermediate: Dict[int, arrayable] = None) -> pd.DataFrame:
+def filter_paths(df: pd.DataFrame, threshold: float = 0, necessary_intermediate: Dict[int, arrayable] | None = None) -> pd.DataFrame:
     """Filters the paths based on the weight threshold and the necessary intermediate neurons. The weight threshold refers to the direct connectivity between connected neurons in the path. It is recommended to not put too may neurons in necessary_intermediate, as it may be too stringent and remove all paths.
 
     Args:
@@ -426,7 +426,7 @@ def filter_paths(df: pd.DataFrame, threshold: float = 0, necessary_intermediate:
     return df
 
 
-def group_paths(paths: pd.DataFrame, pre_group: dict, post_group: dict, intermediate_group: dict = None, avg_within_connected: bool = False) -> pd.DataFrame:
+def group_paths(paths: pd.DataFrame, pre_group: dict, post_group: dict, intermediate_group: dict | None = None, avg_within_connected: bool = False) -> pd.DataFrame:
     """
     Group the paths by user-specified variable (e.g. cell type, cell class etc.). Weights are summed across presynaptic neurons of the same group and averaged across all postsynaptic neurons of the same group (even if some postsynaptic neurons are not in `paths`).
 
@@ -479,7 +479,7 @@ def group_paths(paths: pd.DataFrame, pre_group: dict, post_group: dict, intermed
 
 def compare_layered_paths(paths: List[pd.DataFrame],
                           priority_indices=None,
-                          neuron_to_sign: dict = None,
+                          neuron_to_sign: dict | None = None,
                           sign_color_map: dict = {1: 'red', -1: 'blue'},
                           el_colours: List[str] = ['rosybrown', 'burlywood'],
                           legend_labels: List[str] = ['Path 1', 'Path 2'],
