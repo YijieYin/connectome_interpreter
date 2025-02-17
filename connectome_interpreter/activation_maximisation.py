@@ -93,10 +93,10 @@ class MultilayeredNetwork(nn.Module):
 
         # Process remaining layers
         for i in range(1, self.num_layers):
+            x[self.sensory_indices, :] += inputs[:, i : i + 1]
             # shape: (all_neurons, all_neurons) * (all_neurons, 1) =
             # (all_neurons, 1)
             x = self.all_weights @ x
-            x[self.sensory_indices, :] += inputs[:, i : i + 1]
             # thresholded relu and tanh
             x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
             x = torch.tanh(self.tanh_steepness * x)
