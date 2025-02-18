@@ -75,12 +75,17 @@ class MultilayeredNetwork(nn.Module):
         # Clear activations list at each forward pass
         acts = []
 
-        # thresholded relu and tanh
+        # thresholded relu
         inputs = torch.where(
-            inputs >= self.threshold, inputs, torch.zeros_like(inputs)
+            inputs >= self.threshold,
+            inputs,  # if so
+            torch.zeros_like(inputs),  # else
         )
-        # Limit the range between 0 and 1
-        inputs = torch.tanh(inputs)
+
+        # if bigger than 1, convert to 1
+        inputs = torch.where(
+            inputs > 1, torch.ones_like(inputs), inputs  # if so
+        )  # else
 
         # Initial activations for first time step
         # shape: (all_neurons, 1)
@@ -94,6 +99,8 @@ class MultilayeredNetwork(nn.Module):
         # Process remaining layers
         for i in range(1, self.num_layers):
             x[self.sensory_indices, :] += inputs[:, i : i + 1]
+            # make sure the max is 1
+            x = torch.where(x > 1, torch.ones_like(x), x)  # if so  # else
             # shape: (all_neurons, all_neurons) * (all_neurons, 1) =
             # (all_neurons, 1)
             x = self.all_weights @ x
@@ -273,11 +280,15 @@ def activation_maximisation(
         tuple: A tuple containing:
 
             - numpy.ndarray: The optimized input as a numpy array.
-            - numpy.ndarray: The output of the model after optimization as a numpy array.
+            - numpy.ndarray: The output of the model after optimization as a
+                numpy array.
             - list(float): A list of output activation losses over iterations.
-            - list(float): A list of input activation regularization losses over iterations.
-            - list(float): A list of output activation regularization losses over iterations.
-            - list(numpy.ndarray): A list of input tensor snapshots taken during optimization.
+            - list(float): A list of input activation regularization losses
+                over iterations.
+            - list(float): A list of output activation regularization losses
+                over iterations.
+            - list(numpy.ndarray): A list of input tensor snapshots taken
+                during optimization.
 
 
     Examples:
@@ -948,3 +959,89 @@ def get_neuron_activation(
             ]
 
     return df
+
+
+def get_activations_for_path(
+    path: pd.DataFrame,
+    activations: torch.Tensor | npt.NDArray,
+    model_in: torch.Tensor | npt.NDArray,
+    sensory_indices: arrayable,
+    idx_to_group: dict = None,
+) -> pd.DataFrame:
+    """
+    Get the activations for the pre and post neurons in the path, based on
+    the activations of the model and the input.
+
+    Args:
+        path (pd.DataFrame): A dataframe representing the paths in the network.
+            Each row is a connection, with columns for 'pre' and 'post' neuron
+            indices, and 'layer' (starting from 1)).
+        activations (torch.Tensor | numpy.ndarray): The activations of the
+            model. Shape should be (num_neurons, num_layers).
+        model_in (torch.Tensor | numpy.ndarray): The input to the model. Shape
+            should be (num_neurons, 1).
+        sensory_indices (arrayable): The indices of sensory neurons.
+        idx_to_group (dict, optional): A dictionary mapping indices to groups.
+            Defaults to None.
+
+    Returns:
+        pd.DataFrame: The activations for the pre and post neurons in the path.
+    """
+
+    if isinstance(activations, torch.Tensor):
+        activations = activations.cpu().detach().numpy()
+    if isinstance(model_in, torch.Tensor):
+        model_in = model_in.cpu().detach().numpy()
+
+    if idx_to_group is None:
+        idx_to_group = {idx: idx for idx in range(activations.shape[1])}
+
+    out_df = []
+    for l in sorted(path.layer.unique()):  # layer number starts at 1
+        layer_path = path[path.layer == l]
+
+        # pre activations
+        prenodes = set(layer_path.pre)
+        pre_indices = [
+            idx for idx, group in idx_to_group.items() if group in prenodes
+        ]
+        if l == 1:
+            # need to get indices for sensory_indices
+            global2local = {idx: i for i, idx in enumerate(sensory_indices)}
+            local_indices = [global2local[idx] for idx in pre_indices]
+            pre_activations = model_in[local_indices, 0]
+        else:
+            pre_activations = activations[pre_indices, l - 2]
+        pre_group_act = pd.DataFrame(
+            {"idx": pre_indices, "activation": pre_activations}
+        )
+        pre_group_act.loc[:, ["group"]] = [
+            idx_to_group[idx] for idx in pre_indices
+        ]
+        # mean per group
+        pre_group_act = pre_group_act.groupby("group").activation.mean()
+
+        # post activations
+        postnodes = set(layer_path.post)
+        post_indices = [
+            idx for idx, group in idx_to_group.items() if group in postnodes
+        ]
+        post_activations = activations[post_indices, l - 1]
+        post_group_act = pd.DataFrame(
+            {"idx": post_indices, "activation": post_activations}
+        )
+        post_group_act.loc[:, ["group"]] = [
+            idx_to_group[idx] for idx in post_indices
+        ]
+        # mean per group
+        post_group_act = post_group_act.groupby("group").activation.mean()
+
+        layer_path.loc[:, ["pre_activation"]] = layer_path.pre.map(
+            pre_group_act
+        )
+        layer_path.loc[:, ["post_activation"]] = layer_path.post.map(
+            post_group_act
+        )
+        out_df.append(layer_path)
+
+    return pd.concat(out_df)
