@@ -98,9 +98,12 @@ class MultilayeredNetwork(nn.Module):
 
         # Process remaining layers
         for i in range(1, self.num_layers):
-            x[self.sensory_indices, :] += inputs[:, i : i + 1]
+            x = x.clone()  # need to do this to avoid in-place operation
+            x[self.sensory_indices, :] = (
+                x[self.sensory_indices, :] + inputs[:, i : i + 1]
+            )
             # make sure the max is 1
-            x = torch.where(x > 1, torch.ones_like(x), x)  # if so  # else
+            x = torch.where(x > 1, torch.ones_like(x), x)
             # shape: (all_neurons, all_neurons) * (all_neurons, 1) =
             # (all_neurons, 1)
             x = self.all_weights @ x
@@ -975,14 +978,16 @@ def get_activations_for_path(
     Args:
         path (pd.DataFrame): A dataframe representing the paths in the network.
             Each row is a connection, with columns for 'pre' and 'post' neuron
-            indices, and 'layer' (starting from 1)).
+            indices, and 'layer'.
         activations (torch.Tensor | numpy.ndarray): The activations of the
             model. Shape should be (num_neurons, num_layers).
         model_in (torch.Tensor | numpy.ndarray): The input to the model. Shape
-            should be (num_neurons, 1).
+            should be (num_neurons, something) -  only the first column
+            (num_neurons, 0), is used, when there is 1 in 'layer' in `path`. It
+            is otherwise not used.
         sensory_indices (arrayable): The indices of sensory neurons.
-        idx_to_group (dict, optional): A dictionary mapping indices to groups.
-            Defaults to None.
+        idx_to_group (dict, optional): A dictionary mapping indices from the
+            model to the groups in path. Defaults to None.
 
     Returns:
         pd.DataFrame: The activations for the pre and post neurons in the path.
