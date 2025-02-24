@@ -1,6 +1,7 @@
 # Standard library imports
 import math
 from typing import List
+import os
 
 # Third-party package imports
 import ipywidgets as widgets
@@ -8,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import scipy as sp
 import seaborn as sns
 import torch
 from IPython.display import display
@@ -20,6 +22,7 @@ from .utils import (
     tensor_to_csc,
     to_nparray,
     torch_sparse_where,
+    arrayable,
 )
 
 
@@ -390,17 +393,17 @@ def add_first_n_matrices(matrices, n):
 
 def result_summary(
     stepsn,
-    inidx,
-    outidx,
-    inidx_map=None,
-    outidx_map=None,
-    display_output=True,
-    display_threshold=0,
-    threshold_axis="row",
-    sort_within="column",
-    sort_names=None,
-    pre_in_column=False,
-    include_undefined_groups=False,
+    inidx: arrayable,
+    outidx: arrayable,
+    inidx_map: dict | None = None,
+    outidx_map: dict | None = None,
+    display_output: bool = True,
+    display_threshold: float = 1e-3,
+    threshold_axis: str = "row",
+    sort_within: str = "column",
+    sort_names: str | List | None = None,
+    pre_in_column: bool = False,
+    include_undefined_groups: bool = False,
 ):
     """Generates a summary of connections between different types of neurons,
     represented by their input and output indexes. The function calculates the
@@ -568,7 +571,14 @@ def result_summary(
     return result_df
 
 
-def contribution_by_path_lengths(steps, inidx, outidx, outidx_map):
+def contribution_by_path_lengths(
+    steps,
+    inidx: arrayable,
+    outidx: arrayable,
+    outidx_map: dict,
+    width: int = 800,
+    height: int = 400,
+):
     """Analyzes the contribution of presynaptic neurons to postsynaptic neuron
     groups across different path lengths. This function calculates and
     visualizes the average input received by a neuron in each postsynaptic
@@ -639,7 +649,12 @@ def contribution_by_path_lengths(steps, inidx, outidx, outidx_map):
     contri.path_length = contri.path_length + 1
 
     fig = px.line(
-        contri, x="path_length", y="value", color="postsynaptic_type"
+        contri,
+        x="path_length",
+        y="value",
+        color="postsynaptic_type",
+        width=width,
+        height=height,
     )
     fig.update_layout(xaxis=dict(tickmode="linear", tick0=1, dtick=1))
     fig.show()
@@ -961,3 +976,34 @@ def signed_effective_conn_from_paths(
         result_el_i.fillna(0, inplace=True)
 
     return result_el_e, result_el_i
+
+
+def read_precomputed(prefix: str, file_path: str = None) -> List:
+    """Reads the precomputed compressed paths.
+
+    Args:
+        prefix (str): The prefix/folder name (expected to be the same) of the
+            files to read.
+        file_path (str, optional): The path to the files. Defaults to None. If
+            None, checks if running in Google Colab, and sets the path: if
+            running in Colab, sets the path to "/content/"; otherwise, sets the
+            path to "".
+
+    Returns:
+        List: A list of sparse matrices representing the steps.
+    """
+    if file_path is None:
+        # Check if running in Google Colab
+        if "COLAB_GPU" in os.environ:
+            # Running in Colab
+            file_path = "/content/"
+        else:
+            # Running locally
+            file_path = ""
+
+    steps_cpu = []
+    for i in range(len(os.listdir(f"{file_path}{prefix}"))):
+        steps_cpu.append(
+            sp.sparse.load_npz(f"{file_path}{prefix}/{prefix}_{i}.npz")
+        )
+    return steps_cpu
