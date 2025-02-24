@@ -230,38 +230,42 @@ def modify_coo_matrix(
     specified indices.
 
     There are two modes of operation:
+
     1. Single update mode: where `input_idx`, `output_idx`, and `value` are
-        provided as individual arguments. In this case all combinations of
-        input_idx and output_idx are updated.
+    provided as individual arguments. In this case all combinations of
+    input_idx and output_idx are updated.
+
     2. Batch update mode: where `updates_df` is provided, a DataFrame with
-        columns ['input_idx', 'output_idx', 'value'].
+    columns ['input_idx', 'output_idx', 'value'].
 
     Args:
-      sparse_matrix (coo_matrix or csr_matrix): The sparse matrix to modify.
-      input_idx (int, list, numpy.ndarray, set, optional): Row indices for
-        updates.
-      output_idx (int, list, numpy.ndarray, set, optional): Column indices for
-        updates.
-      value (numeric, list, numpy.ndarray, optional): New values for updates.
-        If it is a number, then it is used for all updates. Else, it needs to
-        be of length equal to the product of the lengths of input_idx and
-        output_idx.
-      updates_df (DataFrame, optional): The DataFrame containing batch updates.
+        sparse_matrix (coo_matrix or csr_matrix): The sparse matrix to modify.
+        input_idx (int, list, numpy.ndarray, set, optional): Row indices for
+            updates.
+        output_idx (int, list, numpy.ndarray, set, optional): Column indices
+            for updates.
+        value (numeric, list, numpy.ndarray, optional): New values for updates.
+            If it is a number, then it is used for all updates. Else, it needs
+            to be of length equal to the product of the lengths of input_idx
+            and output_idx.
+        updates_df (DataFrame, optional): The DataFrame containing batch
+            updates.
         re_normalize (bool, optional): Whether to re-normalize the matrix after
-        updating, such that all values in each column sum up to 1. Default to
-        True.
+            updating, such that all values in each column sum up to 1. Default
+            to True.
 
     Note:
-      In single update mode, `input_idx`, `output_idx`, and `value` must all
+        In single update mode, `input_idx`, `output_idx`, and `value` must all
         be provided.
-      In batch update mode, only `updates_df` should be provided.
-      If both modes are provided, the function will prioritize the single
+        In batch update mode, only `updates_df` should be provided.
+        If both modes are provided, the function will prioritize the single
         update mode.
 
     Returns:
-      coo_matrix or csr_matrix: The updated sparse matrix, in the same format
+        coo_matrix or csr_matrix: The updated sparse matrix, in the same format
         as the input.
     """
+
     if not issparse(sparse_matrix):
         raise TypeError("The provided matrix is not a sparse matrix.")
 
@@ -751,16 +755,17 @@ def get_activations(
 
     Returns:
         dict: A dictionary where each key is a column index and each value is
-            a nested dictionary of neuron identifiers and their activations,
-            for those activations that are either in the top n, above the
-            threshold, or both.
+        a nested dictionary of neuron identifiers and their activations, for
+        those activations that are either in the top n, above the threshold,
+        or both.
 
     Note:
-        The global_indices have to be in the same order as the indices in
-            defining the original model.
+        The `global_indices` have to be in the same order as the indices in
+        defining the original model.
         If both `n` and `threshold` are provided, the function returns up to
         top n activations that are also above the threshold for each column.
     """
+
     result = {}
     indices = to_nparray(global_indices)
     if array.shape[0] != len(indices):
@@ -1108,11 +1113,12 @@ def change_model_weights(
     'conditional', which contain indices of the connectivity weights in model.
     The weights are modified proportional to:
     1. The similarity of pre and post activations (i.e. the sum of element-
-        wise multiplication of activations across time), and
+    wise multiplication of activations across time), and
     2. The coefficient provided.
     3. The similarity of conditional activations (if provided). `offset`
-        specifies the time lag between the conditional neurons and the pre and
-        post neurons.
+    specifies the time lag between the conditional neurons and the pre and
+    post neurons.
+
     The 'mode' column should specify whether the weight change is ltp or ltd.
 
     Args:
