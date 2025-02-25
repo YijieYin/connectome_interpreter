@@ -219,10 +219,10 @@ def adjacency_df_to_el(adjacency, threshold=None):
 
 def modify_coo_matrix(
     sparse_matrix,
-    input_idx: arrayable = None,
-    output_idx: arrayable = None,
+    input_idx: arrayable | None = None,
+    output_idx: arrayable | None = None,
     value=None,
-    updates_df: pd.DataFrame = None,
+    updates_df: pd.DataFrame | None = None,
     re_normalize: bool = True,
 ):
     """
@@ -481,14 +481,14 @@ def to_nparray(input_data: arrayable, unique: bool = True) -> npt.NDArray:
 def get_ngl_link(
     df: pd.DataFrame | pd.Series,
     no_connection_invisible: bool = True,
-    group_by: dict = None,
+    group_by: dict | None = None,
     colour_saturation: float = 0.4,
     scene=None,
-    source: list = None,
-    normalise: str = None,
+    source: list | None = None,
+    normalise: str | None = None,
     include_postsynaptic_neuron: bool = False,
     diff_colours_per_layer: bool = False,
-    colors: list = None,
+    colors: list | None = None,
     colormap: str = "viridis",
     df_format: str = "wide",
 ) -> str:
@@ -728,7 +728,7 @@ def get_ngl_link(
 def get_activations(
     array,
     global_indices: arrayable,
-    idx_map: dict = None,
+    idx_map: dict | None = None,
     top_n=None,
     threshold=None,
 ):
@@ -847,7 +847,7 @@ def plot_layered_paths(
     fraction: float = 0.03,
     pad: float = 0.02,
     weight_decimals: int = 2,
-    neuron_to_sign: dict = None,
+    neuron_to_sign: dict | None = None,
     sign_color_map: dict = {1: "red", -1: "blue"},
 ):
     """
@@ -1389,7 +1389,7 @@ def compare_connectivity(
     display: bool = True,
     threshold: float = 0,
     sort_within: str = "column",
-    sort_by: str = None,
+    sort_by: str | None = None,
 ):
     """
     Compare the connectivity between two matrices.
