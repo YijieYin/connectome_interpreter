@@ -71,6 +71,10 @@ class MultilayeredNetwork(nn.Module):
         Args:
             inputs (torch.Tensor): A 2D tensor (number of sensory
                 neurons, number of time steps)
+
+        Returns:
+            torch.Tensor: The activations of all neurons (except first layer of
+            input) across time steps.
         """
         # Clear activations list at each forward pass
         acts = []
@@ -94,22 +98,38 @@ class MultilayeredNetwork(nn.Module):
         x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
         # Limit the range between 0 and 1
         x = torch.tanh(self.tanh_steepness * x)
-        acts.append(x)
 
-        # Process remaining layers
-        for i in range(1, self.num_layers):
-            x = x.clone()  # need to do this to avoid in-place operation
+        # add external input to sensory neurons
+        # so the output activation includes the external input as well
+        if self.num_layers > 1:
+            x = x.clone()
             x[self.sensory_indices, :] = (
-                x[self.sensory_indices, :] + inputs[:, i : i + 1]
+                x[self.sensory_indices, :] + inputs[:, 1:2]
             )
             # make sure the max is 1
             x = torch.where(x > 1, torch.ones_like(x), x)
+
+        acts.append(x)
+
+        # Process remaining layers
+        for alayer in range(1, self.num_layers):
             # shape: (all_neurons, all_neurons) * (all_neurons, 1) =
             # (all_neurons, 1)
             x = self.all_weights @ x
             # thresholded relu and tanh
             x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
             x = torch.tanh(self.tanh_steepness * x)
+
+            # add external input to sensory neurons, if not the last layer
+            if alayer != self.num_layers - 1:
+                x = x.clone()  # need to do this to avoid in-place operation
+                x[self.sensory_indices, :] = (
+                    x[self.sensory_indices, :]
+                    + inputs[:, alayer + 1 : alayer + 2]
+                )
+                # make sure the max is 1
+                x = torch.where(x > 1, torch.ones_like(x), x)
+
             acts.append(x)
 
         # free up memory as much as possible
@@ -150,8 +170,35 @@ class MultilayeredNetwork(nn.Module):
 
 @dataclass
 class TargetActivation:
+    """
+    Dataclass to handle target activations for activation maximisation.
+
+    The target activations can be specified as a dictionary or a DataFrame.
+    The dictionary should have the following structure:
+
+    {
+        layer: {
+            neuron_index: target_activation_value
+        }
+    }
+
+    The DataFrame should have the following columns:
+    - 'batch': The batch index.
+    - 'layer': The layer index.
+    - 'neuron': The neuron index.
+    - 'value': The target activation value.
+
+    Args:
+        targets (Union[Dict[int, Dict[int, float]], pd.DataFrame]): The target
+            activations. If a dictionary, all batches will have the same
+            target. If a DataFrame, each row represents a target activation for
+            a specific batch.
+        batch_size (Optional[int], optional): The number of batches. Defaults
+            to None.
+    """
+
     targets: Union[Dict[int, Dict[int, float]], pd.DataFrame]
-    batch_size: Optional[int] = None
+    batch_size: Optional[int] | None = None
 
     def __post_init__(self):
         if isinstance(self.targets, dict):
@@ -204,15 +251,15 @@ class TargetActivation:
 def activation_maximisation(
     model,
     target_activations: TargetActivation,
-    input_tensor: Optional[torch.Tensor] = None,
+    input_tensor: Optional[torch.Tensor] | None = None,
     num_iterations: int = 50,
     learning_rate: float = 0.1,
     # regularization
     in_reg_lambda: float = 0.01,
     out_reg_lambda: float = 0.01,
-    custom_reg_functions: Optional[
-        Dict[str, Callable[[torch.Tensor], torch.Tensor]]
-    ] = None,
+    custom_reg_functions: (
+        Optional[Dict[str, Callable[[torch.Tensor], torch.Tensor]]] | None
+    ) = None,
     # early stopping
     early_stopping: bool = True,
     stopping_threshold: float = 1e-5,
@@ -220,7 +267,7 @@ def activation_maximisation(
     use_tqdm: bool = True,
     print_output: bool = True,
     report_memory_usage: bool = False,
-    device: Optional[torch.device] = None,
+    device: Optional[torch.device] | None = None,
     wandb: bool = False,
 ) -> Tuple[
     np.ndarray,
@@ -546,8 +593,8 @@ def activations_to_df(
     model_input: np.ndarray,
     out: np.ndarray,
     sensory_indices: List[int],
-    inidx_mapping: dict = None,
-    outidx_mapping: dict = None,
+    inidx_mapping: dict | None = None,
+    outidx_mapping: dict | None = None,
     activation_threshold: float = 0,
     connectivity_threshold: float = 0,
     high_ram: bool = True,
@@ -728,8 +775,8 @@ def activations_to_df_batched(
     opt_in: np.ndarray,
     out: np.ndarray,
     sensory_indices: List[int],
-    inidx_mapping: dict = None,
-    outidx_mapping: dict = None,
+    inidx_mapping: dict | None = None,
+    outidx_mapping: dict | None = None,
     activation_threshold: float = 0,
     connectivity_threshold: float = 0,
     high_ram: bool = True,
@@ -859,7 +906,7 @@ def input_from_df(
 
 
 def get_neuron_activation(
-    output: torch.Tensor | npt.NDArray,
+    activations: torch.Tensor | npt.NDArray,
     neuron_indices: arrayable,
     batch_names: arrayable | None = None,
     idx_to_group: dict | None = None,
@@ -869,13 +916,13 @@ def get_neuron_activation(
     batch name and group information when available.
 
     Args:
-        output (torch.Tensor | numpy.ndarray): The output tensor from
+        activations (torch.Tensor | numpy.ndarray): Output activation from
             the model. Shape should be (batch_size, num_neurons,
             num_timepoints) or (num_neurons, num_timepoints).
         neuron_indices (arrayable): The indices of the neurons to get
             activations for.
         batch_names (arrayable, optional): The names of the batches.
-            Defaults to None. If output.ndim == 3, then this should be
+            Defaults to None. If activations.ndim == 3, then this should be
             supplied. If not, batch names will be e.g. 'batch_0', 'batch_1',
             etc.
         idx_to_group (dict, optional): A dictionary mapping indices to
@@ -888,78 +935,66 @@ def get_neuron_activation(
     """
     neuron_indices = list(to_nparray(neuron_indices))
 
-    if isinstance(output, torch.Tensor):
-        output = output.cpu().detach().numpy()
+    if isinstance(activations, torch.Tensor):
+        activations = activations.cpu().detach().numpy()
 
-    if output.ndim == 2:
+    if idx_to_group is None:
+        idx_to_group = {idx: idx for idx in range(activations.shape[0])}
+
+    if activations.ndim == 2:
         # message if batch_names is not None
         if batch_names is not None:
-            print("batch_names is ignored for 2D output.")
+            print("batch_names is ignored for 2D activations.")
 
-        data = output[neuron_indices, :]
+        data = activations[neuron_indices, :]
         df = pd.DataFrame(
             data,
-            columns=[f"time_{i}" for i in range(output.shape[1])],
+            columns=[f"time_{i}" for i in range(activations.shape[1])],
             index=neuron_indices,
         )
         df.index.name = "idx"
-        if idx_to_group is not None:
-            df["group"] = [idx_to_group[idx] for idx in neuron_indices]
-        df.reset_index(inplace=True)
-        # re-order columns
-        if "group" in df.columns:
-            df = df[
-                ["idx", "group"]
-                + [f"time_{i}" for i in range(output.shape[1])]
-            ]
-        else:
-            df = df[["idx"] + [f"time_{i}" for i in range(output.shape[1])]]
+        df["group"] = [idx_to_group[idx] for idx in neuron_indices]
+        # discard index, use group as index
+        # then groupby group, and get mean
+        df = df.set_index("group").groupby("group").mean().reset_index()
 
         return df
 
-    if output.ndim == 3:
+    if activations.ndim == 3:
         if batch_names is None:
             # make batch names
-            batch_names = [f"batch_{i}" for i in range(output.shape[0])]
+            batch_names = [f"batch_{i}" for i in range(activations.shape[0])]
 
         batch_names = list(to_nparray(batch_names, unique=False))
 
         # make sure length matches
-        if output.shape[0] != len(batch_names):
+        if activations.shape[0] != len(batch_names):
             raise ValueError(
-                "Length of batch_names has to be the same as output.shape[0]."
+                "Length of batch_names has to be the same as "
+                "activations.shape[0]."
             )
 
-        data = output[:, neuron_indices, :].reshape(-1, output.shape[2])
+        data = activations[:, neuron_indices, :].reshape(
+            -1, activations.shape[2]
+        )  # from (batch, neuron, time) to (batch*neuron, time)
 
         # Create indices for the first two dimensions
         # in the end, we want batch * n_indices rows
-        # that's output.shape[0] * len(neuron_indices) rows
+        # that's activations.shape[0] * len(neuron_indices) rows
         batch_names = [
             o for o in batch_names for _ in range(len(neuron_indices))
         ]
-        neuron_indices = neuron_indices * output.shape[0]
+        neuron_indices = neuron_indices * activations.shape[0]
 
         # Combine indices and data into a DataFrame
         df = pd.DataFrame(
-            data, columns=[f"time_{i}" for i in range(output.shape[2])]
+            data, columns=[f"time_{i}" for i in range(activations.shape[2])]
         )
         df["batch_name"] = batch_names
-        df["idx"] = neuron_indices
-        if idx_to_group is not None:
-            df["group"] = [idx_to_group[idx] for idx in neuron_indices]
+        df["group"] = [idx_to_group[idx] for idx in neuron_indices]
 
-        # Reorder columns so indices are first
-        if "group" in df.columns:
-            df = df[
-                ["batch_name", "idx", "group"]
-                + [f"time_{i}" for i in range(output.shape[2])]
-            ]
-        else:
-            df = df[
-                ["batch_name", "idx"]
-                + [f"time_{i}" for i in range(output.shape[2])]
-            ]
+        # groupby batch_name and group, calculate average
+        df = df.groupby(["batch_name", "group"]).mean().reset_index()
 
     return df
 
@@ -967,9 +1002,10 @@ def get_neuron_activation(
 def get_activations_for_path(
     path: pd.DataFrame,
     activations: torch.Tensor | npt.NDArray,
-    model_in: torch.Tensor | npt.NDArray,
-    sensory_indices: arrayable,
-    idx_to_group: dict = None,
+    model_in: torch.Tensor | npt.NDArray | None = None,
+    sensory_indices: arrayable | None = None,
+    idx_to_group: dict | None = None,
+    activation_start: int = 0,
 ) -> pd.DataFrame:
     """
     Get the activations for the pre and post neurons in the path, based on
@@ -987,7 +1023,14 @@ def get_activations_for_path(
             is otherwise not used.
         sensory_indices (arrayable): The indices of sensory neurons.
         idx_to_group (dict, optional): A dictionary mapping indices from the
-            model to the groups in path. Defaults to None.
+            model to the groups in path (e.g. cell type). Defaults to None.
+        activation_start (int, optional): Which layer corresponds to the start
+            layer of path. By default, activation_start = 0, the sensory-only
+            layer in the model corresponds to path.pre[path.layer == 1]. If you
+            want activations[:,1] (i.e. two timesteps forward) to correspond to
+            path.pre[path.layer == 1], set activation_start = 2. If you want
+            the last timepoint to correspond to the last layer in path, set
+            activation_start = activations.shape[1] - path.layer.max().
 
     Returns:
         pd.DataFrame: The activations for the pre and post neurons in the path.
@@ -998,8 +1041,14 @@ def get_activations_for_path(
     if isinstance(model_in, torch.Tensor):
         model_in = model_in.cpu().detach().numpy()
 
-    if idx_to_group is None:
-        idx_to_group = {idx: idx for idx in range(activations.shape[1])}
+    if idx_to_group is not None:
+        # turn value into string
+        idx_to_group = {k: str(v) for k, v in idx_to_group.items()}
+    else:
+        idx_to_group = {idx: idx for idx in range(activations.shape[0])}
+
+    # if starting later, just bump up the layer numbers
+    path.loc[:, ["layer"]] += activation_start
 
     out_df = []
     for l in sorted(path.layer.unique()):  # layer number starts at 1
@@ -1011,7 +1060,12 @@ def get_activations_for_path(
             idx for idx, group in idx_to_group.items() if group in prenodes
         ]
         if l == 1:
-            # need to get indices for sensory_indices
+            # raise error if sensory_indices or model_in doesn't exist
+            if sensory_indices is None or model_in is None:
+                raise ValueError(
+                    "sensory_indices and model_in must be provided when layer == 1."
+                )
+            # need to get local indices for sensory_indices
             global2local = {idx: i for i, idx in enumerate(sensory_indices)}
             local_indices = [global2local[idx] for idx in pre_indices]
             pre_activations = model_in[local_indices, 0]
@@ -1049,4 +1103,104 @@ def get_activations_for_path(
         )
         out_df.append(layer_path)
 
-    return pd.concat(out_df)
+    out = pd.concat(out_df)
+    # reset layer numbers
+    out.loc[:, ["layer"]] -= activation_start
+    return out
+
+
+def activated_path_for_ngl(path):
+    """
+    Convert a path DataFrame [with 'pre_activation' and 'post_activation'
+    columns] to a format suitable for Neuroglancer visualization
+    (`get_ngl_link(df_format='long')`). Neurons are coloured by their
+    activation.
+
+    Args:
+        path (pd.DataFrame): A DataFrame containing the columns 'pre', 'post',
+            'layer', 'pre_activation', and 'post_activation' (standard output
+            from function `activations_to_df()` and
+            `get_activations_for_path()`).
+
+    Returns:
+        pd.DataFrame: A DataFrame with columns 'neuron_id', 'layer', and
+            'activation', suitable for Neuroglancer visualization.
+    """
+    dfs = []
+    for l in path.layer.unique():
+        path_l = path[path.layer == l]
+        if l == path.layer.min():
+            df = pd.DataFrame(
+                {
+                    "neuron_id": path_l.pre,
+                    "layer": l,
+                    "activation": path_l.pre_activation,
+                }
+            )
+            # drop duplicate rows
+            df = df.drop_duplicates()
+            dfs.append(df)
+
+        df = pd.DataFrame(
+            {
+                "neuron_id": path_l.post,
+                "layer": l + 1,
+                "activation": path_l.post_activation,
+            }
+        )
+        df = df.drop_duplicates()
+        dfs.append(df)
+    return pd.concat(dfs)
+
+
+def get_input_activation(
+    model_in: npt.NDArray | torch.Tensor,
+    sensory_indices: arrayable,
+    idx_to_group: dict,
+    selected_indices: arrayable | None = None,
+    activation_threshold: float = 0,
+) -> pd.DataFrame:
+
+    sensory_indices = to_nparray(sensory_indices)
+
+    if isinstance(model_in, torch.Tensor):
+        model_in = model_in.cpu().detach().numpy()
+
+    # check the shape of model_in, if not correct raise an error
+    if len(model_in.shape) != 2:
+        raise ValueError(
+            f"Expected input shape (num_neurons={len(sensory_indices)}, "
+            f"num_timepoints={model_in.shape[1]})"
+        )
+
+    global2local = {glo: lo for lo, glo in enumerate(sensory_indices)}
+    local2global = {lo: glo for lo, glo in enumerate(sensory_indices)}
+
+    # selection boolean
+    if selected_indices is not None:
+        selected_local = [global2local[idx] for idx in selected_indices]
+        selection_bool = np.zeros(len(sensory_indices), dtype=bool)
+        selection_bool[selected_local] = True
+    else:
+        selection_bool = np.ones(len(sensory_indices), dtype=bool)
+
+    # activation boolean
+    # if any > threhsold for each row
+    activation_bool = np.any(model_in > activation_threshold, axis=1)
+
+    selection = selection_bool & activation_bool
+
+    local_selected_indices = [
+        i for i, s in zip(range(len(sensory_indices)), selection) if s
+    ]
+    global_selected_indices = [local2global[i] for i in local_selected_indices]
+    groups = [idx_to_group[idx] for idx in global_selected_indices]
+
+    # out dataframe
+    out = pd.DataFrame(model_in[selection, :], index=groups)
+    out.index.name = "group"
+    # group by group/index, take average
+    out = out.groupby("group").mean()
+    # change column names
+    out.columns = [f"time_{i}" for i in range(model_in.shape[1])]
+    return out
