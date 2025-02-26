@@ -18,6 +18,7 @@ from .utils import (
     count_keys_per_value,
     to_nparray,
 )
+from .compress_paths import effective_conn_from_paths
 
 
 def find_path_once(
@@ -211,7 +212,8 @@ def find_path_iteratively(
         # If no indices are found, break the loop as no path can be formed
         if len(df) == 0:
             print(
-                "Cannot trace back to the input :(. Try providing a bigger top_n value, or a lower threshold?"
+                "Cannot trace back to the input :(. Try providing a bigger "
+                "top_n value, or a lower threshold?"
             )
             break
 
@@ -483,11 +485,13 @@ def remove_excess_neurons(
                 df_next_layer = df[df.local_layer == i + 1]
                 df_prev_layer = df[df.local_layer == i - 1]
 
-                # pre that should be in the current layer: an intersection of previous layer's post; and current layer's pre
+                # pre that should be in the current layer: an intersection of
+                # previous layer's post; and current layer's pre
                 df_pre = set.intersection(
                     set(df_prev_layer["post"]) & set(df_layer["pre"])
                 )
-                # post that should be in the current layer: an intersection of current layer's post; and next layer's pre
+                # post that should be in the current layer: an intersection of
+                # current layer's post; and next layer's pre
                 df_post = set.intersection(
                     set(df_layer["post"]), set(df_next_layer["pre"])
                 )
@@ -675,6 +679,11 @@ def group_paths(
 
     if intermediate_group is None:
         intermediate_group = pre_group
+
+    # make values in pre_group, post_group, and intermediate_group strings
+    pre_group = {k: str(v) for k, v in pre_group.items()}
+    post_group = {k: str(v) for k, v in post_group.items()}
+    intermediate_group = {k: str(v) for k, v in intermediate_group.items()}
 
     # add cell type information
     # first use intermediate_group, then modify specifically for pre at the
@@ -897,7 +906,10 @@ class XORCircuit:
 
 def find_xor(paths: pd.DataFrame) -> List[XORCircuit]:
     """
-    Find XOR-like circuits in a 3-layer network, based on [Wang et al. 2024](https://www.biorxiv.org/content/10.1101/2024.09.24.614724v2). Note: this function currently ignores middle excitatory neruons that receive both inputs.
+    Find XOR-like circuits in a 3-layer network, based on [Wang et al. 2024]
+    (https://www.biorxiv.org/content/10.1101/2024.09.24.614724v2). Note: this
+    function currently ignores middle excitatory neruons that receive both
+    inputs.
 
     Args:
         paths: DataFrame with columns ['pre', 'post', 'sign', 'layer']
@@ -918,7 +930,8 @@ def find_xor(paths: pd.DataFrame) -> List[XORCircuit]:
     # check column names of paths
     if not {"pre", "post", "sign", "layer"}.issubset(paths.columns):
         raise ValueError(
-            "The input DataFrame should have columns ['pre', 'post', 'sign', 'layer']"
+            "The input DataFrame should have columns ['pre', 'post', 'sign', "
+            "'layer']"
         )
 
     # check values of signs: if it's a subset of {1, -1}
@@ -984,3 +997,53 @@ def find_xor(paths: pd.DataFrame) -> List[XORCircuit]:
             )
 
     return circuits
+
+
+def path_for_ngl(path):
+    """
+    Convert a path DataFrame to one that can be used to visualize the path in
+    neuroglancer with `get_ngl_link(df_format = 'long')`. Neurons are coloured
+    by their (indirect) connectivity (calculated using
+    `effective_conn_from_paths()`) to an average neuron in the last layer. `pre`
+    and `post` columns must contain neuron ids. This function can be used for
+    visualizing signal propagation in a pathway.
+
+    Args:
+        path (pd.DataFrame): The DataFrame containing the path data, including
+            the layer number, pre-synaptic index, post-synaptic index, and
+            weight.
+
+    Returns:
+        pd.DataFrame: A DataFrame with columns 'neuron_id', 'layer', and
+            'activation' (which is (indirect) connectivity in this case),
+            suitable for Neuroglancer visualization.
+    """
+
+    out = []
+    for alayer in path.layer.unique():
+        path_sub = path[path.layer >= alayer]
+        effconn = effective_conn_from_paths(path_sub)
+        # get mean across columns, for each row
+        effconn = effconn.mean(axis=1).to_frame()
+        effconn.loc[:, ["layer"]] = alayer
+        out.append(effconn)
+
+    out = pd.concat(out, axis=0).reset_index()
+    out.columns = ["neuron_id", "activation", "layer"]
+
+    out = pd.concat(
+        [
+            out,
+            (
+                pd.DataFrame(
+                    {
+                        "neuron_id": path_sub.post,
+                        "activation": 1,
+                        "layer": alayer + 1,
+                    }
+                )
+            ),
+        ]
+    )
+
+    return out
