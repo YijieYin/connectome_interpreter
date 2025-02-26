@@ -1484,47 +1484,6 @@ def compare_connectivity(
     return df_merged
 
 
-def path_for_ngl(path):
-    """
-    Convert a path DataFrame to a format suitable for Neuroglancer
-    visualization (`get_ngl_link(df_format='long')`).
-
-    Args:
-        path (pd.DataFrame): A DataFrame containing the columns 'pre', 'post',
-            'layer', 'pre_activation', and 'post_activation' (standard output
-            from function `activations_to_df()`).
-
-    Returns:
-        pd.DataFrame: A DataFrame with columns 'neuron_id', 'layer', and
-            'activation', suitable for Neuroglancer visualization.
-    """
-    dfs = []
-    for l in path.layer.unique():
-        path_l = path[path.layer == l]
-        if l == path.layer.min():
-            df = pd.DataFrame(
-                {
-                    "neuron_id": path_l.pre,
-                    "layer": l,
-                    "activation": path_l.pre_activation,
-                }
-            )
-            # drop duplicate rows
-            df = df.drop_duplicates()
-            dfs.append(df)
-
-        df = pd.DataFrame(
-            {
-                "neuron_id": path_l.post,
-                "layer": l + 1,
-                "activation": path_l.post_activation,
-            }
-        )
-        df = df.drop_duplicates()
-        dfs.append(df)
-    return pd.concat(dfs)
-
-
 def make_grid_inputs(
     v1: arrayable,  # see above
     v2: arrayable,
