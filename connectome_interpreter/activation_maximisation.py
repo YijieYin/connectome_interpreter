@@ -176,13 +176,10 @@ class TargetActivation:
     The target activations can be specified as a dictionary or a DataFrame.
     The dictionary should have the following structure:
 
-    {
-        layer: {
-            neuron_index: target_activation_value
-        }
-    }
+    `{layer: {neuron_index: target_activation_value}}`
 
     The DataFrame should have the following columns:
+
     - 'batch': The batch index.
     - 'layer': The layer index.
     - 'neuron': The neuron index.
