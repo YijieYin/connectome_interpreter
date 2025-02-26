@@ -228,9 +228,7 @@ def find_path_iteratively(
     return pd.concat(dfs)
 
 
-def create_layered_positions(
-    df: pd.DataFrame, priority_indices=None, sort_dict: dict = None
-) -> dict:
+def create_layered_positions(df: pd.DataFrame, priority_indices=None, sort_dict: dict | None = None) -> dict:
     """
     Creates a dictionary of positions for each neuron in the paths, so that
     the paths can be visualized in a layered manner. It assumes that `df`
@@ -595,7 +593,7 @@ def remove_excess_neurons_batched(
 def filter_paths(
     df: pd.DataFrame,
     threshold: float = 0,
-    necessary_intermediate: Dict[int, arrayable] = None,
+    necessary_intermediate: Dict[int, arrayable] | None = None,
 ) -> pd.DataFrame:
     """Filters the paths based on the weight threshold and the necessary
     intermediate neurons. The weight threshold refers to the direct
@@ -651,7 +649,7 @@ def group_paths(
     paths: pd.DataFrame,
     pre_group: dict,
     post_group: dict,
-    intermediate_group: dict = None,
+    intermediate_group: dict | None = None,
     avg_within_connected: bool = False,
 ) -> pd.DataFrame:
     """
@@ -736,7 +734,7 @@ def group_paths(
 def compare_layered_paths(
     paths: List[pd.DataFrame],
     priority_indices=None,
-    neuron_to_sign: dict = None,
+    neuron_to_sign: dict | None = None,
     sign_color_map: dict = {1: "red", -1: "blue"},
     el_colours: List[str] = ["rosybrown", "burlywood"],
     legend_labels: List[str] = ["Path 1", "Path 2"],

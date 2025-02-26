@@ -33,6 +33,9 @@ def load_dataset(dataset):
             - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits,
                 from Dweck et al. 2018. Number of responses normalised to
                 between 0 and 1.
+            - 'Nern2024': columnar coordinates of individual cells from a 
+                collection of columnar cell types within the medulla of the 
+                right optic lobe, from Nern et al. 2024.
 
     Returns:
         pd.DataFrame: The dataset as a pandas DataFrame. For the adult, the
@@ -65,9 +68,13 @@ def load_dataset(dataset):
         data = pkgutil.get_data(
             "connectome_interpreter", "data/Dweck2018/larva_fruit2or.csv"
         )
+    elif dataset == "Nern2024":
+        data = pkgutil.get_data(
+            "connectome_interpreter", "data/Nern2024/ME-columnar-cells-hex-location.csv"
+        )
     else:
         raise ValueError(
-            "Dataset not recognized. Please choose from 'DoOR_adult', 'DoOR_adult_sfr_subtracted', 'Dweck_adult_chem', 'Dweck_adult_fruit', 'Dweck_larva_chem', 'Dweck_larva_fruit'."
+            "Dataset not recognized. Please choose from 'DoOR_adult', 'DoOR_adult_sfr_subtracted', 'Dweck_adult_chem', 'Dweck_adult_fruit', 'Dweck_larva_chem', 'Dweck_larva_fruit', 'Nern2024'."
         )
 
     return pd.read_csv(io.BytesIO(data), index_col=0)
@@ -108,6 +115,9 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
             - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits,
                 from Dweck et al. 2018. Number of responses normalised to
                 between 0 and 1.
+            - 'Nern2024': columnar coordinates of individual cells from a 
+                collection of columnar cell types within the medulla of the 
+                right optic lobe, from Nern et al. 2024.
         custom_experiment : pd.DataFrame
             A custom experimental dataset to compare the connectomics data to.
             The row indices of this dataframe must match the row indices of df.
