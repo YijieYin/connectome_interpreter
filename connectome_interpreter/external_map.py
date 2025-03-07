@@ -60,7 +60,7 @@ def load_dataset(dataset: str) -> pd.DataFrame:
     except KeyError:
         raise ValueError(
             "Dataset not recognized. Please choose from {}".format(
-                list(data_sources.keys())
+                list(DATA_SOURCES.keys())
             )
         )
 
