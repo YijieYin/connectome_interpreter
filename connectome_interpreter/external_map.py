@@ -34,8 +34,8 @@ def load_dataset(dataset):
             - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits,
                 from Dweck et al. 2018. Number of responses normalised to
                 between 0 and 1.
-            - 'Nern2024': columnar coordinates of individual cells from a 
-                collection of columnar cell types within the medulla of the 
+            - 'Nern2024': columnar coordinates of individual cells from a
+                collection of columnar cell types within the medulla of the
                 right optic lobe, from Nern et al. 2024.
 
     Returns:
@@ -116,8 +116,8 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
             - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits,
                 from Dweck et al. 2018. Number of responses normalised to
                 between 0 and 1.
-            - 'Nern2024': columnar coordinates of individual cells from a 
-                collection of columnar cell types within the medulla of the 
+            - 'Nern2024': columnar coordinates of individual cells from a
+                collection of columnar cell types within the medulla of the
                 right optic lobe, from Nern et al. 2024.
         custom_experiment : pd.DataFrame
             A custom experimental dataset to compare the connectomics data to.
@@ -140,9 +140,7 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
             "Please provide either a dataset or a custom_experiment, not both."
         )
     if dataset is None and custom_experiment is None:
-        raise ValueError(
-            "Please provide either a dataset or a custom_experiment."
-        )
+        raise ValueError("Please provide either a dataset or a custom_experiment.")
     if dataset is not None:
         data = load_dataset(dataset)
     else:
@@ -161,15 +159,16 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
     )
     return target2chem
 
+
 def hex_heatmap(
-    df:pd.Series,
-    style:dict=None,
-    sizing:dict=None,
+    df: pd.Series,
+    style: dict = None,
+    sizing: dict = None,
 ) -> go.Figure:
     """
     Generate a hexagonal heat map plot of the data in a pandas series 'df'.
 
-    Args: 
+    Args:
         df : pd.Series
             A Series where the index is formatted as 'x,y' coordinates and values represent data to plot.
         style : dict, default=None
@@ -184,9 +183,9 @@ def hex_heatmap(
     if style is None:
         style = {
             "font_type": "arial",
-            "markerlinecolor": "rgba(0,0,0,0)", #transparent
+            "markerlinecolor": "rgba(0,0,0,0)",  # transparent
             "linecolor": "black",
-            "papercolor": "rgba(255,255,255,255)"
+            "papercolor": "rgba(255,255,255,255)",
         }
 
     if sizing is None:
@@ -206,7 +205,7 @@ def hex_heatmap(
         }
 
     # sizing of the figure and font
-    pixelsperinch = 72 # for svg and pdf
+    pixelsperinch = 72  # for svg and pdf
     pixelspermm = pixelsperinch / 25.4
     area_width = (sizing["fig_width"] - sizing["fig_margin"]) * pixelspermm
     area_height = (sizing["fig_height"] - sizing["fig_margin"]) * pixelspermm
@@ -237,73 +236,72 @@ def hex_heatmap(
     symbol_number = 15
 
     # Get the coordinates of all columns in the medulla:
-    col_coords = pd.read_csv("../connectome_interpreter/data/Nern2024/ME-column-coords.csv")
-    
+    col_coords = pd.read_csv(
+        "../connectome_interpreter/data/Nern2024/ME-column-coords.csv"
+    )
+
     # Add empty white 'background' hexagons - all neuropils
     fig.add_trace(
         go.Scatter(
-            x=col_coords["x"]
-          , y=col_coords["y"]
-          , mode="markers"
-          , marker_symbol=symbol_number
-          , marker={
-                "size": sizing["markersize"]
-              , "color": "white"
-              , "line": {"width": sizing["markerlinewidth"], "color": "lightgrey"}
-            }
-          , showlegend=False
+            x=col_coords["x"],
+            y=col_coords["y"],
+            mode="markers",
+            marker_symbol=symbol_number,
+            marker={
+                "size": sizing["markersize"],
+                "color": "white",
+                "line": {"width": sizing["markerlinewidth"], "color": "lightgrey"},
+            },
+            showlegend=False,
         )
     )
 
-    custom_colorscale = [
-    [0, 'rgb(255, 255, 255)']
-    , [1, 'rgb(0, 20, 200)']
-    ]
+    custom_colorscale = [[0, "rgb(255, 255, 255)"], [1, "rgb(0, 20, 200)"]]
 
     # Add data
     fig.add_trace(
         go.Scatter(
-            x=x_vals
-          , y=y_vals
-          , mode="markers"
-          , marker_symbol=symbol_number
-          , marker={
-              "cmin": 0
-              , "cmax": df.values.max()
-              , "size": sizing["markersize"]
-              , "color": df.values
-              , "line": {
-                    "width": sizing["markerlinewidth"]
-                  , "color": style["markerlinecolor"]
-                }
-              , "colorbar": {
-                    "orientation": "v"
-                  , "outlinecolor": style["linecolor"]
-                  , "outlinewidth": sizing["axislinewidth"]
-                  , "thickness": sizing["cbar_thickness"]
-                  , "len": sizing["cbar_len"]
-                  , "tickmode": "array"
-                  , "ticklen": sizing["ticklen"]
-                  , "tickwidth": sizing["tickwidth"]
-                  , "tickcolor": style["linecolor"]
-                  , "tickfont": {
-                        "size": fsize_ticks_px
-                      , "family": style["font_type"]
-                      , "color": style["linecolor"]
-                    }
-                  , "tickformat": ".5f"
-                  , "title": {
+            x=x_vals,
+            y=y_vals,
+            mode="markers",
+            marker_symbol=symbol_number,
+            marker={
+                "cmin": 0,
+                "cmax": df.values.max(),
+                "size": sizing["markersize"],
+                "color": df.values,
+                "line": {
+                    "width": sizing["markerlinewidth"],
+                    "color": style["markerlinecolor"],
+                },
+                "colorbar": {
+                    "orientation": "v",
+                    "outlinecolor": style["linecolor"],
+                    "outlinewidth": sizing["axislinewidth"],
+                    "thickness": sizing["cbar_thickness"],
+                    "len": sizing["cbar_len"],
+                    "tickmode": "array",
+                    "ticklen": sizing["ticklen"],
+                    "tickwidth": sizing["tickwidth"],
+                    "tickcolor": style["linecolor"],
+                    "tickfont": {
+                        "size": fsize_ticks_px,
+                        "family": style["font_type"],
+                        "color": style["linecolor"],
+                    },
+                    "tickformat": ".5f",
+                    "title": {
                         "font": {
-                            "family": style["font_type"]
-                          , "size": fsize_title_px
-                          , "color": style["linecolor"]
-                        }
-                      , "side": "right"
-                    }
-                }
-              , "colorscale": custom_colorscale
-            }
-          , showlegend=False
+                            "family": style["font_type"],
+                            "size": fsize_title_px,
+                            "color": style["linecolor"],
+                        },
+                        "side": "right",
+                    },
+                },
+                "colorscale": custom_colorscale,
+            },
+            showlegend=False,
         )
     )
 
