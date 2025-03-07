@@ -103,9 +103,7 @@ def compress_paths(
             if i == 0:
                 out_tensor = inprop_tensor.clone()
             else:
-                out_tensor_new = torch.full(
-                    (size, size), 0.0, dtype=torch.float32
-                )
+                out_tensor_new = torch.full((size, size), 0.0, dtype=torch.float32)
                 colLow = 0
                 colHigh = chunkSize
                 for colChunk in range(chunks):  # iterate chunks colwise
@@ -118,9 +116,9 @@ def compress_paths(
                     for rowChunk in range(chunks):  # iterate chunks rowwise
                         in_rows = out_tensor[rowLow:rowHigh, :].to(device)
                         # shape: chunkSize x size; on GPU
-                        out_tensor_new[rowLow:rowHigh, colLow:colHigh] = (
-                            torch.matmul(in_rows, in_col).to("cpu")
-                        )
+                        out_tensor_new[rowLow:rowHigh, colLow:colHigh] = torch.matmul(
+                            in_rows, in_col
+                        ).to("cpu")
                         # shape: chunkSize x chunkSize; on CPU
 
                         rowLow += chunkSize
@@ -259,9 +257,7 @@ def compress_paths_signed(
     """
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    inprop_tensor = torch.tensor(
-        inprop.toarray(), device=device, dtype=torch.float32
-    )
+    inprop_tensor = torch.tensor(inprop.toarray(), device=device, dtype=torch.float32)
 
     # Create masks for excitatory and inhibitory neurons
     n_neurons = inprop_tensor.shape[0]
@@ -470,9 +466,7 @@ def result_summary(
     if include_undefined_groups:
         # fill the nan values in inidx_map (e.g. 17726: nan) and outidx_map
         # with 'undefined'
-        inidx_map = {
-            k: v if pd.notna(v) else "undefined" for k, v in inidx_map.items()
-        }
+        inidx_map = {k: v if pd.notna(v) else "undefined" for k, v in inidx_map.items()}
         outidx_map = {
             k: v if pd.notna(v) else "undefined" for k, v in outidx_map.items()
         }
@@ -507,29 +501,21 @@ def result_summary(
             result_df = result_df[(result_df >= display_threshold).any(axis=1)]
         elif threshold_axis == "column":
             # only display columns where any value >= display_threshold
-            result_df = result_df.loc[
-                :, (result_df >= display_threshold).any(axis=0)
-            ]
+            result_df = result_df.loc[:, (result_df >= display_threshold).any(axis=0)]
         else:
-            raise ValueError(
-                "threshold_axis must be either 'column' or 'row'."
-            )
+            raise ValueError("threshold_axis must be either 'column' or 'row'.")
 
     if sort_within == "column":
         if sort_names is None:
             # sort result_df by the values in the first column, in descending
             # order
-            result_df = result_df.sort_values(
-                by=result_df.columns[0], ascending=False
-            )
+            result_df = result_df.sort_values(by=result_df.columns[0], ascending=False)
         elif isinstance(sort_names, str):
             sort_names = [sort_names]
 
         if sort_names is not None:
             if set(sort_names).issubset(result_df.columns):
-                result_df = result_df.sort_values(
-                    by=sort_names, ascending=False
-                )
+                result_df = result_df.sort_values(by=sort_names, ascending=False)
             else:
                 raise ValueError(
                     "sort_names must be present in the values of outidx_map."
@@ -640,11 +626,7 @@ def contribution_by_path_lengths(
     # index is the path length
     # variable is postynaptic cell type
     # value is y axis
-    contri = (
-        pd.concat(rows, ignore_index=True)
-        .melt(ignore_index=False)
-        .reset_index()
-    )
+    contri = pd.concat(rows, ignore_index=True).melt(ignore_index=False).reset_index()
     contri.columns = ["path_length", "postsynaptic_type", "value"]
     contri.path_length = contri.path_length + 1
 
@@ -836,17 +818,13 @@ def effective_conn_from_paths(paths, group_dict=None, wide=True):
 
     # pivot wider
     if wide:
-        result_el = result_el.pivot(
-            index="pre", columns="post", values="weight"
-        )
+        result_el = result_el.pivot(index="pre", columns="post", values="weight")
         result_el.fillna(0, inplace=True)
 
     return result_el
 
 
-def signed_effective_conn_from_paths(
-    paths, group_dict=None, wide=True, idx_to_nt=None
-):
+def signed_effective_conn_from_paths(paths, group_dict=None, wide=True, idx_to_nt=None):
     """Calculate the *signed* effective connectivity between (groups of)
     neurons based only on the provided `paths` between neurons. This function
     runs on CPU, and doesn't expect a big connectivity matrix as input.
@@ -953,26 +931,18 @@ def signed_effective_conn_from_paths(
     )
     # change back to the global names
     result_el_e.loc[:, ["pre"]] = result_el_e.pre_idx.map(local_to_global_idx)
-    result_el_e.loc[:, ["post"]] = result_el_e.post_idx.map(
-        local_to_global_idx
-    )
+    result_el_e.loc[:, ["post"]] = result_el_e.post_idx.map(local_to_global_idx)
     result_el_i.loc[:, ["pre"]] = result_el_i.pre_idx.map(local_to_global_idx)
-    result_el_i.loc[:, ["post"]] = result_el_i.post_idx.map(
-        local_to_global_idx
-    )
+    result_el_i.loc[:, ["post"]] = result_el_i.post_idx.map(local_to_global_idx)
 
     if group_dict is not None:
         result_el_e = group_edge_by(result_el_e, group_dict)
         result_el_i = group_edge_by(result_el_i, group_dict)
 
     if wide:
-        result_el_e = result_el_e.pivot(
-            index="pre", columns="post", values="weight"
-        )
+        result_el_e = result_el_e.pivot(index="pre", columns="post", values="weight")
         result_el_e.fillna(0, inplace=True)
-        result_el_i = result_el_i.pivot(
-            index="pre", columns="post", values="weight"
-        )
+        result_el_i = result_el_i.pivot(index="pre", columns="post", values="weight")
         result_el_i.fillna(0, inplace=True)
 
     return result_el_e, result_el_i
@@ -1003,7 +973,5 @@ def read_precomputed(prefix: str, file_path: str = None) -> List:
 
     steps_cpu = []
     for i in range(len(os.listdir(f"{file_path}{prefix}"))):
-        steps_cpu.append(
-            sp.sparse.load_npz(f"{file_path}{prefix}/{prefix}_{i}.npz")
-        )
+        steps_cpu.append(sp.sparse.load_npz(f"{file_path}{prefix}/{prefix}_{i}.npz"))
     return steps_cpu

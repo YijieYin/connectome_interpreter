@@ -30,12 +30,22 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
+
     - name: Lint with flake8
       run: |
         # stop the build if there are Python syntax errors or undefined names
         flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+        # exit-zero treats all errors as warnings.
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=88 --statistics
+
+    - name: Run black on changed files
+      run: |
+        CHANGED_FILES=$(git diff --diff-filter=d --name-only origin/main | grep '\.py$' || true)
+        if [[ -n "$CHANGED_FILES" ]]; then
+          black --check -l 88 $CHANGED_FILES || (echo "Please run black" && false)
+        else
+          echo "No Python files changed."
+        fi
 
     - name: Run type checker
       run: |

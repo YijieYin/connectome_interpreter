@@ -33,8 +33,8 @@ def load_dataset(dataset):
             - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits,
                 from Dweck et al. 2018. Number of responses normalised to
                 between 0 and 1.
-            - 'Nern2024': columnar coordinates of individual cells from a 
-                collection of columnar cell types within the medulla of the 
+            - 'Nern2024': columnar coordinates of individual cells from a
+                collection of columnar cell types within the medulla of the
                 right optic lobe, from Nern et al. 2024.
 
     Returns:
@@ -115,8 +115,8 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
             - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits,
                 from Dweck et al. 2018. Number of responses normalised to
                 between 0 and 1.
-            - 'Nern2024': columnar coordinates of individual cells from a 
-                collection of columnar cell types within the medulla of the 
+            - 'Nern2024': columnar coordinates of individual cells from a
+                collection of columnar cell types within the medulla of the
                 right optic lobe, from Nern et al. 2024.
         custom_experiment : pd.DataFrame
             A custom experimental dataset to compare the connectomics data to.
@@ -139,9 +139,7 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
             "Please provide either a dataset or a custom_experiment, not both."
         )
     if dataset is None and custom_experiment is None:
-        raise ValueError(
-            "Please provide either a dataset or a custom_experiment."
-        )
+        raise ValueError("Please provide either a dataset or a custom_experiment.")
     if dataset is not None:
         data = load_dataset(dataset)
     else:
