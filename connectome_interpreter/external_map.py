@@ -220,12 +220,12 @@ def hex_heatmap(
     # initiate plot
     fig = go.Figure()
     fig.update_layout(
-        autosize=False
-      , height=area_height
-      , width=area_width
-      , margin={"l": 0, "r": 0, "b": 0, "t": 0, "pad": 0}
-      , paper_bgcolor=style["papercolor"]
-      , plot_bgcolor=style["papercolor"]
+        autosize=False,
+        height=area_height,
+        width=area_width,
+        margin={"l": 0, "r": 0, "b": 0, "t": 0, "pad": 0},
+        paper_bgcolor=style["papercolor"],
+        plot_bgcolor=style["papercolor"],
     )
     fig.update_xaxes(
         showgrid=False, showticklabels=False, showline=False, visible=False
