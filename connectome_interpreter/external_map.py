@@ -162,9 +162,9 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
     return target2chem
 
 def hex_heatmap(
-    df:pd.Series
-    , style:dict=None
-    , sizing:dict=None
+    df:pd.Series,
+    style:dict=None,
+    sizing:dict=None,
 ) -> go.Figure:
     """
     Generate a hexagonal heat map plot of the data in a pandas series 'df'.
