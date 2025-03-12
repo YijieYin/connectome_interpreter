@@ -273,13 +273,13 @@ def hex_heatmap(
     symbol_number = 15
 
     # Get the coordinates of all columns in the medulla:
-    col_coords = load_dataset("Nern2024")
+    # col_coords = load_dataset("Nern2024")
 
     # Add empty white 'background' hexagons - all neuropils
     fig.add_trace(
         go.Scatter(
-            x=col_coords["x"],
-            y=col_coords["y"],
+            x=x_vals,
+            y=y_vals,
             mode="markers",
             marker_symbol=symbol_number,
             marker={
