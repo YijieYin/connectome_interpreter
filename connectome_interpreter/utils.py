@@ -671,7 +671,7 @@ def get_ngl_link(
 
         for grp in df_group.group.unique():
             df_group_grp = df_group[df_group.group == grp]
-            df_group_grp.drop("group", axis=1, inplace=True)
+            df_group_grp = df_group_grp.drop("group", axis=1)
 
             layer = ngl.SegmentationLayer(
                 source=source, name=str(ite) + " " + str(grp)
@@ -1385,7 +1385,6 @@ def compare_connectivity(
     g2_pre: dict | None = None,
     g2_post: dict | None = None,
     suffices: List[str] = ["_l", "_2"],
-    remove_na_rows: bool = True,
     display: bool = True,
     threshold: float = 0,
     sort_within: str = "column",
@@ -1417,9 +1416,6 @@ def compare_connectivity(
             indices to groups in the second matrix. Defaults to None.
         suffices (list, optional): A list of suffixes to append to the column
             names of the two matrices. Defaults to ['_l', '_2'].
-        remove_na_rows (bool, optional): Whether to remove rows with NaN
-            values (where e.g. a connection exists in one matrix but not the
-            other). Defaults to True.
         display (bool, optional): Whether to display the resulting DataFrame
             in colour gradient. Defaults to True.
         threshold (float, optional): The threshold below which to remove
@@ -1461,11 +1457,10 @@ def compare_connectivity(
 
     # Join the dataframes on their index (row names), keeping all rows
     df_merged = df1.merge(df2, left_index=True, right_index=True, how="outer")
+    df_merged = df_merged.fillna(0)
     # order the columns alphabetically
     # Sort columns alphabetically
     df_merged = df_merged.reindex(sorted(df_merged.columns), axis=1)
-    if remove_na_rows:
-        df_merged = df_merged.dropna()
 
     if sort_within == "column":
         if sort_by is None:
