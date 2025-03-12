@@ -5,8 +5,18 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+DATA_SOURCES: dict[str, str] = {
+    "DoOR_adult": "data/DoOR/processed_door_adult.csv",
+    "DoOR_adult_sfr_subtracted": "data/DoOR/processed_door_adult_sfr_subtracted.csv",
+    "Dweck_adult_chem": "data/Dweck2018/adult_chem2glom.csv",
+    "Dweck_adult_fruit": "data/Dweck2018/adult_fruit2glom.csv",
+    "Dweck_larva_chem": "data/Dweck2018/larva_chem2or.csv",
+    "Dweck_larva_fruit": "data/Dweck2018/larva_fruit2or.csv",
+    "Nern2024": "data/Nern2024/ME-columnar-cells-hex-location.csv",
+}
 
-def load_dataset(dataset):
+
+def load_dataset(dataset: str) -> pd.DataFrame:
     """
     Load the dataset from the package data folder. These datasets have been
     preprocessed to work with connectomics data. The preprocessing scripts are
@@ -44,38 +54,15 @@ def load_dataset(dataset):
             rows.
     """
 
-    if dataset == "DoOR_adult":
+    try:
         data = pkgutil.get_data(
-            "connectome_interpreter", "data/DoOR/processed_door_adult.csv"
+            "connectome_interpreter", DATA_SOURCES[dataset]
         )
-    elif dataset == "DoOR_adult_sfr_subtracted":
-        data = pkgutil.get_data(
-            "connectome_interpreter",
-            "data/DoOR/processed_door_adult_sfr_subtracted.csv",
-        )
-    elif dataset == "Dweck_adult_chem":
-        data = pkgutil.get_data(
-            "connectome_interpreter", "data/Dweck2018/adult_chem2glom.csv"
-        )
-    elif dataset == "Dweck_adult_fruit":
-        data = pkgutil.get_data(
-            "connectome_interpreter", "data/Dweck2018/adult_fruit2glom.csv"
-        )
-    elif dataset == "Dweck_larva_chem":
-        data = pkgutil.get_data(
-            "connectome_interpreter", "data/Dweck2018/larva_chem2or.csv"
-        )
-    elif dataset == "Dweck_larva_fruit":
-        data = pkgutil.get_data(
-            "connectome_interpreter", "data/Dweck2018/larva_fruit2or.csv"
-        )
-    elif dataset == "Nern2024":
-        data = pkgutil.get_data(
-            "connectome_interpreter", "data/Nern2024/ME-columnar-cells-hex-location.csv"
-        )
-    else:
+    except KeyError:
         raise ValueError(
-            "Dataset not recognized. Please choose from 'DoOR_adult', 'DoOR_adult_sfr_subtracted', 'Dweck_adult_chem', 'Dweck_adult_fruit', 'Dweck_larva_chem', 'Dweck_larva_fruit', 'Nern2024'."
+            "Dataset not recognized. Please choose from {}".format(
+                list(DATA_SOURCES.keys())
+            )
         )
 
     return pd.read_csv(io.BytesIO(data), index_col=0)
@@ -116,8 +103,8 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
             - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits,
                 from Dweck et al. 2018. Number of responses normalised to
                 between 0 and 1.
-            - 'Nern2024': columnar coordinates of individual cells from a 
-                collection of columnar cell types within the medulla of the 
+            - 'Nern2024': columnar coordinates of individual cells from a
+                collection of columnar cell types within the medulla of the
                 right optic lobe, from Nern et al. 2024.
         custom_experiment : pd.DataFrame
             A custom experimental dataset to compare the connectomics data to.
