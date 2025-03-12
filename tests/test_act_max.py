@@ -232,7 +232,6 @@ class TestGetNeuronActivation(unittest.TestCase):
 
         expected_df = pd.DataFrame(
             {
-                "idx": [0, 2],
                 "group": ["A", "B"],
                 "time_0": [0.1, 0.7],
                 "time_1": [0.2, 0.8],
@@ -250,7 +249,7 @@ class TestGetNeuronActivation(unittest.TestCase):
         df = get_neuron_activation(output, neuron_indices)
 
         expected_df = pd.DataFrame(
-            {"idx": [1], "time_0": [0.4], "time_1": [0.5], "time_2": [0.6]}
+            {"group": [1], "time_0": [0.4], "time_1": [0.5], "time_2": [0.6]}
         )
         pd.testing.assert_frame_equal(df, expected_df, check_dtype=False)
 
@@ -272,7 +271,6 @@ class TestGetNeuronActivation(unittest.TestCase):
         expected_df = pd.DataFrame(
             {
                 "batch_name": ["batch_1", "batch_2"],
-                "idx": [0, 0],
                 "group": ["A", "A"],
                 "time_0": [0.1, 0.5],
                 "time_1": [0.2, 0.6],
@@ -291,7 +289,7 @@ class TestGetNeuronActivation(unittest.TestCase):
         expected_df = pd.DataFrame(
             {
                 "batch_name": ["batch_0", "batch_1"],
-                "idx": [1, 1],
+                "group": [1, 1],
                 "time_0": [0.3, 0.7],
                 "time_1": [0.4, 0.8],
             }

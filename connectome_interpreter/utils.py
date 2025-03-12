@@ -219,10 +219,10 @@ def adjacency_df_to_el(adjacency, threshold=None):
 
 def modify_coo_matrix(
     sparse_matrix,
-    input_idx: arrayable = None,
-    output_idx: arrayable = None,
+    input_idx: arrayable | None = None,
+    output_idx: arrayable | None = None,
     value=None,
-    updates_df: pd.DataFrame = None,
+    updates_df: pd.DataFrame | None = None,
     re_normalize: bool = True,
 ):
     """
@@ -481,14 +481,14 @@ def to_nparray(input_data: arrayable, unique: bool = True) -> npt.NDArray:
 def get_ngl_link(
     df: pd.DataFrame | pd.Series,
     no_connection_invisible: bool = True,
-    group_by: dict = None,
+    group_by: dict | None = None,
     colour_saturation: float = 0.4,
     scene=None,
-    source: list = None,
-    normalise: str = None,
+    source: list | None = None,
+    normalise: str | None = None,
     include_postsynaptic_neuron: bool = False,
     diff_colours_per_layer: bool = False,
-    colors: list = None,
+    colors: list | None = None,
     colormap: str = "viridis",
     df_format: str = "wide",
 ) -> str:
@@ -728,7 +728,7 @@ def get_ngl_link(
 def get_activations(
     array,
     global_indices: arrayable,
-    idx_map: dict = None,
+    idx_map: dict | None = None,
     top_n=None,
     threshold=None,
 ):
@@ -847,7 +847,7 @@ def plot_layered_paths(
     fraction: float = 0.03,
     pad: float = 0.02,
     weight_decimals: int = 2,
-    neuron_to_sign: dict = None,
+    neuron_to_sign: dict | None = None,
     sign_color_map: dict = {1: "red", -1: "blue"},
 ):
     """
@@ -1389,7 +1389,7 @@ def compare_connectivity(
     display: bool = True,
     threshold: float = 0,
     sort_within: str = "column",
-    sort_by: str = None,
+    sort_by: str | None = None,
 ):
     """
     Compare the connectivity between two matrices.
@@ -1482,47 +1482,6 @@ def compare_connectivity(
         display_df(df_merged)
 
     return df_merged
-
-
-def path_for_ngl(path):
-    """
-    Convert a path DataFrame to a format suitable for Neuroglancer
-    visualization (`get_ngl_link(df_format='long')`).
-
-    Args:
-        path (pd.DataFrame): A DataFrame containing the columns 'pre', 'post',
-            'layer', 'pre_activation', and 'post_activation' (standard output
-            from function `activations_to_df()`).
-
-    Returns:
-        pd.DataFrame: A DataFrame with columns 'neuron_id', 'layer', and
-            'activation', suitable for Neuroglancer visualization.
-    """
-    dfs = []
-    for l in path.layer.unique():
-        path_l = path[path.layer == l]
-        if l == path.layer.min():
-            df = pd.DataFrame(
-                {
-                    "neuron_id": path_l.pre,
-                    "layer": l,
-                    "activation": path_l.pre_activation,
-                }
-            )
-            # drop duplicate rows
-            df = df.drop_duplicates()
-            dfs.append(df)
-
-        df = pd.DataFrame(
-            {
-                "neuron_id": path_l.post,
-                "layer": l + 1,
-                "activation": path_l.post_activation,
-            }
-        )
-        df = df.drop_duplicates()
-        dfs.append(df)
-    return pd.concat(dfs)
 
 
 def make_grid_inputs(
