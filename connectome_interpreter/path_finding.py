@@ -228,7 +228,9 @@ def find_path_iteratively(
     return pd.concat(dfs)
 
 
-def create_layered_positions(df: pd.DataFrame, priority_indices=None, sort_dict: dict | None = None) -> dict:
+def create_layered_positions(
+    df: pd.DataFrame, priority_indices=None, sort_dict: dict | None = None
+) -> dict:
     """
     Creates a dictionary of positions for each neuron in the paths, so that
     the paths can be visualized in a layered manner. It assumes that `df`
@@ -714,12 +716,23 @@ def group_paths(
             paths.groupby("post_type")["post"].nunique().to_dict()
         )
 
-    # sum across presynaptic neurons of the same type
-    paths = (
-        paths.groupby(["layer", "pre_type", "post_type"])
-        .weight.sum()
-        .reset_index()
-    )
+    if "pre_activation" in paths.columns:
+        paths = (
+            paths.groupby(["layer", "pre_type", "post_type"])
+            .agg(
+                weight=("weight", "sum"),
+                pre_activation=("pre_activation", "mean"),
+                post_activation=("post_activation", "mean"),
+            )
+            .reset_index()
+        )
+    else:
+        # sum across presynaptic neurons of the same type
+        paths = (
+            paths.groupby(["layer", "pre_type", "post_type"])
+            .weight.sum()
+            .reset_index()
+        )
     # divide by number of postsynaptic neurons of the same type
     paths["nneuron_post"] = paths.post_type.map(nneuron_per_type)
     paths["weight"] = paths.weight / paths.nneuron_post
