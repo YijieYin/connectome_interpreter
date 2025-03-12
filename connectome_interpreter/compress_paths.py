@@ -2,6 +2,7 @@
 import math
 from typing import List
 import os
+import gc
 
 # Third-party package imports
 import ipywidgets as widgets
@@ -33,6 +34,13 @@ def compress_paths(
     output_threshold: float = 1e-4,
     root: bool = False,
     chunkSize: int = 10000,
+    dtype: torch.dtype = torch.float32,
+    device: torch.device = torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    ),
+    save_to_disk: bool = False,
+    save_path: str = "./",
+    save_prefix: str = "step_",
 ) -> list:
     """Performs iterative multiplication of a sparse matrix `inprop` for a
     specified number of steps, applying thresholding to filter out values below
@@ -64,6 +72,17 @@ def compress_paths(
             all partners n steps away" (when root=False). Defaults to False.
         chunkSize (int, optional): The size of the chunks to split the matrix
             into for matrix multiplication. Defaults to 10000.
+        dtype (torch.dtype, optional): The data type to use for the tensor
+            calculations. Defaults to torch.float32.
+        device (torch.device, optional): The device to use for the tensor
+            calculations. Defaults to torch.device("cuda" if
+            torch.cuda.is_available() else "cpu").
+        save_to_disk (bool, optional): Whether to save the output matrices to
+            disk. Defaults to False.
+        save_path (str, optional): The path to save the output matrices to.
+            Defaults to "./" (the current folder).
+        save_prefix (str, optional): The prefix to use for the output matrix
+            filenames. Defaults to "step_".
 
     Returns:
         list: A list of scipy.sparse.csc_matrix objects, each representing
@@ -86,14 +105,15 @@ def compress_paths(
         >>> print(compressed_paths)
     """
     steps_fast: List[csc_matrix] = []
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if not isinstance(inprop, csc_matrix):
+        inprop = inprop.tocsc()
 
     # check that step_number>0
     if step_number < 1:
         raise ValueError("step_number should be greater than 0")
 
-    inprop_tensor = torch.tensor(inprop.toarray())
-    size = inprop_tensor.size(dim=0)
+    size = inprop.shape[0]
 
     chunks = math.ceil(size / chunkSize)
 
@@ -101,18 +121,18 @@ def compress_paths(
         for i in tqdm(range(step_number)):
 
             if i == 0:
-                out_tensor = inprop_tensor.clone()
+                out_tensor = torch.tensor(inprop.toarray(), dtype=dtype)
             else:
-                out_tensor_new = torch.full(
-                    (size, size), 0.0, dtype=torch.float32
-                )
+                out_tensor_new = torch.zeros(size, size, dtype=dtype)
                 colLow = 0
                 colHigh = chunkSize
                 for colChunk in range(chunks):  # iterate chunks colwise
                     rowLow = 0
                     rowHigh = chunkSize
 
-                    in_col = inprop_tensor[:, colLow:colHigh].to(device)
+                    in_col = torch.tensor(
+                        inprop[:, colLow:colHigh].toarray(), dtype=dtype
+                    ).to(device)
                     # shape: size x chunkSize; on GPU
 
                     for rowChunk in range(chunks):  # iterate chunks rowwise
@@ -129,6 +149,7 @@ def compress_paths(
 
                         del in_rows
                     del in_col
+                    torch.cuda.empty_cache()
                     colLow += chunkSize
                     colHigh += chunkSize
                     colHigh = min(colHigh, size)
@@ -141,7 +162,9 @@ def compress_paths(
             # Thresholding during matmul
             if threshold != 0:
                 out_tensor = torch.where(
-                    out_tensor >= threshold, out_tensor, torch.tensor(0.0)
+                    out_tensor >= threshold,
+                    out_tensor,
+                    torch.tensor(0.0, dtype=dtype),
                 )
 
             # Convert to csc for output
@@ -157,10 +180,16 @@ def compress_paths(
                 )
                 out_csc.eliminate_zeros()
 
-            steps_fast.append(out_csc)
+            if save_to_disk:
+                sp.sparse.save_npz(
+                    os.path.join(save_path, f"{save_prefix}{i}.npz"), out_csc
+                )
+            else:
+                steps_fast.append(out_csc)
+            del out_csc
 
     # remove all variables
-    del out_tensor, inprop_tensor
+    del out_tensor
     torch.cuda.empty_cache()
 
     return steps_fast
@@ -451,7 +480,7 @@ def result_summary(
         of the resulting dataframe.
     """
     if inidx_map is None:
-        inidx_map = {idx: idx for idx in inidx}
+        inidx_map = {idx: idx for idx in range(stepsn.shape[0])}
     if outidx_map is None:
         outidx_map = inidx_map
 
@@ -575,15 +604,16 @@ def contribution_by_path_lengths(
     steps,
     inidx: arrayable,
     outidx: arrayable,
-    outidx_map: dict,
+    outidx_map: dict | None = None,
+    inidx_map: dict | None = None,
     width: int = 800,
     height: int = 400,
 ):
-    """Analyzes the contribution of presynaptic neurons to postsynaptic neuron
-    groups across different path lengths. This function calculates and
-    visualizes the average input received by a neuron in each postsynaptic
-    neuron group from presynaptic ones, aggregated over specified path lengths.
-    Direct connections are in path_length 1.
+    """Plots the connection strength from all of inidx (grouped by inidx_map)
+    to an average outidx (grouped by outidx_map) over different path lengths.
+    Either inidx_map or outidx_map, but not both, should be provided. If
+    neither is provided, presynaptic neurons are grouped together. Direct
+    connections are in path_length 1.
 
     Args:
         steps (list of scipy.sparse matrices): List of sparse matrices, each
@@ -593,46 +623,60 @@ def contribution_by_path_lengths(
         outidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array
             of indices representing output (postsynaptic) neurons.
         outidx_map (dict): Mapping from indices to postsynaptic neuron groups.
+            Only one of inidx_map and outidx_map should be specified.
+        inidx_map (dict): Mapping from indices to presynaptic neuron groups.
+            Only one of inidx_map and outidx_map should be specified.
+        width (int, optional): The width of the plot. Defaults to 800.
+        height (int, optional): The height of the plot. Defaults to 400.
 
     Returns:
-        None: Displays a line plot with path lengths on the x-axis, the
-            average input received on the y-axis, and lines differentiated by
-            postsynaptic neuron groups. The plot represents how different
-            postsynaptic neuron groups are influenced by presynaptic neurons
-            over various path lengths.
+        None: Displays an interactive line plot showing the connection strength
+            from all of inidx to an average outidx over different path lengths.
 
-    The function iterates through each path length (each 'step'), computes the
-    sum of inputs from presynaptic to each postsynaptic neuron. It then
-    calculates the average for each postsynaptic group. It then generates a
-    plot showing the relationship between path lengths and synaptic input
-    contribution for each postsynaptic neuron group.
     """
 
     # remove nan values in inidx and outidx
     inidx = to_nparray(inidx)
     outidx = to_nparray(outidx)
 
-    rows = []
-    for step in steps:
-        df = pd.DataFrame(
-            data=step[:, outidx][inidx, :].toarray(),
-            # all input are grouped togehter.
-            columns=[outidx_map[key] for key in outidx],
+    # check if both inidx_map and outidx_map are provided
+    if inidx_map is not None and outidx_map is not None:
+        raise ValueError(
+            "Only one of inidx_map and outidx_map should be specified. "
+            "If you want to keep both, use "
+            "contribution_by_path_lengths_heatmap()."
         )
 
-        # Sum across rows: presynaptic neuron is in the rows
-        # summing across neurons of the same type: total amount of input for
-        # the postsynaptic neuron
-        # this gives a dataframe of one column, where each row is a value from
-        # outidx_map
-        # there is some secret transposing after summing
-        summed_df = df.sum().to_frame()
+    if inidx_map is None and outidx_map is None:
+        outidx_map = {idx: idx for idx in outidx}
+        # give message that pres are grouped together
+        print(
+            "Neither inidx_map nor outidx_map provided. By default "
+            "presynaptic neurons are grouped together."
+        )
 
-        # Average across columns and transpose back
-        # averaging across columns of the same type:
-        # on average, a neuron of that type receives x% input from the inidx
-        result_df = summed_df.groupby(level=0).mean().T
-        rows.append(result_df)
+    rows = []
+    for step in steps:
+        if inidx_map is not None:
+            df = pd.DataFrame(
+                data=step[:, outidx][inidx, :].toarray(),
+                index=[inidx_map[key] for key in inidx],
+            )
+            # average of all columns
+            # then groupby index, and take the sum
+            # average post from all pre
+            df = df.mean(axis=1).groupby(level=0).sum().to_frame().T
+            rows.append(df)
+        elif outidx_map is not None:
+            df = pd.DataFrame(
+                data=step[:, outidx][inidx, :].toarray(),
+                columns=[outidx_map[key] for key in outidx],
+            )
+            # sum all rows
+            # then groupby column, and take the mean
+            # average post from all pre
+            df = df.sum().groupby(level=0).mean().to_frame().T
+            rows.append(df)
 
     # first have a dataframe where: each row is a path length, each column is
     # a postsynaptic cell type
@@ -645,14 +689,17 @@ def contribution_by_path_lengths(
         .melt(ignore_index=False)
         .reset_index()
     )
-    contri.columns = ["path_length", "postsynaptic_type", "value"]
+    if inidx_map is not None:
+        contri.columns = ["path_length", "presynaptic_type", "value"]
+    else:
+        contri.columns = ["path_length", "postsynaptic_type", "value"]
     contri.path_length = contri.path_length + 1
 
     fig = px.line(
         contri,
         x="path_length",
         y="value",
-        color="postsynaptic_type",
+        color=contri.columns[1],
         width=width,
         height=height,
     )
@@ -978,7 +1025,9 @@ def signed_effective_conn_from_paths(
     return result_el_e, result_el_i
 
 
-def read_precomputed(prefix: str, file_path: str = None) -> List:
+def read_precomputed(
+    prefix: str, file_path: str = None, first_n: int | None = None
+) -> List:
     """Reads the precomputed compressed paths.
 
     Args:
@@ -1002,7 +1051,14 @@ def read_precomputed(prefix: str, file_path: str = None) -> List:
             file_path = ""
 
     steps_cpu = []
-    for i in range(len(os.listdir(f"{file_path}{prefix}"))):
+    # get npz files
+    files = os.listdir(f"{file_path}{prefix}")
+    files = [f for f in files if f.endswith(".npz")]
+
+    if first_n is None:
+        first_n = len(files)
+
+    for i in range(first_n):
         steps_cpu.append(
             sp.sparse.load_npz(f"{file_path}{prefix}/{prefix}_{i}.npz")
         )
