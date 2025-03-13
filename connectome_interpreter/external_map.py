@@ -55,15 +55,13 @@ def load_dataset(dataset: str) -> pd.DataFrame:
     """
 
     try:
-        data = pkgutil.get_data(
-            "connectome_interpreter", DATA_SOURCES[dataset]
-        )
-    except KeyError:
+        data = pkgutil.get_data("connectome_interpreter", DATA_SOURCES[dataset])
+    except KeyError as exc:
         raise ValueError(
             "Dataset not recognized. Please choose from {}".format(
                 list(DATA_SOURCES.keys())
             )
-        )
+        ) from exc
 
     return pd.read_csv(io.BytesIO(data), index_col=0)
 
@@ -148,24 +146,25 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
 
 
 def hex_heatmap(
-    df: pd.Series,
+    df: pd.Series | pd.DataFrame,
     style: dict | None = None,
     sizing: dict | None = None,
-    dpi: int = 72,  # Added parameter for DPI
+    dpi: int = 72,
     custom_colorscale: list | None = None,
 ) -> go.Figure:
     """
-    Generate a hexagonal heat map plot of the data in a pandas series 'df'.
+    Generate a hexagonal heat map plot of the data. The index of the data
+    should be formatted as strings of the form '-12,34', where the first
+    number is the x-coordinate and the second number is the y-coordinate.
 
     Args:
-        df : pd.Series
-            A Series where the index is formatted as 'x,y' coordinates and
-            values represent data to plot.
+        df : pd.Series | pd.DataFrame
+            The data to plot. Each column will generate a separate frame in
+            the plot.
         style : dict, default=None
             Dict containing styling formatting variables. Possible keys are:
 
                 - 'font_type': str, default='arial'
-                - 'markerlinecolor': str, default='rgba(0,0,0,0)' (transparent)
                 - 'linecolor': str, default='black'
                 - 'papercolor': str, default='rgba(255,255,255,255)' (white)
 
@@ -195,6 +194,77 @@ def hex_heatmap(
     Returns:
         fig : go.Figure
     """
+
+    def bg_hex():
+        """
+        Generate a scatter plot of the background hexagons."
+        """
+        goscatter = go.Scatter(
+            x=background_hex["x"],
+            y=background_hex["y"],
+            mode="markers",
+            marker_symbol=symbol_number,
+            marker={
+                "size": sizing["markersize"],
+                "color": "white",
+                "line": {
+                    "width": sizing["markerlinewidth"],
+                    "color": "lightgrey",
+                },
+            },
+            showlegend=False,
+        )
+        return goscatter
+
+    def data_hex(aseries):
+        """
+        Generate a scatter plot of the data hexagons.""
+        """
+        goscatter = go.Scatter(
+            x=x_vals,
+            y=y_vals,
+            mode="markers",
+            marker_symbol=symbol_number,
+            marker={
+                "cmin": global_min,
+                "cmax": global_max,
+                "size": sizing["markersize"],
+                "color": aseries.values,
+                "line": {
+                    "width": sizing["markerlinewidth"],
+                    "color": "lightgrey",
+                },
+                "colorbar": {
+                    "orientation": "v",
+                    "outlinecolor": style["linecolor"],
+                    "outlinewidth": sizing["axislinewidth"],
+                    "thickness": sizing["cbar_thickness"],
+                    "len": sizing["cbar_len"],
+                    "tickmode": "array",
+                    "ticklen": sizing["ticklen"],
+                    "tickwidth": sizing["tickwidth"],
+                    "tickcolor": style["linecolor"],
+                    "tickfont": {
+                        "size": fsize_ticks_px,
+                        "family": style["font_type"],
+                        "color": style["linecolor"],
+                    },
+                    "tickformat": ".5f",
+                    "title": {
+                        "font": {
+                            "family": style["font_type"],
+                            "size": fsize_title_px,
+                            "color": style["linecolor"],
+                        },
+                        "side": "right",
+                    },
+                },
+                "colorscale": custom_colorscale,
+            },
+            showlegend=False,
+        )
+        return goscatter
+
     # Default styling and sizing parameters to use if not specified.
     default_style = {
         "font_type": "arial",
@@ -229,20 +299,31 @@ def hex_heatmap(
 
     # Constants for unit conversion
     POINTS_PER_INCH = 72  # Typography standard: 1 point = 1/72 inch
-    MM_PER_INCH = 25.4    # Standard conversion: 1 inch = 25.4 mm
-    
+    MM_PER_INCH = 25.4  # Standard conversion: 1 inch = 25.4 mm
+
     # sizing of the figure and font
     pixelsperinch = dpi  # Use the provided DPI value
     pixelspermm = pixelsperinch / MM_PER_INCH
+
+    # Default colorscale
+    if custom_colorscale is None:
+        custom_colorscale = [[0, "rgb(255, 255, 255)"], [1, "rgb(0, 20, 200)"]]
+
     area_width = (sizing["fig_width"] - sizing["fig_margin"]) * pixelspermm
     area_height = (sizing["fig_height"] - sizing["fig_margin"]) * pixelspermm
+
     fsize_ticks_px = sizing["fsize_ticks_pt"] * (1 / POINTS_PER_INCH) * pixelsperinch
     fsize_title_px = sizing["fsize_title_pt"] * (1 / POINTS_PER_INCH) * pixelsperinch
 
-    # Convert index values (formatted as '-12,34') into separate x and y
-    # coordinates
-    coords = [tuple(map(int, idx.split(","))) for idx in df.index]
-    x_vals, y_vals = zip(*coords)  # Separate into x and y lists
+    # Get global min and max for consistent color scale
+    global_min = df.values.min()
+    global_max = df.values.max()
+
+    # Symbol number to choose to plot hexagons
+    symbol_number = 15
+
+    # load all hex coordinates
+    background_hex = load_dataset("Nern2024")
 
     # initiate plot
     fig = go.Figure()
@@ -260,81 +341,97 @@ def hex_heatmap(
     fig.update_yaxes(
         showgrid=False, showticklabels=False, showline=False, visible=False
     )
-    # Symbol number to choose to plot hexagons
-    symbol_number = 15
 
-    # Get the coordinates of all columns in the medulla:
-    # col_coords = load_dataset("Nern2024")
+    # Convert index values (formatted as '-12,34') into separate x and y coordinates
+    coords = [tuple(map(int, idx.split(","))) for idx in df.index]
+    x_vals, y_vals = zip(*coords)  # Separate into x and y lists
 
-    # Add empty white 'background' hexagons - all neuropils
-    fig.add_trace(
-        go.Scatter(
-            x=x_vals,
-            y=y_vals,
-            mode="markers",
-            marker_symbol=symbol_number,
-            marker={
-                "size": sizing["markersize"],
-                "color": "white",
-                "line": {
-                    "width": sizing["markerlinewidth"],
-                    "color": "lightgrey",
-                },
-            },
-            showlegend=False,
-        )
-    )
+    if isinstance(df, pd.Series) or len(df.columns) == 1:
+        if isinstance(df, pd.DataFrame):
+            df = df.iloc[:, 0]
+        fig.add_trace(bg_hex())
+        fig.add_trace(data_hex(df))
 
-    if custom_colorscale is None:
-        # Define a custom colorscale
-        custom_colorscale = [
-            [0, "rgb(255, 255, 255)"], [1, "rgb(0, 20, 200)"]]
+    elif isinstance(df, pd.DataFrame):
+        # Adjust figure size - add extra height for slider
+        slider_height = 100  # pixels
+        area_height += slider_height
 
-    # Add data
-    fig.add_trace(
-        go.Scatter(
-            x=x_vals,
-            y=y_vals,
-            mode="markers",
-            marker_symbol=symbol_number,
-            marker={
-                "cmin": 0,
-                "cmax": df.values.max(),
-                "size": sizing["markersize"],
-                "color": df.values,
-                "line": {
-                    "width": sizing["markerlinewidth"],
-                    "color": style["markerlinecolor"],
-                },
-                "colorbar": {
-                    "orientation": "v",
-                    "outlinecolor": style["linecolor"],
-                    "outlinewidth": sizing["axislinewidth"],
-                    "thickness": sizing["cbar_thickness"],
-                    "len": sizing["cbar_len"],
-                    "tickmode": "array",
-                    "ticklen": sizing["ticklen"],
-                    "tickwidth": sizing["tickwidth"],
-                    "tickcolor": style["linecolor"],
-                    "tickfont": {
-                        "size": fsize_ticks_px,
-                        "family": style["font_type"],
-                        "color": style["linecolor"],
+        # Create frames for slider
+        frames = []
+        slider_steps = []
+
+        # Add base layout
+        fig.update_layout(
+            autosize=False,
+            height=area_height,
+            width=area_width,
+            margin={
+                "l": 0,
+                "r": 0,
+                "b": slider_height,
+                "t": 0,
+                "pad": 0,
+            },  # Add bottom margin for slider
+            paper_bgcolor=style["papercolor"],
+            plot_bgcolor=style["papercolor"],
+            sliders=[
+                {
+                    "active": 0,
+                    "currentvalue": {
+                        "font": {"size": 16},
+                        "visible": True,
+                        "xanchor": "right",
                     },
-                    "tickformat": ".5f",
-                    "title": {
-                        "font": {
-                            "family": style["font_type"],
-                            "size": fsize_title_px,
-                            "color": style["linecolor"],
-                        },
-                        "side": "right",
-                    },
-                },
-                "colorscale": custom_colorscale,
-            },
-            showlegend=False,
+                    "pad": {"b": 10, "t": 0},  # Adjusted padding
+                    "len": 0.9,
+                    "x": 0.1,
+                    "y": 0,  # Move slider below plot
+                    "steps": [],
+                }
+            ],
         )
-    )
+
+        # Create frames for each column
+        for i, col_name in enumerate(df.columns):
+            series = df[col_name]
+            frame_data = [
+                bg_hex(),
+                data_hex(series),
+            ]
+
+            frames.append(go.Frame(data=frame_data, name=str(i)))
+
+            # Add to slider
+            slider_steps.append(
+                {
+                    "args": [
+                        [str(i)],
+                        {"frame": {"duration": 0, "redraw": True}, "mode": "immediate"},
+                    ],
+                    "label": col_name,
+                    "method": "animate",
+                }
+            )
+
+            # Set initial display to first column
+            if i == 0:
+                fig.add_traces(frame_data)
+
+        # Update slider with all steps
+        fig.layout.sliders[0].steps = slider_steps
+        fig.frames = frames
+
+        # Update axes
+        fig.update_xaxes(
+            showgrid=False, showticklabels=False, showline=False, visible=False
+        )
+        fig.update_yaxes(
+            showgrid=False, showticklabels=False, showline=False, visible=False
+        )
+
+    else:
+        # raise error
+        raise ValueError("df must be a pd.Series or pd.DataFrame")
 
     return fig
