@@ -26,7 +26,7 @@ User can define a set of source neurons (blue/brown circles) which could be e.g.
 
 **Panel C** shows the activation function of each neuron: the (signed) weighted sum of the upstream neurons' activity (x) is passed into a Rectified Linear Unit (`ReLU()`), scaled by `excitability`, and then passed into `tanh()`, to keep the activation of each neuron between 0 and 1. 
 
-An example implementation can be found `here <https://colab.research.google.com/drive/1_beqiKPX8pC7---DWepKO8dEv1sJ2vA4#scrollTo=LAt4e4SPZDxK>`_, which uses the :py:func:`connectome_interpreter.activation_maximisation.MultilayeredNetwork`. 
+An example implementation can be found `here <https://colab.research.google.com/drive/1_beqiKPX8pC7---DWepKO8dEv1sJ2vA4#scrollTo=LAt4e4SPZDxK>`_, which uses the :py:func:`MultilayeredNetwork`. 
 
 Comparison with :doc:`"effective connectivity"<matmul>` 
 --------------------------------------------------------
@@ -45,4 +45,4 @@ Cons
 
 Plasticity 
 -----------
-The connectivity in the connectome between some neurons, e.g. ring neurons and compass neurons, is only a *scaffold* for, instead of a direct reflection of, functional connectivity (`Fisher et al. 2022 <https://www.nature.com/articles/s41586-022-05485-4>`_). We therefore implemented (third-party-dependent) change in weights ("plasticity"), based also on the activation similarity of two groups of neurons (:py:func:`connectome_interpreter.utils.change_model_weights`).
+The connectivity in the connectome between some neurons, e.g. ring neurons and compass neurons, is only a *scaffold* for, instead of a direct reflection of, functional connectivity (`Fisher et al. 2022 <https://www.nature.com/articles/s41586-022-05485-4>`_). We therefore implemented (third-party-dependent) change in weights ("plasticity"), based also on the activation similarity of two groups of neurons (:py:func:`change_model_weights`).

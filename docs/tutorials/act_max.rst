@@ -35,7 +35,7 @@ where :math:`\ell_{\text{act}}` is the activation loss, :math:`\ell_{\text{de-ac
 
 Getting fancy 
 --------------
-The `neurons_to_(de)activate` argument in :py:func:`connectome_interpreter.activation_maximisation.activation_maximisation` is a `dictionary` like `{layer_number_1: some_neuron_indices, layer_number_2: some_other_neuron_indices}`. This means you can mix and match neurons you wish to (de)activate at each timestep. Some interesting questions include: 
+Using `TargetActivation`, you can specify the target activation by batch, timepoint, neuron index, and activation value. This means you can mix and match neurons you wish to (de)activate at each timestep. Some interesting questions include: 
 
 - What's the *difference* in the optimal stimuli between two sets of neurons? 
 - What's the best stimuli pattern for a time-varying *pattern* of target neuron activation? 
