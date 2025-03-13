@@ -698,9 +698,7 @@ def group_paths(
     else:
         # sum across presynaptic neurons of the same type
         paths = (
-            paths.groupby(["layer", "pre_type", "post_type"])
-            .weight.sum()
-            .reset_index()
+            paths.groupby(["layer", "pre_type", "post_type"]).weight.sum().reset_index()
         )
     # divide by number of postsynaptic neurons of the same type
     paths["nneuron_post"] = paths.post_type.map(nneuron_per_type)

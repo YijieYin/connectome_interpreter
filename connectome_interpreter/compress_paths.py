@@ -35,9 +35,7 @@ def compress_paths(
     root: bool = False,
     chunkSize: int = 10000,
     dtype: torch.dtype = torch.float32,
-    device: torch.device = torch.device(
-        "cuda" if torch.cuda.is_available() else "cpu"
-    ),
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
     save_to_disk: bool = False,
     save_path: str = "./",
     save_prefix: str = "step_",
@@ -672,11 +670,7 @@ def contribution_by_path_lengths(
     # index is the path length
     # variable is postynaptic cell type
     # value is y axis
-    contri = (
-        pd.concat(rows, ignore_index=True)
-        .melt(ignore_index=False)
-        .reset_index()
-    )
+    contri = pd.concat(rows, ignore_index=True).melt(ignore_index=False).reset_index()
     if inidx_map is not None:
         contri.columns = ["path_length", "presynaptic_type", "value"]
     else:
@@ -1035,7 +1029,5 @@ def read_precomputed(
         first_n = len(files)
 
     for i in range(first_n):
-        steps_cpu.append(
-            sp.sparse.load_npz(f"{file_path}{prefix}/{prefix}_{i}.npz")
-        )
+        steps_cpu.append(sp.sparse.load_npz(f"{file_path}{prefix}/{prefix}_{i}.npz"))
     return steps_cpu
