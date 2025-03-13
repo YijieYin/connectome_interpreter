@@ -29,9 +29,7 @@ class TestCompressPaths(unittest.TestCase):
         data = np.random.random(size * 3)  # Create some random data
         rows = np.random.randint(0, size, size * 3)
         cols = np.random.randint(0, size, size * 3)
-        self.large_matrix = csr_matrix(
-            (data, (rows, cols)), shape=(size, size)
-        )
+        self.large_matrix = csr_matrix((data, (rows, cols)), shape=(size, size))
 
         # Zero matrix
         self.zero_matrix = csr_matrix((2, 2))
@@ -49,9 +47,7 @@ class TestCompressPaths(unittest.TestCase):
         result = compress_paths(self.simple_matrix, step_number=1)
 
         self.assertEqual(len(result), 1)
-        self.assertTrue(
-            np.allclose(result[0].toarray(), self.simple_matrix.toarray())
-        )
+        self.assertTrue(np.allclose(result[0].toarray(), self.simple_matrix.toarray()))
 
     def test_invalid_step_number_zero(self):
         """Test that step_number=0 raises ValueError."""
@@ -69,9 +65,7 @@ class TestCompressPaths(unittest.TestCase):
     def test_threshold_during_multiplication(self):
         """Test that threshold parameter works during multiplication."""
         print("testing threshold during multiplication")
-        result = compress_paths(
-            self.simple_matrix, step_number=2, threshold=0.4
-        )
+        result = compress_paths(self.simple_matrix, step_number=2, threshold=0.4)
 
         # Check that no values below threshold exist in intermediate steps
         self.assertTrue(np.all(result[1].data >= 0.4))
@@ -79,9 +73,7 @@ class TestCompressPaths(unittest.TestCase):
     def test_output_threshold(self):
         """Test that output_threshold parameter works."""
         print("testing output_threshold")
-        result = compress_paths(
-            self.simple_matrix, step_number=2, output_threshold=0.3
-        )
+        result = compress_paths(self.simple_matrix, step_number=2, output_threshold=0.3)
 
         # Check that no values below output_threshold exist in final result
         for matrix in result:
@@ -90,29 +82,21 @@ class TestCompressPaths(unittest.TestCase):
     def test_root_option(self):
         """Test that root option correctly takes nth root."""
         print("testing root option")
-        result_with_root = compress_paths(
-            self.simple_matrix, step_number=2, root=True
-        )
+        result_with_root = compress_paths(self.simple_matrix, step_number=2, root=True)
         print("results without root")
         result_without_root = compress_paths(
             self.simple_matrix, step_number=2, root=False
         )
 
         # Values in root version should be larger (as they're nth roots)
-        self.assertTrue(
-            np.all(result_with_root[1].data >= result_without_root[1].data)
-        )
+        self.assertTrue(np.all(result_with_root[1].data >= result_without_root[1].data))
 
     def test_chunk_size(self):
         """Test different chunk sizes produce same results."""
         print("testing chunk size")
-        result1 = compress_paths(
-            self.large_matrix, step_number=2, chunkSize=10
-        )
+        result1 = compress_paths(self.large_matrix, step_number=2, chunkSize=10)
         print("larger chunksize")
-        result2 = compress_paths(
-            self.large_matrix, step_number=2, chunkSize=20
-        )
+        result2 = compress_paths(self.large_matrix, step_number=2, chunkSize=20)
 
         # Results should be the same regardless of chunk size
         for m1, m2 in zip(result1, result2):
