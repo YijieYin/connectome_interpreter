@@ -231,9 +231,6 @@ def find_path_iteratively(
 def create_layered_positions(
     df: pd.DataFrame, priority_indices=None, sort_dict: dict | None = None
 ) -> dict:
-def create_layered_positions(
-    df: pd.DataFrame, priority_indices=None, sort_dict: dict | None = None
-) -> dict:
     """
     Creates a dictionary of positions for each neuron in the paths, so that
     the paths can be visualized in a layered manner. It assumes that `df`
