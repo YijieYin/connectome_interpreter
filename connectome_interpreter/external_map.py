@@ -163,24 +163,28 @@ def hex_heatmap(
             values represent data to plot.
         style : dict, default=None
             Dict containing styling formatting variables. Possible keys are:
+
                 - 'font_type': str, default='arial'
                 - 'markerlinecolor': str, default='rgba(0,0,0,0)' (transparent)
                 - 'linecolor': str, default='black'
                 - 'papercolor': str, default='rgba(255,255,255,255)' (white)
+
         sizing : dict, default=None
             Dict containing size formatting variables. Possible keys are:
+
                 - 'fig_width': int, default=260 (mm)
                 - 'fig_height': int, default=220 (mm)
                 - 'fig_margin': int, default=0 (mm)
                 - 'fsize_ticks_pt': int, default=20 (points)
                 - 'fsize_title_pt': int, default=20 (points)
                 - 'markersize': int, default=18
-                -'ticklen': int, default=15
-                -'tickwidth': int, default=5
-                -'axislinewidth': int, default=3
-                -'markerlinewidth': int, default=0.9
-                -'cbar_thickness': int, default=20
-                -'cbar_len': float, default=0.75
+                - 'ticklen': int, default=15
+                - 'tickwidth': int, default=5
+                - 'axislinewidth': int, default=3
+                - 'markerlinewidth': int, default=0.9
+                - 'cbar_thickness': int, default=20
+                - 'cbar_len': float, default=0.75
+
         dpi : int, default=72
             Dots per inch for the output figure. Standard is 72 for screen/SVG/PDF.
             Use higher values (e.g., 300) for print-quality output.
