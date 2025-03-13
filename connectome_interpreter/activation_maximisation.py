@@ -88,8 +88,8 @@ class MultilayeredNetwork(nn.Module):
 
         # if bigger than 1, convert to 1
         inputs = torch.where(
-            inputs > 1, torch.ones_like(inputs), inputs  # if so
-        )  # else
+            inputs > 1, torch.ones_like(inputs), inputs
+        )  # if so  # else
 
         # Initial activations for first time step
         # shape: (all_neurons, 1)
@@ -103,9 +103,7 @@ class MultilayeredNetwork(nn.Module):
         # so the output activation includes the external input as well
         if self.num_layers > 1:
             x = x.clone()
-            x[self.sensory_indices, :] = (
-                x[self.sensory_indices, :] + inputs[:, 1:2]
-            )
+            x[self.sensory_indices, :] = x[self.sensory_indices, :] + inputs[:, 1:2]
             # make sure the max is 1
             x = torch.where(x > 1, torch.ones_like(x), x)
 
@@ -124,8 +122,7 @@ class MultilayeredNetwork(nn.Module):
             if alayer != self.num_layers - 1:
                 x = x.clone()  # need to do this to avoid in-place operation
                 x[self.sensory_indices, :] = (
-                    x[self.sensory_indices, :]
-                    + inputs[:, alayer + 1 : alayer + 2]
+                    x[self.sensory_indices, :] + inputs[:, alayer + 1 : alayer + 2]
                 )
                 # make sure the max is 1
                 x = torch.where(x > 1, torch.ones_like(x), x)
@@ -163,9 +160,7 @@ class MultilayeredNetwork(nn.Module):
             self.activations = batch_forward(inputs)
             return self.activations
         else:
-            raise ValueError(
-                f"Expected 2D or 3D input tensor, got {inputs.dim()}D"
-            )
+            raise ValueError(f"Expected 2D or 3D input tensor, got {inputs.dim()}D")
 
 
 @dataclass
@@ -216,14 +211,10 @@ class TargetActivation:
         else:
             required_cols = ["layer", "neuron", "value"]
             if not all(col in self.targets.columns for col in required_cols):
-                raise ValueError(
-                    f"DataFrame must contain columns: {required_cols}"
-                )
+                raise ValueError(f"DataFrame must contain columns: {required_cols}")
 
             if "batch" in self.targets.columns:
-                self.batch_size = self.batch_size or (
-                    self.targets["batch"].max() + 1
-                )
+                self.batch_size = self.batch_size or (self.targets["batch"].max() + 1)
                 self.targets_df = self.targets.copy()
             else:
                 self.batch_size = self.batch_size or 1
@@ -385,9 +376,7 @@ def activation_maximisation(
 
         for layer, neuron_targets in batch_targets.items():
             for neuron_index, target_value in neuron_targets.items():
-                actual_value = activations[
-                    batch_idx, int(neuron_index), int(layer)
-                ]
+                actual_value = activations[batch_idx, int(neuron_index), int(layer)]
                 loss += (actual_value - target_value) ** 2
                 # this scales with the number of neurons
                 # so need to divide by the number of neurons
@@ -487,9 +476,7 @@ def activation_maximisation(
 
         # regularisation loss ----
         if custom_reg_functions and "in" in custom_reg_functions:
-            in_reg_loss = in_reg_lambda * custom_reg_functions["in"](
-                input_tensor
-            )
+            in_reg_loss = in_reg_lambda * custom_reg_functions["in"](input_tensor)
         else:
             in_reg_loss = in_reg_lambda * default_reg(input_tensor)
 
@@ -506,10 +493,7 @@ def activation_maximisation(
         if early_stopping and (iteration > n_runs):
             # when the difference between the max and the min is smaller than
             # stopping_threshold
-            if (
-                np.max(losses[-n_runs:]) - np.min(losses[-n_runs:])
-                < stopping_threshold
-            ):
+            if np.max(losses[-n_runs:]) - np.min(losses[-n_runs:]) < stopping_threshold:
                 break
 
         if wandb:
@@ -549,9 +533,7 @@ def activation_maximisation(
         f"Activation loss: {act_loss[-1]}, Input regularization loss: {in_reg_losses[-1]}, Output regularization loss: {out_reg_losses[-1]}"
     )
 
-    input_tensor = torch.where(
-        input_tensor >= model.threshold, input_tensor, 0
-    )
+    input_tensor = torch.where(input_tensor >= model.threshold, input_tensor, 0)
     # Limit the range between 0 and 1
     input_tensor = torch.tanh(input_tensor)
 
@@ -678,9 +660,7 @@ def activations_to_df(
         # get all pre and post indices across layers
         post_groups = {key for _, d in all_act.items() for key in d}
         pre_groups = set(sensory_act[0].keys()).union(post_groups)
-        pre_indices = [
-            idx for idx, key in inidx_mapping.items() if key in pre_groups
-        ]
+        pre_indices = [idx for idx, key in inidx_mapping.items() if key in pre_groups]
         post_indices = [
             idx for idx, key in outidx_mapping.items() if key in post_groups
         ]
@@ -733,9 +713,7 @@ def activations_to_df(
                 idx for idx, val in inidx_mapping.items() if val in pre.keys()
             ]
             post_indices = [
-                idx
-                for idx, val in outidx_mapping.items()
-                if val in post.keys()
+                idx for idx, val in outidx_mapping.items() if val in post.keys()
             ]
 
             conn = result_summary(
@@ -747,18 +725,12 @@ def activations_to_df(
                 display_output=False,
             )
             # turn to edgelist, and filter
-            connections = adjacency_df_to_el(
-                conn, threshold=connectivity_threshold
-            )
+            connections = adjacency_df_to_el(conn, threshold=connectivity_threshold)
 
         # so that direct connectivity is layer 1
         connections.loc[:, ["layer"]] = layer + 1
-        connections.loc[:, ["pre_activation"]] = connections.pre.map(
-            pre_stringkeys
-        )
-        connections.loc[:, ["post_activation"]] = connections.post.map(
-            post_stringkeys
-        )
+        connections.loc[:, ["pre_activation"]] = connections.pre.map(pre_stringkeys)
+        connections.loc[:, ["post_activation"]] = connections.post.map(post_stringkeys)
         if connections.shape[0] > 0:
             paths.append(connections)
         else:
@@ -967,8 +939,7 @@ def get_neuron_activation(
         # make sure length matches
         if activations.shape[0] != len(batch_names):
             raise ValueError(
-                "Length of batch_names has to be the same as "
-                "activations.shape[0]."
+                "Length of batch_names has to be the same as " "activations.shape[0]."
             )
 
         data = activations[:, neuron_indices, :].reshape(
@@ -978,9 +949,7 @@ def get_neuron_activation(
         # Create indices for the first two dimensions
         # in the end, we want batch * n_indices rows
         # that's activations.shape[0] * len(neuron_indices) rows
-        batch_names = [
-            o for o in batch_names for _ in range(len(neuron_indices))
-        ]
+        batch_names = [o for o in batch_names for _ in range(len(neuron_indices))]
         neuron_indices = neuron_indices * activations.shape[0]
 
         # Combine indices and data into a DataFrame
@@ -1053,9 +1022,7 @@ def get_activations_for_path(
 
         # pre activations
         prenodes = set(layer_path.pre)
-        pre_indices = [
-            idx for idx, group in idx_to_group.items() if group in prenodes
-        ]
+        pre_indices = [idx for idx, group in idx_to_group.items() if group in prenodes]
         if l == 1:
             # raise error if sensory_indices or model_in doesn't exist
             if sensory_indices is None or model_in is None:
@@ -1071,9 +1038,7 @@ def get_activations_for_path(
         pre_group_act = pd.DataFrame(
             {"idx": pre_indices, "activation": pre_activations}
         )
-        pre_group_act.loc[:, ["group"]] = [
-            idx_to_group[idx] for idx in pre_indices
-        ]
+        pre_group_act.loc[:, ["group"]] = [idx_to_group[idx] for idx in pre_indices]
         # mean per group
         pre_group_act = pre_group_act.groupby("group").activation.mean()
 
@@ -1086,18 +1051,12 @@ def get_activations_for_path(
         post_group_act = pd.DataFrame(
             {"idx": post_indices, "activation": post_activations}
         )
-        post_group_act.loc[:, ["group"]] = [
-            idx_to_group[idx] for idx in post_indices
-        ]
+        post_group_act.loc[:, ["group"]] = [idx_to_group[idx] for idx in post_indices]
         # mean per group
         post_group_act = post_group_act.groupby("group").activation.mean()
 
-        layer_path.loc[:, ["pre_activation"]] = layer_path.pre.map(
-            pre_group_act
-        )
-        layer_path.loc[:, ["post_activation"]] = layer_path.post.map(
-            post_group_act
-        )
+        layer_path.loc[:, ["pre_activation"]] = layer_path.pre.map(pre_group_act)
+        layer_path.loc[:, ["post_activation"]] = layer_path.post.map(post_group_act)
         out_df.append(layer_path)
 
     out = pd.concat(out_df)

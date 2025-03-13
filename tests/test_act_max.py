@@ -18,9 +18,7 @@ from connectome_interpreter.activation_maximisation import (
 
 class TestMultilayeredNetwork(unittest.TestCase):
     def setUp(self):
-        self.device = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.num_neurons = 10
         self.num_sensory = 4
         self.num_layers = 3
@@ -29,9 +27,7 @@ class TestMultilayeredNetwork(unittest.TestCase):
         self.all_weights = torch.rand(self.num_neurons, self.num_neurons).to(
             self.device
         )
-        self.all_weights = self.all_weights / self.all_weights.sum(
-            dim=1, keepdim=True
-        )
+        self.all_weights = self.all_weights / self.all_weights.sum(dim=1, keepdim=True)
         self.all_weights[:, :3] = -self.all_weights[:, :3]
         self.sensory_indices = list(range(self.num_sensory))
 
@@ -46,9 +42,7 @@ class TestMultilayeredNetwork(unittest.TestCase):
 
     def test_forward_pass_2d(self):
         print("testing forward pass 2d")
-        input_tensor = torch.rand(self.num_sensory, self.num_layers).to(
-            self.device
-        )
+        input_tensor = torch.rand(self.num_sensory, self.num_layers).to(self.device)
         output = self.model(input_tensor)
 
         expected_shape = (self.num_neurons, self.num_layers)
@@ -95,9 +89,7 @@ class TestTargetActivation(unittest.TestCase):
 
 class TestActivationMaximisation(unittest.TestCase):
     def setUp(self):
-        self.device = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = MultilayeredNetwork(
             torch.rand(10, 10).to(self.device),
             sensory_indices=[0, 1, 2, 3],
@@ -149,9 +141,7 @@ class TestActivationMaximisation(unittest.TestCase):
 
 class TestActivationsToDF(unittest.TestCase):
     def setUp(self):
-        self.weights = np.array(
-            [[0.5, 0.3, 0.0], [0.0, 0.4, 0.2], [0.0, 0.0, 0.6]]
-        )
+        self.weights = np.array([[0.5, 0.3, 0.0], [0.0, 0.4, 0.2], [0.0, 0.0, 0.6]])
         self.input_act = np.array([[0.8, 0.6], [0.7, 0.5]])
         self.output_act = np.array([[0.8, 0.6], [0.7, 0.5], [0.6, 0.4]])
         self.sensory_indices = [0, 1]
@@ -190,9 +180,7 @@ class TestActivationsToDF(unittest.TestCase):
 
 class TestActivationsToDFBatched(unittest.TestCase):
     def setUp(self):
-        self.weights = np.array(
-            [[0.5, 0.3, 0.0], [0.0, 0.4, 0.2], [0.0, 0.0, 0.6]]
-        )
+        self.weights = np.array([[0.5, 0.3, 0.0], [0.0, 0.4, 0.2], [0.0, 0.0, 0.6]])
         self.batched_input = np.array(
             [[[0.8, 0.6], [0.7, 0.5]], [[0.6, 0.4], [0.5, 0.3]]]
         )
@@ -220,15 +208,11 @@ class TestActivationsToDFBatched(unittest.TestCase):
 class TestGetNeuronActivation(unittest.TestCase):
 
     def test_2d_output_with_groups(self):
-        output = torch.tensor(
-            [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]]
-        )
+        output = torch.tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]])
         neuron_indices = [0, 2]
         idx_to_group = {0: "A", 2: "B"}
 
-        df = get_neuron_activation(
-            output, neuron_indices, idx_to_group=idx_to_group
-        )
+        df = get_neuron_activation(output, neuron_indices, idx_to_group=idx_to_group)
 
         expected_df = pd.DataFrame(
             {
@@ -241,9 +225,7 @@ class TestGetNeuronActivation(unittest.TestCase):
         pd.testing.assert_frame_equal(df, expected_df, check_dtype=False)
 
     def test_2d_output_without_groups(self):
-        output = torch.tensor(
-            [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]]
-        )
+        output = torch.tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]])
         neuron_indices = [1]
 
         df = get_neuron_activation(output, neuron_indices)
@@ -254,9 +236,7 @@ class TestGetNeuronActivation(unittest.TestCase):
         pd.testing.assert_frame_equal(df, expected_df, check_dtype=False)
 
     def test_3d_output_with_batch_names_and_groups(self):
-        output = torch.tensor(
-            [[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]]
-        )
+        output = torch.tensor([[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]])
         neuron_indices = [0]
         batch_names = ["batch_1", "batch_2"]
         idx_to_group = {0: "A"}
@@ -279,9 +259,7 @@ class TestGetNeuronActivation(unittest.TestCase):
         pd.testing.assert_frame_equal(df, expected_df, check_dtype=False)
 
     def test_3d_output_without_batch_names(self):
-        output = torch.tensor(
-            [[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]]
-        )
+        output = torch.tensor([[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]])
         neuron_indices = [1]
 
         df = get_neuron_activation(output, neuron_indices)
@@ -297,13 +275,9 @@ class TestGetNeuronActivation(unittest.TestCase):
         pd.testing.assert_frame_equal(df, expected_df, check_dtype=False)
 
     def test_batch_names_mismatch(self):
-        output = torch.tensor(
-            [[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]]
-        )
+        output = torch.tensor([[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]])
         neuron_indices = [1]
         batch_names = ["batch_1"]
 
         with self.assertRaises(ValueError):
-            get_neuron_activation(
-                output, neuron_indices, batch_names=batch_names
-            )
+            get_neuron_activation(output, neuron_indices, batch_names=batch_names)

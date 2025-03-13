@@ -39,9 +39,7 @@ def dynamic_representation(tensor, density_threshold=0.2):
         else:
             return tensor.to_dense()
     else:
-        print(
-            "Tensor is too large to convert to sparse. Returning dense tensor."
-        )
+        print("Tensor is too large to convert to sparse. Returning dense tensor.")
         return tensor
 
 
@@ -80,9 +78,7 @@ def torch_sparse_where(x, threshold):
         # by thresholding .coalesce() combines duplicates and removes zeros if
         # present
     else:
-        result = torch.where(
-            x >= threshold, x, torch.tensor(0.0, device=x.device)
-        )
+        result = torch.where(x >= threshold, x, torch.tensor(0.0, device=x.device))
 
     return result
 
@@ -316,8 +312,7 @@ def modify_coo_matrix(
     elif updates_df is not None:
         # check column names
         if not all(
-            col in updates_df.columns
-            for col in ["input_idx", "output_idx", "value"]
+            col in updates_df.columns for col in ["input_idx", "output_idx", "value"]
         ):
             raise ValueError(
                 "The DataFrame must contain columns ['input_idx', 'output_idx', 'value']."
@@ -673,9 +668,7 @@ def get_ngl_link(
             df_group_grp = df_group[df_group.group == grp]
             df_group_grp.drop("group", axis=1, inplace=True)
 
-            layer = ngl.SegmentationLayer(
-                source=source, name=str(ite) + " " + str(grp)
-            )
+            layer = ngl.SegmentationLayer(source=source, name=str(ite) + " " + str(grp))
 
             if normalise is not None:
                 if normalise == "layer":
@@ -711,9 +704,7 @@ def get_ngl_link(
 
             if include_postsynaptic_neuron:
                 layer["segments"].append(str(df_group_grp.columns[0]))
-                layer["segmentColors"][
-                    str(df_group_grp.columns[0])
-                ] = "#43A7FF"
+                layer["segmentColors"][str(df_group_grp.columns[0])] = "#43A7FF"
 
             scene.add_layers(layer)
 
@@ -773,9 +764,7 @@ def get_activations(
             "The length of 'global_indices' should match the number of rows in 'array'."
         )
 
-    global_to_local_map = {
-        global_idx: num for num, global_idx in enumerate(indices)
-    }
+    global_to_local_map = {global_idx: num for num, global_idx in enumerate(indices)}
 
     for col in range(array.shape[1]):
         # Determine which indices to use based on the 'sensory' flag
@@ -810,16 +799,13 @@ def get_activations(
 
         # get intersection of sorted_indices and local_indices, in the same
         # order as sorted_indices
-        selected_local = [
-            index for index in sorted_indices if index in local_indices
-        ]
+        selected_local = [index for index in sorted_indices if index in local_indices]
         selected_global = indices[selected_local]
 
         # Build the result dictionary
         if idx_map is None:
             result[col] = {
-                idx: column_values[global_to_local_map[idx]]
-                for idx in selected_global
+                idx: column_values[global_to_local_map[idx]] for idx in selected_global
             }
         else:
             # initialise a dict of empty lists
@@ -832,9 +818,7 @@ def get_activations(
             # grouped indices by idx_map
             new_indices = result[col].keys()
             # calculate the average
-            result[col] = {
-                idx: np.mean(result[col][idx]) for idx in new_indices
-            }
+            result[col] = {idx: np.mean(result[col][idx]) for idx in new_indices}
 
     return result
 
@@ -941,9 +925,7 @@ def plot_layered_paths(
     from .path_finding import create_layered_positions
 
     if sort_by_activation:
-        node_activation_dict = dict(
-            zip(path_df.post_layer, path_df.post_activation)
-        )
+        node_activation_dict = dict(zip(path_df.post_layer, path_df.post_activation))
         node_activation_dict.update(
             dict(zip(path_df.pre_layer, path_df.pre_activation))
         )
@@ -954,9 +936,7 @@ def plot_layered_paths(
         positions = create_layered_positions(path_df, priority_indices)
 
     # Node colors based on activation values
-    if ("pre_activation" in path_df.columns) & (
-        "post_activation" in path_df.columns
-    ):
+    if ("pre_activation" in path_df.columns) & ("post_activation" in path_df.columns):
         activations = np.concatenate(
             [
                 path_df["pre_activation"].values,
@@ -997,9 +977,7 @@ def plot_layered_paths(
 
     # Plot the graph
     _, ax = plt.subplots(figsize=figsize)
-    if ("pre_activation" in path_df.columns) & (
-        "post_activation" in path_df.columns
-    ):
+    if ("pre_activation" in path_df.columns) & ("post_activation" in path_df.columns):
         nx.draw(
             G,
             pos=positions,
@@ -1104,9 +1082,7 @@ def plot_layered_paths(
 #                       ] = weights_subset
 
 
-def change_model_weights(
-    model, df, mode, coefficient=0.1, offset=0, normalise=True
-):
+def change_model_weights(model, df, mode, coefficient=0.1, offset=0, normalise=True):
     """
     Change the weights of the model based on the provided DataFrame.
     The DataFrame should contain columns 'pre' and 'post', and optionally
@@ -1206,9 +1182,7 @@ def change_model_weights(
         raise ValueError("The mode should be either 'ltp' or 'ltd'.")
 
     # add the sign back
-    weights_subset = torch.sign(weights_subset) * torch.clamp(
-        weights_subset_abs, 0, 1
-    )
+    weights_subset = torch.sign(weights_subset) * torch.clamp(weights_subset_abs, 0, 1)
     # finally modify in the big weights matrix.
     model.all_weights[df.post, df.pre] = weights_subset
 
@@ -1292,9 +1266,7 @@ def sc_connectivity_summary(df, inidx_map=None, outidx_map=None):
     )
     # put together, and make wide
     merged_df = pd.merge(indices, values, on=["pre_grp", "post"])
-    merged_df = merged_df.pivot(
-        index="index_value", columns="post", values="value"
-    )
+    merged_df = merged_df.pivot(index="index_value", columns="post", values="value")
     merged_df.fillna(0, inplace=True)
 
     return merged_df
@@ -1313,8 +1285,7 @@ def check_consecutive_layers(df):
 
     all_layers = sorted(df["layer"].unique())
     consecutive_layers = all(
-        all_layers[i] + 1 == all_layers[i + 1]
-        for i in range(len(all_layers) - 1)
+        all_layers[i] + 1 == all_layers[i + 1] for i in range(len(all_layers) - 1)
     )
     return consecutive_layers
 
@@ -1340,15 +1311,11 @@ def group_edge_by(edgelist, group_dict):
     # e.g. if group is cell type: the input proportion from type A to an
     # average neuron in type B
     edgelist = (
-        edgelist.groupby(["group_pre", "group_post", "post"])  # sum across pre
-        .weight.sum()
-        .reset_index()
-    )
+        edgelist.groupby(["group_pre", "group_post", "post"]).weight.sum().reset_index()
+    )  # sum across pre
     edgelist = (
-        edgelist.groupby(["group_pre", "group_post"])  # average across post
-        .weight.mean()
-        .reset_index()
-    )
+        edgelist.groupby(["group_pre", "group_post"]).weight.mean().reset_index()
+    )  # average across post
     edgelist.columns = ["pre", "post", "weight"]
 
     return edgelist
