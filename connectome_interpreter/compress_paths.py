@@ -386,7 +386,7 @@ def add_first_n_matrices(matrices, n):
 
     Raises:
         ValueError: If the list of matrices is empty or if n is larger than
-        the number of matrices available in the list.
+            the number of matrices available in the list.
 
     Example:
         >>> from scipy.sparse import csr_matrix
