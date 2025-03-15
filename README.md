@@ -9,7 +9,7 @@ Documentation [here](https://connectome-interpreter.readthedocs.io/en/latest/) (
 
 # Example notebooks 
 ## Full Adult Fly Brain 
-Data obtained from [Dorkenwald et al. 2023](https://www.biorxiv.org/content/10.1101/2023.06.27.546656v2) and [Schlegel et al. 2023](https://www.biorxiv.org/content/10.1101/2023.06.27.546055v2). To visualise the neurons, you can use this url: [https://tinyurl.com/flywire783](https://tinyurl.com/flywire783). By using the connectivity information, you agree to follow the [FlyWire citation guidelines and principles](https://codex.flywire.ai/api/download).
+Data obtained from [Dorkenwald et al. 2024](https://www.nature.com/articles/s41586-024-07558-y), [Schlegel et al. 2024](https://www.nature.com/articles/s41586-024-07686-5), and [Matsliah et al. 2024](https://www.nature.com/articles/s41586-024-07981-1). To visualise the neurons, you can use this url: [https://tinyurl.com/flywire783](https://tinyurl.com/flywire783). By using the connectivity information, you agree to follow the [FlyWire citation guidelines and principles](https://codex.flywire.ai/api/download).
   - [central brain, single-neuron level](https://colab.research.google.com/drive/1_beqiKPX8pC7---DWepKO8dEv1sJ2vA4?usp=sharing) (recommended. Shows a variety of capabilities)
   - [central brain, cell type level](https://colab.research.google.com/drive/1ECUagwN-r2rnKyfcYgtR1oG8Lox8m8BW?usp=sharing)
   - [right hemisphere optic lobe, single-neuron level](https://colab.research.google.com/drive/1SHMZ3DUTeakdh0znMmXu5g2qffx6rFGV?usp=sharing)
@@ -30,5 +30,5 @@ Using `connectome_interpreter`, we compare the published connectomes against pub
 - [Olsen et al. 2010](https://colab.research.google.com/drive/1dA5GTHg25S3Mc9CBtexplfjk1z1kM04V?usp=sharing): Divisive normalization in olfactory population codes ([paper](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2866644/))
 
 # Notes 
-- Pre-processed connectomics data (and scripts used for pre-processing) are [here](https://anonymous.4open.science/r/interpret_connectome-68F4/README.md), in `scipy.sparse.matrix` (`.npz`) format for the adjacency matrices; and in `.csv` for the metadata.
+- Pre-processed connectomics data (and scripts used for pre-processing) are [here](https://github.com/YijieYin/connectome_data_prep/tree/main), in `scipy.sparse.matrix` (`.npz`) format for the adjacency matrices; and in `.csv` for the metadata.
 - For dataset requests / feature requests / feedback, please make an issue or email me at `yy432`at`cam.ac.uk` :). 
