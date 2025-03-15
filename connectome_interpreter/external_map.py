@@ -183,7 +183,7 @@ def hex_heatmap(
                 - 'fsize_ticks_pt': int, default=20 (points)
                 - 'fsize_title_pt': int, default=20 (points)
                 - 'markersize': int, default=18 if dataset='mcns_right', 20 if
-                dataset='fafb_right'
+                    dataset='fafb_right'
                 - 'ticklen': int, default=15
                 - 'tickwidth': int, default=5
                 - 'axislinewidth': int, default=3
@@ -201,11 +201,12 @@ def hex_heatmap(
             The dataset to use for the hexagon locations. Options are:
 
                 - 'mcns_right': columnar coordinates of individual cells from columnar
-                cell types: L1, L2, L3, L5, Mi1, Mi4, Mi9, C2, C3, Tm1, Tm2, Tm4, Tm9,
-                Tm20, T1, within the medulla of the right optic lobe, from Nern et al.
-                2024.
+                    cell types: L1, L2, L3, L5, Mi1, Mi4, Mi9, C2, C3, Tm1, Tm2, Tm4,
+                    Tm9, Tm20, T1, within the medulla of the right optic lobe, from
+                    Nern et al. 2024.
                 - 'fafb_right': columnar coordinates of individual cells from columnar
-                cell types, in the right optic lobe of FAFB, from Matsliah et al. 2024.
+                    cell types, in the right optic lobe of FAFB, from Matsliah et al.
+                    2024.
 
     Returns:
         fig : go.Figure
