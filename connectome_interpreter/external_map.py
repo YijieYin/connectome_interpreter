@@ -13,6 +13,7 @@ DATA_SOURCES: dict[str, str] = {
     "Dweck_larva_chem": "data/Dweck2018/larva_chem2or.csv",
     "Dweck_larva_fruit": "data/Dweck2018/larva_fruit2or.csv",
     "Nern2024": "data/Nern2024/ME-columnar-cells-hex-location.csv",
+    "Matsliah2024": "data/Matsliah2024/fafb_right_vis_cols.csv",
 }
 
 
@@ -46,7 +47,11 @@ def load_dataset(dataset: str) -> pd.DataFrame:
                 between 0 and 1.
             - 'Nern2024': columnar coordinates of individual cells from a
                 collection of columnar cell types within the medulla of the
-                right optic lobe, from Nern et al. 2024.
+                right optic lobe, from Nern et al. 2024
+                (https://www.biorxiv.org/content/10.1101/2024.04.16.589741v2).
+            - 'Matsliah2024': columnar coordinates of individual cells from a collection
+                of columnar cell types in the right optic lobe from FAFB, from Matsliah
+                et al. 2024 (https://www.nature.com/articles/s41586-024-07981-1).
 
     Returns:
         pd.DataFrame: The dataset as a pandas DataFrame. For the adult, the
@@ -151,6 +156,7 @@ def hex_heatmap(
     sizing: dict | None = None,
     dpi: int = 72,
     custom_colorscale: list | None = None,
+    dataset: str | None = "mcns_right",
 ) -> go.Figure:
     """
     Generate a hexagonal heat map plot of the data. The index of the data
@@ -176,7 +182,8 @@ def hex_heatmap(
                 - 'fig_margin': int, default=0 (mm)
                 - 'fsize_ticks_pt': int, default=20 (points)
                 - 'fsize_title_pt': int, default=20 (points)
-                - 'markersize': int, default=18
+                - 'markersize': int, default=18 if dataset='mcns_right', 20 if
+                dataset='fafb_right'
                 - 'ticklen': int, default=15
                 - 'tickwidth': int, default=5
                 - 'axislinewidth': int, default=3
@@ -190,6 +197,15 @@ def hex_heatmap(
         custom_colorscale : list, default=None
             Custom colorscale for the heatmap. If None, defaults to white-to-blue
             colorscale [[0, "rgb(255, 255, 255)"], [1, "rgb(0, 20, 200)"]].
+        dataset : str, default='mcns_right'
+            The dataset to use for the hexagon locations. Options are:
+
+                - 'mcns_right': columnar coordinates of individual cells from columnar
+                cell types: L1, L2, L3, L5, Mi1, Mi4, Mi9, C2, C3, Tm1, Tm2, Tm4, Tm9,
+                Tm20, T1, within the medulla of the right optic lobe, from Nern et al.
+                2024.
+                - 'fafb_right': columnar coordinates of individual cells from columnar
+                cell types, in the right optic lobe of FAFB, from Matsliah et al. 2024.
 
     Returns:
         fig : go.Figure
@@ -273,13 +289,18 @@ def hex_heatmap(
         "papercolor": "rgba(255,255,255,255)",
     }
 
+    if dataset == "mcns_right":
+        markersize = 18
+    elif dataset == "fafb_right":
+        markersize = 20
+
     default_sizing = {
         "fig_width": 260,  # units = mm
         "fig_height": 220,  # units = mm
         "fig_margin": 0,
         "fsize_ticks_pt": 20,
         "fsize_title_pt": 20,
-        "markersize": 18,
+        "markersize": markersize,
         "ticklen": 15,
         "tickwidth": 5,
         "axislinewidth": 3,
@@ -316,14 +337,26 @@ def hex_heatmap(
     fsize_title_px = sizing["fsize_title_pt"] * (1 / POINTS_PER_INCH) * pixelsperinch
 
     # Get global min and max for consistent color scale
-    global_min = df.values.min()
+    # minimum of 0 and df.values.min()
+    global_min = min(0, df.values.min())
     global_max = df.values.max()
 
     # Symbol number to choose to plot hexagons
     symbol_number = 15
 
     # load all hex coordinates
-    background_hex = load_dataset("Nern2024")
+    if dataset == "mcns_right":
+        background_hex = load_dataset("Nern2024")
+    elif dataset == "fafb_right":
+        background_hex = load_dataset("Matsliah2024")
+    else:
+        # raise error
+        raise ValueError(
+            "Dataset not recognized. Currently available datasets are 'mcns_right', "
+            "'fafb_right'."
+        )
+    # only get the unique combination of 'x' and 'y' columns
+    background_hex = background_hex.drop_duplicates(subset=["x", "y"])
 
     # initiate plot
     fig = go.Figure()
@@ -343,7 +376,7 @@ def hex_heatmap(
     )
 
     # Convert index values (formatted as '-12,34') into separate x and y coordinates
-    coords = [tuple(map(int, idx.split(","))) for idx in df.index]
+    coords = [tuple(map(float, idx.split(","))) for idx in df.index]
     x_vals, y_vals = zip(*coords)  # Separate into x and y lists
 
     if isinstance(df, pd.Series) or len(df.columns) == 1:
