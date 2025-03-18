@@ -68,7 +68,7 @@ class MultilayeredNetwork(nn.Module):
         if isinstance(all_weights, sparse.spmatrix):
             all_weights = scipy_sparse_to_pytorch(all_weights)
         # check if all_weights is sparse
-        assert torch.sparse.is_sparse(all_weights), "all_weights must be sparse"
+        assert all_weights.is_sparse, "all_weights must be sparse"
 
         self.all_weights = all_weights
         self.sensory_indices = torch.tensor(
