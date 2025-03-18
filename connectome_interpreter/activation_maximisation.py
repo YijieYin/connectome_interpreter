@@ -7,9 +7,16 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from tqdm import tqdm
+from scipy import sparse
 
 from .compress_paths import result_summary
-from .utils import adjacency_df_to_el, arrayable, get_activations, to_nparray
+from .utils import (
+    adjacency_df_to_el,
+    arrayable,
+    get_activations,
+    to_nparray,
+    scipy_sparse_to_pytorch,
+)
 
 
 class MultilayeredNetwork(nn.Module):
@@ -34,8 +41,8 @@ class MultilayeredNetwork(nn.Module):
             neurons (rows) across time steps (columns).
 
     Args:
-        all_weights (torch.Tensor): The connectome. Input neurons are in the
-        columns.
+        all_weights (Union[torch.Tensor, scipy.sparse.spmatrix]): The connectome. Input
+            neurons are in the columns.
         sensory_indices (list[int]): A list indicating the indices of sensory
             neurons within the network.
         num_layers (int, optional): The number of temporal layers to unroll the
@@ -46,18 +53,27 @@ class MultilayeredNetwork(nn.Module):
 
     def __init__(
         self,
-        all_weights,
-        sensory_indices,
-        num_layers=2,
-        threshold=0.01,
-        tanh_steepness=5,
+        all_weights: Union[torch.Tensor, sparse.spmatrix],
+        sensory_indices: arrayable,
+        num_layers: int = 2,
+        threshold: float = 0.01,
+        tanh_steepness: float = 5,
+        device: Optional[torch.device] = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        ),
     ):
         super(MultilayeredNetwork, self).__init__()
 
-        # num_neurons x num_neurons = e.g. 18k * 18k, ~1.2GB
-        self.all_weights = all_weights  # this does not require grad
+        # Convert all_weights to a sparse tensor if it is a scipy sparse matrix
+        if isinstance(all_weights, sparse.spmatrix):
+            all_weights = scipy_sparse_to_pytorch(all_weights)
+        # check if all_weights is sparse
+        assert torch.sparse.is_sparse(all_weights), "all_weights must be sparse"
+
+        self.all_weights = all_weights
         self.sensory_indices = torch.tensor(
-            sensory_indices
+            sensory_indices,
+            device=device,
         )  # shape: vector of sensory indices. These are the ones we manipulate
         self.num_layers = num_layers
         self.threshold = threshold
@@ -79,6 +95,9 @@ class MultilayeredNetwork(nn.Module):
         # Clear activations list at each forward pass
         acts = []
 
+        # Make sure sensory_indices is on the same device as inputs
+        sensory_indices = self.sensory_indices.to(inputs.device)
+
         # thresholded relu
         inputs = torch.where(
             inputs >= self.threshold,
@@ -87,13 +106,20 @@ class MultilayeredNetwork(nn.Module):
         )
 
         # if bigger than 1, convert to 1
-        inputs = torch.where(
-            inputs > 1, torch.ones_like(inputs), inputs
-        )  # if so  # else
+        inputs = torch.where(inputs > 1, torch.ones_like(inputs), inputs)
 
-        # Initial activations for first time step
+        # For the first timestep:
+        # Create a full-sized vector but only fill in the sensory indices
+        full_input = torch.zeros(
+            self.all_weights.size(1), 1, device=inputs.device, requires_grad=True
+        )
+        # Use index_add_ which is designed to work better with vmap
+        full_input = full_input.index_add(0, sensory_indices, inputs[:, 0:1])
+
+        # Now use standard sparse matrix multiplication
         # shape: (all_neurons, 1)
-        x = self.all_weights[:, self.sensory_indices] @ inputs[:, 0:1]
+        x = torch.sparse.mm(self.all_weights, full_input)
+
         # thresholded relu
         x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
         # Limit the range between 0 and 1
@@ -113,7 +139,7 @@ class MultilayeredNetwork(nn.Module):
         for alayer in range(1, self.num_layers):
             # shape: (all_neurons, all_neurons) * (all_neurons, 1) =
             # (all_neurons, 1)
-            x = self.all_weights @ x
+            x = torch.sparse.mm(self.all_weights, x)
             # thresholded relu and tanh
             x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
             x = torch.tanh(self.tanh_steepness * x)

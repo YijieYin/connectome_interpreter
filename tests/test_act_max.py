@@ -24,11 +24,11 @@ class TestMultilayeredNetwork(unittest.TestCase):
         self.num_layers = 3
         self.batch_size = 2
 
-        self.all_weights = torch.rand(self.num_neurons, self.num_neurons).to(
-            self.device
-        )
-        self.all_weights = self.all_weights / self.all_weights.sum(dim=1, keepdim=True)
-        self.all_weights[:, :3] = -self.all_weights[:, :3]
+        # Create a dense matrix and convert it to a scipy sparse matrix
+        dense_weights = np.random.rand(self.num_neurons, self.num_neurons)
+        dense_weights = dense_weights / dense_weights.sum(axis=1, keepdims=True)
+        dense_weights[:, :3] = -dense_weights[:, :3]
+        self.all_weights = csr_matrix(dense_weights)  # Convert to scipy sparse matrix
         self.sensory_indices = list(range(self.num_sensory))
 
         self.model = MultilayeredNetwork(
@@ -36,9 +36,26 @@ class TestMultilayeredNetwork(unittest.TestCase):
         ).to(self.device)
 
     def test_initialization(self):
+        # self.assertEqual(self.model.num_layers, self.num_layers)
+        # self.assertEqual(len(self.model.sensory_indices), self.num_sensory)
+        # self.assertTrue(
+        #     torch.equal(
+        #         self.model.all_weights.to_dense(),
+        #         torch.tensor(self.all_weights.toarray(), device=self.device),
+        #     )
+        # )
         self.assertEqual(self.model.num_layers, self.num_layers)
         self.assertEqual(len(self.model.sensory_indices), self.num_sensory)
-        self.assertTrue(torch.equal(self.model.all_weights, self.all_weights))
+
+        # Convert both to numpy arrays for comparison
+        model_weights = self.model.all_weights.to_dense().cpu().numpy()
+        expected_weights = self.all_weights.toarray()
+
+        # Use numpy's allclose for a more tolerant comparison
+        self.assertTrue(
+            np.allclose(model_weights, expected_weights, rtol=1e-5, atol=1e-5),
+            "Weights matrices are not equal within tolerance",
+        )
 
     def test_forward_pass_2d(self):
         print("testing forward pass 2d")
@@ -90,8 +107,15 @@ class TestTargetActivation(unittest.TestCase):
 class TestActivationMaximisation(unittest.TestCase):
     def setUp(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Create a dense matrix and convert it to a scipy sparse matrix
+        dense_weights = np.random.rand(10, 10)
+        dense_weights = dense_weights / dense_weights.sum(axis=1, keepdims=True)
+        dense_weights[:, :3] = -dense_weights[:, :3]
+        self.all_weights = csr_matrix(dense_weights)  # Convert to scipy sparse matrix
+
         self.model = MultilayeredNetwork(
-            torch.rand(10, 10).to(self.device),
+            self.all_weights,
             sensory_indices=[0, 1, 2, 3],
             num_layers=3,
         ).to(self.device)
