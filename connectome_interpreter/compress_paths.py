@@ -14,7 +14,7 @@ import scipy as sp
 import seaborn as sns
 import torch
 from IPython.display import display
-from scipy.sparse import csr_matrix, issparse
+from scipy.sparse import csr_matrix, issparse, csc_matrix
 from tqdm import tqdm
 
 from .utils import (
