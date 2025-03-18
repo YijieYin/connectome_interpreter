@@ -14,7 +14,7 @@ import scipy as sp
 import seaborn as sns
 import torch
 from IPython.display import display
-from scipy.sparse import csr_matrix, issparse, csc_matrix
+from scipy.sparse import csr_matrix, issparse
 from tqdm import tqdm
 
 from .utils import (
@@ -24,10 +24,175 @@ from .utils import (
     to_nparray,
     torch_sparse_where,
     arrayable,
+    scipy_sparse_to_pytorch,
 )
 
 
 def compress_paths(
+    A,
+    step_number: int,
+    threshold: float = 0,
+    output_threshold: float = 1e-4,
+    root: bool = False,
+    chunkSize=5000,
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    save_to_disk: bool = False,
+    save_path: str = "./",
+    save_prefix: str = "step_",
+):
+    """
+    Computes A^0 to A^n by chunking the computation to save memory.
+    Results are thresholded and returned as a list of sparse scipy matrices (or saved to
+    save_path).
+
+    Args:
+        A (scipy.sparse.matrix): The connectivity matrix as a scipy
+            sparse matrix.
+        step_number (int): Power to raise A to.
+        threshold (float): Threshold to apply to the matrix after each multiplication.
+            If 0, no thresholding is applied.
+        output_threshold (float): Threshold to apply to the output, but not during
+            matrix multiplication.
+        root (bool): If True, take the n-th root of the result in output.
+        chunkSize (int): Size of the chunks to process at a time. This determines
+            the memory usage (on GPU if available). e.g. it might need A + (A.shape[0] *
+            chunkSize) * float32 / 8 btes.
+        device (torch.device): Device to use for computation. Uses GPU if available.
+        save_to_disk (bool): If True, save the results to disk, and return an empty list.
+        save_path (str): Path to save the results.
+        save_prefix (str): Prefix to use for the saved files.
+
+    Returns:
+        List[scipy.sparse.csr_matrix]: List of sparse matrices representing A^0 to A^n.
+    """
+    assert A.shape[0] == A.shape[1], "Matrix A must be square"
+    assert step_number > 0, "Power n must be positive"
+
+    # turn A into a torch sparse tensor
+    A = scipy_sparse_to_pytorch(A).to(device)
+
+    matrix_size = A.shape[0]
+    num_chunks = (matrix_size + chunkSize - 1) // chunkSize  # Ceiling division
+
+    # Initialize empty dictionaries of empty lists to collect COO data
+    rows = {idx: [] for idx in range(step_number)}
+    cols = {idx: [] for idx in range(step_number)}
+    data = {idx: [] for idx in range(step_number)}
+
+    # Process each chunk
+    for chunk_idx in tqdm(range(num_chunks)):
+        # Define the range for this chunk
+        start_col = chunk_idx * chunkSize
+        end_col = min((chunk_idx + 1) * chunkSize, matrix_size)
+        current_chunk_size = end_col - start_col
+
+        for power in range(step_number):
+            if power == 0:
+                # For A^1, we can simply extract the relevant columns from A
+                # Extract the relevant columns using COO format
+                indices = A._indices()
+                values = A._values()
+
+                # Filter to only include the columns we care about
+                col_mask = (indices[1, :] >= start_col) & (indices[1, :] < end_col)
+                result_indices = indices[:, col_mask].clone()
+                result_values = values[col_mask].clone()
+
+                # Adjust column indices to be relative to start_col
+                result_indices[1, :] -= start_col
+
+                # Create the sparse tensor for this column chunk
+                result = torch.sparse_coo_tensor(
+                    result_indices,
+                    result_values,
+                    (matrix_size, current_chunk_size),
+                    device=device,
+                ).to_dense()
+
+                if threshold > 0:
+                    result = torch.where(
+                        torch.abs(result) < threshold,
+                        torch.tensor(0.0).to(device),
+                        result,
+                    )
+            else:
+                result = torch.sparse.mm(A, result)
+
+                if threshold > 0:
+                    result = torch.where(
+                        torch.abs(result) < threshold,
+                        torch.tensor(0.0).to(device),
+                        result,
+                    )
+
+                # Force garbage collection after each multiplication
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            # Apply threshold and collect non-zero entries
+            if root:
+                # take power-root of the result
+                result_root = torch.sign(result) * torch.abs(result) ** (
+                    1 / (power + 1)
+                )
+
+            mask = torch.abs(result) >= output_threshold
+            chunk_rows, chunk_cols = torch.nonzero(mask, as_tuple=True)
+            if root:
+                chunk_data = result_root[chunk_rows, chunk_cols].cpu().numpy()
+            else:
+                chunk_data = result[chunk_rows, chunk_cols].cpu().numpy()
+
+            # Adjust column indices to global coordinates
+            chunk_cols = chunk_cols.cpu().numpy() + start_col
+            chunk_rows = chunk_rows.cpu().numpy()
+
+            # Append to our COO arrays
+            rows[power].append(chunk_rows)
+            cols[power].append(chunk_cols)
+            data[power].append(chunk_data)
+
+        # Clear memory
+        del result, mask, chunk_rows, chunk_cols, chunk_data
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # Combine all data
+    print("Combining data from all chunks")
+    for idx in tqdm(range(step_number)):
+        if rows[idx]:  # Check if we collected any data
+            rows[idx] = np.concatenate(rows[idx])
+            cols[idx] = np.concatenate(cols[idx])
+            data[idx] = np.concatenate(data[idx])
+        else:
+            rows[idx] = np.array([])
+            cols[idx] = np.array([])
+            data[idx] = np.array([])
+
+    # Create sparse scipy matrix from collected data
+    sparse_results = []
+    for idx in range(step_number):
+        sparse_result = sp.sparse.coo_matrix(
+            (data[idx], (rows[idx], cols[idx])), shape=(matrix_size, matrix_size)
+        )
+
+        # Convert to CSC format for more efficient storage and operations
+        sparse_result = sparse_result.tocsc()
+        if save_to_disk:
+            sp.sparse.save_npz(f"{save_path}{save_prefix}{idx}.npz", sparse_result)
+        else:
+            sparse_results.append(sparse_result)
+
+        print(
+            f"Final matrix {idx} has {sparse_result.nnz} non-zero elements ({sparse_result.nnz/(matrix_size**2)*100:.6f}% of full matrix)"
+        )
+
+    return sparse_results
+
+
+def compress_paths_dense_chunked(
     inprop: csr_matrix,
     step_number: int,
     threshold: float = 0,
@@ -45,14 +210,14 @@ def compress_paths(
     a certain `threshold` to optimize memory usage and computation speed.
 
     The function is optimized to run on GPU if available. It needs >=
-    size_of_inprop * 3 amount of GPU memory, for matrix multiplication, and
+    size_of_inprop.to_dense() * 3 amount of GPU memory, for matrix multiplication, and
     thresholding.
 
-    This function multiplies the connectivity matrix (input in rows; output in
-    columns) `inprop` with itself `step_number` times, with each step's result
-    being thresholded to zero out elements below a given threshold. The
-    function stores each step's result in a list, where each result is further
-    processed to drop values below the `output_threshold` to save memory.
+    This function multiplies the connectivity matrix (input in rows; output in columns)
+    `inprop` with itself `step_number` times, with each step's result being thresholded
+    to zero out elements below a given threshold. The function stores each step's result
+    in a list, where each result is further processed to drop values below the
+    `output_threshold` to save memory.
 
     Args:
         inprop (scipy.sparse.matrix): The connectivity matrix as a scipy

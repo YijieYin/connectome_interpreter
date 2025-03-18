@@ -1630,3 +1630,62 @@ def plot_output_grid(
             plot_heatmap, index=slider, xlab=xlab, ylab=ylab, title=title
         )
     )
+
+
+def pytorch_sparse_to_scipy(sparse_tensor, scipy_format="csr"):
+    """
+    Convert a PyTorch sparse tensor to a SciPy sparse matrix.
+
+    Args:
+        sparse_tensor (torch.sparse.Tensor): PyTorch sparse tensor in COO format
+        scipy_format (str): Desired format for the SciPy sparse matrix. Must be one of
+            'csr', 'csc', 'coo'.
+
+    Returns:
+        scipy.sparse.csr_matrix: SciPy CSR sparse matrix
+    """
+    assert sparse_tensor.is_sparse, "Input tensor must be sparse"
+
+    # Extract indices and values
+    indices = sparse_tensor._indices().cpu().numpy()
+    values = sparse_tensor._values().cpu().numpy()
+    shape = sparse_tensor.shape
+
+    # Create scipy COO matrix
+    coo = coo_matrix((values, (indices[0], indices[1])), shape=shape)
+
+    # Convert to desired format
+    if scipy_format == "csr":
+        return coo.tocsr()
+    elif scipy_format == "csc":
+        return coo.tocsc()
+    elif scipy_format == "coo":
+        return coo
+    else:
+        raise ValueError("Invalid scipy_format. Must be one of 'csr', 'csc', 'coo'.")
+
+
+def scipy_sparse_to_pytorch(
+    scipy_sparse,
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+):
+    """
+    Convert a SciPy sparse matrix to a PyTorch sparse tensor.
+
+    Args:
+        scipy_sparse (scipy.sparse.spmatrix): SciPy sparse matrix
+        device (torch.device): Device to create the PyTorch sparse tensor on. Defaults
+            to GPU if available, otherwise CPU.
+
+    Returns:
+        torch.sparse.Tensor: PyTorch sparse tensor
+    """
+    # Convert to COO format if not already
+    coo = scipy_sparse.tocoo()
+
+    # Create indices and values
+    indices = torch.LongTensor(np.vstack((coo.row, coo.col))).to(device)
+    values = torch.FloatTensor(coo.data).to(device)
+    shape = torch.Size(coo.shape)
+
+    return torch.sparse_coo_tensor(indices, values, shape, device=device)

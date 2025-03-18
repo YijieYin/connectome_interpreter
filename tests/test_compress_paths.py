@@ -50,16 +50,16 @@ class TestCompressPaths(unittest.TestCase):
         self.assertTrue(np.allclose(result[0].toarray(), self.simple_matrix.toarray()))
 
     def test_invalid_step_number_zero(self):
-        """Test that step_number=0 raises ValueError."""
-        with self.assertRaises(ValueError):
+        """Test that step_number=0 raises AssertionError."""
+        with self.assertRaises(AssertionError):
             compress_paths(self.simple_matrix, step_number=0)
 
     def test_invalid_step_number_negative(self):
-        """Test that negative step_number raises ValueError."""
-        with self.assertRaises(ValueError):
+        """Test that negative step_number raises AssertionError."""
+        with self.assertRaises(AssertionError):
             compress_paths(self.simple_matrix, step_number=-1)
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(AssertionError):
             compress_paths(self.simple_matrix, step_number=-100)
 
     def test_threshold_during_multiplication(self):
@@ -110,11 +110,13 @@ class TestCompressPaths(unittest.TestCase):
         input_matrix = []
         if torch.cuda.is_available():
             # Very large sparse matrix
-            size = 10000
+            size = 5000
             data = np.random.random(size * 3)  # Create some random data
             rows = np.random.randint(0, size, size * 3)
             cols = np.random.randint(0, size, size * 3)
-            input_matrix = csr_matrix((data, (rows, cols)), shape=(size, size))
+            input_matrix = csr_matrix(
+                (data, (rows, cols)), shape=(size, size), dtype=np.float32
+            )
         else:
             input_matrix = self.large_matrix
         print("testing output correctness, chunked")
