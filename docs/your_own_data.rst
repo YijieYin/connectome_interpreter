@@ -29,18 +29,3 @@ Storing big, dense matrices can be memory-intensive. For example, if there are 5
 However, if the connectivity matrix is sparse, i.e. only a small fraction of the entries are non-zero, the same connectivity information is better stored as an edgelist (pre, post and connection weight). This is essentially what's happening when you use the `scipy.sparse.coo_matrix <https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.coo_matrix.html#scipy.sparse.coo_matrix>`_ format. 
 
 I'm using `float32` (i.e. can be a decimal number, needs 32 bits to represent) to represent the connection weights, to get a balance between memory usage and precision (other options include `float8`, `float64` etc.).
-
-How big can the connectivity matrix be? 
----------------------------------------
-For "effective connectivity" calculation 
-++++++++++++++++++++++++++++++++++++++++
-:doc:`As explained previously<tutorials/matmul>`, the effective connectivity calculation is basically (thresholded) matrix multiplications. The current implementation needs about 3 times the size of the *dense* connectivity matrix in memory. Matrix multiplications are done a lot faster on GPU than CPU. So the limiting factor is GPU memory. The largest GPU memory I have access to is 80 GB. So the largest connectivity matrix I can help process is: 
-
-.. math::
-    \sqrt{\frac{\text{roughly }25 \text{ GB per matrix } \times 10^9 \text{ bytes per GB } \times 8 \text{ bits per byte}}{\text{ 32 bits per float}}} \approx  79000 \text{ neurons}
-
-Of course you could use cell types instead of neurons as elements in the connectivity matrix, which can make the matrix smaller. But this is less useful for e.g. central complex or optic lobe neurons, where neurons of the same type tile the space.
-
-For activation maximisation 
-++++++++++++++++++++++++++++
-This is not as expensive: it needs about 1.5 times the size of the *dense* connectivity matrix in memory. This is primarily for storing the connectivity matrix, and the computational graph (for gradient descent). It requires less memory because activation maximisation involves matrix-vector multiplications, instead of matrix-matrix multiplications. 
