@@ -47,9 +47,9 @@ addopts = ""  # Add arguments here
 [tool.mypy]
 packages = ["connectome_interpreter", "tests"]
 install_types = true
+ignore_missing_imports = true
 follow_untyped_imports = false
 pretty = true
 show_error_context = true
 show_column_numbers = true
 show_error_code_links = true
-
