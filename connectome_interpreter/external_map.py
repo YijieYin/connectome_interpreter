@@ -338,9 +338,9 @@ def hex_heatmap(
     fsize_title_px = sizing["fsize_title_pt"] * (1 / POINTS_PER_INCH) * pixelsperinch
 
     # Get global min and max for consistent color scale
-    # minimum of 0 and df.values.min()
-    global_min = min(0, df.values.min())
-    global_max = df.values.max()
+    vals = df.to_numpy()  # no-copy, may coerce types
+    global_min = min(0, vals.min())
+    global_max = vals.max()
 
     # Symbol number to choose to plot hexagons
     symbol_number = 15
