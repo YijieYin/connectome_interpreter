@@ -22,6 +22,11 @@ Data obtained from [neuPrint](https://neuprint.janelia.org/?dataset=optic-lobe%3
 Data from [Winding et al. 2023](https://www.science.org/doi/10.1126/science.add9330). You can also e.g. visualise the neurons in 3D in [catmaid](https://catmaid.virtualflybrain.org/).
 - [single-neuron level](https://colab.research.google.com/drive/1VIMNFBp7dCgN5XOQ9vvzPaqb80BGPZx4?usp=sharing) 
 
+# Mapping known to unknown 
+To facilitate neural circuit interpretation, we compile a [list](https://docs.google.com/spreadsheets/d/1VHCEnurOdb4FDC_NUKZX_BpBckQ9LpKxv0CsK_ObVok/edit?usp=sharing) of cell types with known, *experimentally tested*, functions. [This example notebook](https://colab.research.google.com/drive/1oETJthJbdLEBhzApEbRynGxTMrOcwsf-?usp=sharing) uses this list for query of neuron receptive field. The list aims to serve as a quick look-up of literature, instead of a stipulation of neural function. 
+- **Everyone is given edit access, to help make the list more comprehensive and correct, and to make sure the publications you care about are cited correctly. Your contributions would be much appreciated. Please handle with care.**
+- When multiple entries are to be added in the same cell (e.g. when multiple publications are related to the same cell type), please separate the entries with `; ` (semicolon + space), to facilitate programmatic access. 
+
 # Structure-function relationship 
 Using `connectome_interpreter`, we compare the published connectomes against published experimental papers: 
 - [Taisz et al. 2023](https://colab.research.google.com/drive/1WNNnNCjTey-iSlHPkxMlr_EaLsRMs9iX?usp=drive_link): Generating parallel representations of position and identity in the olfactory system ([paper](https://www.cell.com/cell/abstract/S0092-8674(23)00472-5))
