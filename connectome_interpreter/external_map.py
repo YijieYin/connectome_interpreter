@@ -14,6 +14,7 @@ DATA_SOURCES: dict[str, str] = {
     "Dweck_larva_fruit": "data/Dweck2018/larva_fruit2or.csv",
     "Nern2024": "data/Nern2024/ME-columnar-cells-hex-location.csv",
     "Matsliah2024": "data/Matsliah2024/fafb_right_vis_cols.csv",
+    "Badel2016_PN": "data/Badel2016/Badel2016.csv",
 }
 
 
@@ -52,6 +53,8 @@ def load_dataset(dataset: str) -> pd.DataFrame:
             - 'Matsliah2024': columnar coordinates of individual cells from a collection
                 of columnar cell types in the right optic lobe from FAFB, from Matsliah
                 et al. 2024 (https://www.nature.com/articles/s41586-024-07981-1).
+            - 'Badel2016_PN': mapping from olfactory projection neurons to odours, from
+                Badel et al. 2016 (https://www.cell.com/neuron/fulltext/S0896-6273(16)30201-X).
 
     Returns:
         pd.DataFrame: The dataset as a pandas DataFrame. For the adult, the
@@ -109,6 +112,9 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
             - 'Nern2024': columnar coordinates of individual cells from a
                 collection of columnar cell types within the medulla of the
                 right optic lobe, from Nern et al. 2024.
+            - 'Badel2016_PN': mapping from olfactory projection neurons to odours, from
+                Badel et al. 2016 (https://www.cell.com/neuron/fulltext/S0896-6273(16)30201-X).
+
         custom_experiment : pd.DataFrame
             A custom experimental dataset to compare the connectomics data to.
             The row indices of this dataframe must match the row indices of df.
@@ -469,3 +475,82 @@ def hex_heatmap(
         raise ValueError("df must be a pd.Series or pd.DataFrame")
 
     return fig
+
+
+def looming_stimulus(start_coords, all_coords, n_time=4):
+    """
+    Generate a list of lists of coordinates for a looming stimulus. The stimulus starts
+    at the start_coords and expands outwards in a hexagonal pattern. The stimulus
+    expands for n_time steps. Currently the expansion happens one layer at a time.
+
+    Args
+        start_coords : list
+            List of strings of the form 'x,y' where x and y are the coordinates of the
+            starting hexes for the stimulus.
+        all_coords : list
+            List of strings of the form 'x,y' where x and y are the coordinates of all
+            hexes in the grid.
+        n_time : int, default=4
+            Number of time steps for the stimulus to expand.
+
+    Returns:
+        stim_str : list
+            List of lists of strings of the form 'x,y' where x and y are the coordinates
+            of the hexes that are stimulated at each time step.
+    """
+    coords = [tuple(map(float, idx.split(","))) for idx in all_coords]
+    x_vals, y_vals = zip(*coords)  # Separate into x and y lists
+
+    # sort and rank x_vals
+    x_sorted = sorted(list(set(x_vals)))
+    x_to_rank = {x: rank for rank, x in enumerate(x_sorted)}
+    rank_to_x = {rank: x for rank, x in enumerate(x_sorted)}
+    y_sorted = sorted(list(set(y_vals)))
+    y_to_rank = {y: rank for rank, y in enumerate(y_sorted)}
+    rank_to_y = {rank: y for rank, y in enumerate(y_sorted)}
+
+    start = [tuple(map(float, idx.split(","))) for idx in start_coords]
+    stimulus = []
+    stimulus.append(start)
+    for atime in range(n_time):
+        for x, y in start:
+            start_copy = start.copy()
+            # hexes above and below x
+            if y_to_rank[y] + 2 in rank_to_y:
+                start_copy.append((x, rank_to_y[y_to_rank[y] + 2]))
+            if y_to_rank[y] - 2 in rank_to_y:
+                start_copy.append((x, rank_to_y[y_to_rank[y] - 2]))
+            # hexes to the left
+            if x_to_rank[x] + 1 in rank_to_x:
+                if y_to_rank[y] + 1 in rank_to_y:
+                    start_copy.append(
+                        (rank_to_x[x_to_rank[x] + 1], rank_to_y[y_to_rank[y] + 1])
+                    )
+                if y_to_rank[y] - 1 in rank_to_y:
+                    start_copy.append(
+                        (rank_to_x[x_to_rank[x] + 1], rank_to_y[y_to_rank[y] - 1])
+                    )
+            # hexes to the right
+            if x_to_rank[x] - 1 in rank_to_x:
+                if y_to_rank[y] + 1 in rank_to_y:
+                    start_copy.append(
+                        (rank_to_x[x_to_rank[x] - 1], rank_to_y[y_to_rank[y] + 1])
+                    )
+                if y_to_rank[y] - 1 in rank_to_y:
+                    start_copy.append(
+                        (rank_to_x[x_to_rank[x] - 1], rank_to_y[y_to_rank[y] - 1])
+                    )
+
+            start = list(set(start_copy))
+        stimulus.append(start)
+
+    stim_str = []
+    for atime in range(n_time):
+        stim_atime = []
+        for x, y in stimulus[atime]:
+            # Format x and y to remove .0 if they're integers
+            x_str = str(int(x)) if x == int(x) else str(x)
+            y_str = str(int(y)) if y == int(y) else str(y)
+            stim_atime.append(f"{x_str},{y_str}")
+        stim_str.append(stim_atime)
+    return stim_str
