@@ -18,7 +18,7 @@ from scipy.sparse import coo_matrix, issparse
 import seaborn as sns
 
 # types that can be made into a numeric numpy array
-arrayable = Real | Collection[Real]
+arrayable = npt.ArrayLike
 
 
 def dynamic_representation(tensor, density_threshold=0.2):
@@ -648,6 +648,7 @@ def get_ngl_link(
         raise ValueError("df_format should be either 'wide' or 'long'")
 
     for i, ite in enumerate(iterate_over):
+        cmap: plt.Colormap
         if diff_colours_per_layer:
             color = random.choice(colors)
             cmap = mcl.LinearSegmentedColormap.from_list(

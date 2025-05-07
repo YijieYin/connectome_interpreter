@@ -8,6 +8,7 @@ import gc
 import ipywidgets as widgets
 import matplotlib.pyplot as plt
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 import plotly.express as px
 import scipy as sp
@@ -75,9 +76,9 @@ def compress_paths(
     num_chunks = (matrix_size + chunkSize - 1) // chunkSize  # Ceiling division
 
     # Initialize empty dictionaries of empty lists to collect COO data
-    rows = {idx: [] for idx in range(step_number)}
-    cols = {idx: [] for idx in range(step_number)}
-    data = {idx: [] for idx in range(step_number)}
+    rows: dict[int, list[npt.NDArray]] = {idx: [] for idx in range(step_number)}
+    cols: dict[int, list[npt.NDArray]] = {idx: [] for idx in range(step_number)}
+    data: dict[int, list[npt.NDArray]] = {idx: [] for idx in range(step_number)}
 
     # Process each chunk
     for chunk_idx in tqdm(range(num_chunks)):
@@ -138,15 +139,16 @@ def compress_paths(
                 )
 
             mask = torch.abs(result) >= output_threshold
-            chunk_rows, chunk_cols = torch.nonzero(mask, as_tuple=True)
+            chunk_data: npt.NDArray
+            _chunk_rows, _chunk_cols = torch.nonzero(mask, as_tuple=True)
             if root:
                 chunk_data = result_root[chunk_rows, chunk_cols].cpu().numpy()
             else:
                 chunk_data = result[chunk_rows, chunk_cols].cpu().numpy()
 
             # Adjust column indices to global coordinates
-            chunk_cols = chunk_cols.cpu().numpy() + start_col
-            chunk_rows = chunk_rows.cpu().numpy()
+            chunk_cols: npt.NDArray = _chunk_cols.cpu().numpy() + start_col
+            chunk_rows: npt.NDArray = _chunk_rows.cpu().numpy()
 
             # Append to our COO arrays
             rows[power].append(chunk_rows)
@@ -1161,7 +1163,7 @@ def signed_effective_conn_from_paths(paths, group_dict=None, wide=True, idx_to_n
 
 
 def read_precomputed(
-    prefix: str, file_path: str = None, first_n: int | None = None
+    prefix: str, file_path: str | None = None, first_n: int | None = None
 ) -> List:
     """Reads the precomputed compressed paths.
 
@@ -1172,6 +1174,8 @@ def read_precomputed(
             None, checks if running in Google Colab, and sets the path: if
             running in Colab, sets the path to "/content/"; otherwise, sets the
             path to "".
+        first_n (int, optional): If specified, take only this many paths, rather
+            than all of them.
 
     Returns:
         List: A list of sparse matrices representing the steps.
