@@ -205,9 +205,9 @@ def compress_paths_dense_chunked(
     save_path: str = "./",
     save_prefix: str = "step_",
 ) -> list:
-    """Performs iterative multiplication of a sparse matrix `inprop` for a
-    specified number of steps, applying thresholding to filter out values below
-    a certain `threshold` to optimize memory usage and computation speed.
+    """Performs iterative multiplication of a sparse matrix `inprop` for a specified
+    number of steps, applying thresholding to filter out values below a certain
+    `threshold` to optimize memory usage and computation speed.
 
     The function is optimized to run on GPU if available. It needs >=
     size_of_inprop.to_dense() * 3 amount of GPU memory, for matrix multiplication, and
@@ -245,7 +245,7 @@ def compress_paths_dense_chunked(
         save_path (str, optional): The path to save the output matrices to.
             Defaults to "./" (the current folder).
         save_prefix (str, optional): The prefix to use for the output matrix
-            filenames. Defaults to "step_".
+            filenames. Defaults to ``"step_"``.
 
     Returns:
         list: A list of scipy.sparse.csc_matrix objects, each representing
@@ -618,9 +618,9 @@ def result_summary(
             coloured dataframe. Defaults to True.
         display_threshold (float, optional): The minimum threshold for
             displaying the output. Defaults to 0.
-        threshold_axis (str, optional): The axis to apply the
-            display_threshold to. Defaults to 'row' (removing entire rows if
-            no value exceeds display_threshold).
+        threshold_axis (str, optional): The axis to apply the display_threshold to.
+            Defaults to 'row' (removing entire rows if no value exceeds
+            display_threshold).
         sort_within (str, optional): The axis to sort the output in. Defaults
             to 'column'.
         sort_names (str or list, optional): the column/row name(s) to sort the
