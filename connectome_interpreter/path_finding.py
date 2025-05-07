@@ -215,7 +215,7 @@ def find_path_iteratively(
                 "Cannot trace back to the input :(. Try providing a bigger "
                 "top_n value, or a lower threshold?"
             )
-            break
+            return
 
         df["layer"] = layer
 
