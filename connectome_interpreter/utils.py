@@ -13,7 +13,7 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 import torch
-from IPython.display import display
+from IPython.display import display, IFrame
 from scipy.sparse import coo_matrix, issparse
 import seaborn as sns
 
@@ -443,8 +443,8 @@ def to_nparray(input_data: arrayable, unique: bool = True) -> npt.NDArray:
 
     Args:
         input_data: The input data to convert. Can be of type int (including
-            numpy.int64 and numpy.int32), float, list, set, numpy.ndarray, or
-            pandas.Series.
+            numpy.int64 and numpy.int32), float, list, set, numpy.ndarray,
+            pandas.Series, or pandas.Index.
         unique (bool, optional): Whether to return only unique values. Default
             to True. NOTE: np.unique() sorts the array.
 
@@ -456,7 +456,7 @@ def to_nparray(input_data: arrayable, unique: bool = True) -> npt.NDArray:
     # np.ndarray
     if isinstance(input_data, (int, float, np.int64, np.int32)):
         input_array = np.array([input_data])
-    elif isinstance(input_data, (list, set, np.ndarray, pd.Series)):
+    elif isinstance(input_data, (list, set, np.ndarray, pd.Series, pd.Index)):
         input_array = np.array(list(input_data))
     else:
         raise TypeError(
@@ -486,6 +486,9 @@ def get_ngl_link(
     colors: list | None = None,
     colormap: str = "viridis",
     df_format: str = "wide",
+    open_here: bool = False,
+    width: int = 1500,
+    height: int = 800,
 ) -> str:
     """
     Generates a Neuroglancer link with layers based on the neuron ids and the
@@ -526,6 +529,10 @@ def get_ngl_link(
             is False. Default to 'viridis'.
         df_format (str, optional): The format of the DataFrame. Either 'wide'
             or 'long'. Default to 'wide'.
+        open_here (bool, optional): Whether to display the Neuroglancer scene in the
+            notebook. Default to False.
+        width (int, optional): The width of the Neuroglancer scene. Default to 1500.
+        height (int, optional): The height of the Neuroglancer scene. Default to 800.
 
     Returns:
         str: A URL to the generated Neuroglancer scene.
@@ -713,7 +720,11 @@ def get_ngl_link(
         scene.add_layers(fafb_layer)
         scene.add_layers(np_layer)
 
-    return scene.url
+    if open_here:
+        frame = IFrame(scene.url, width=width, height=height)
+        display(frame)
+    else:
+        return scene.url
 
 
 def get_activations(
@@ -833,46 +844,52 @@ def plot_layered_paths(
     weight_decimals: int = 2,
     neuron_to_sign: dict | None = None,
     sign_color_map: dict = {1: "red", -1: "blue"},
+    node_activation_min: float | None = None,
+    node_activation_max: float | None = None,
 ):
     """
-    Plots a directed graph of layered paths with optional node coloring based
-    on activation values.
+    Plots a directed graph of layered paths with optional node coloring based on
+    activation values.
 
-    This function creates a visualization of a directed graph with nodes
-    placed in layers. Nodes can be optionally colored based on 'pre_activation'
-    and 'post_activation' columns present in the dataframe. If these columns
-    are missing, a default color is used for all nodes. The edges are weighted,
-    and their labels represent the weight values.
+    This function creates a visualization of a directed graph with nodes placed in
+    layers. Nodes can be optionally colored based on 'pre_activation' and
+    'post_activation' columns present in the dataframe. If these columns are missing, a
+    default color is used for all nodes. The edges are weighted, and their labels
+    represent the weight values.
 
     Args:
-        path_df (pandas.DataFrame): A dataframe containing the columns 'pre',
-            'post', 'layer', 'weight', and optionally 'pre_activation',
-            'post_activation', 'pre_layer', 'post_layer'. Each row represents
-            an edge in the graph. The 'pre' and 'post' columns refer to the
-            source and target nodes, respectively. The 'layer' column is used
-            to place nodes in layers, and 'weight' indicates the edge weight.
-            If present, 'pre_activation' and 'post_activation' are used to
-            color the nodes based on their activation values.
-        figsize (tuple, optional): A tuple indicating the size of the
-            matplotlib figure. Defaults to (10, 8).
-        priority_indices (list, optional): A list of indices to prioritize
-            when creating the layered positions. Nodes with these indices will
-            be placed at the top of their respective layers. Defaults to None.
-        sort_by_activation (bool, optional): A flag to sort the nodes based on
-            their activation values (after grouping by priority). Defaults to
-            False.
-        fraction (float, optional): The fraction of the figure width to use
-            for the colorbar. Defaults to 0.03.
-        pad (float, optional): The padding between the colorbar and the plot.
-            Defaults to 0.02.
-        weight_decimals (int, optional): The number of decimal places to
-            display for edge weights. Defaults to 2.
-        neuron_to_sign (dict, optional): A dictionary mapping neuron names (as
-            they appear in path_df) to their signs (e.g. {'KCg-m': 1, 'Delta7':
-            -1}). Defaults to None.
-        sign_color_map (dict, optional): A dictionary mapping neuron signs to
-            colors. Defaults to red for excitatory, and blue for inhibitory.
-            Edges are in lightgrey by default.
+        path_df (pandas.DataFrame): A dataframe containing the columns 'pre', 'post',
+            'layer', 'weight', and optionally 'pre_activation', 'post_activation',
+            'pre_layer', 'post_layer'. Each row represents an edge in the graph. The
+            'pre' and 'post' columns refer to the source and target nodes, respectively.
+            The 'layer' column is used to place nodes in layers, and 'weight' indicates
+            the edge weight. If present, 'pre_activation' and 'post_activation' are used
+            to color the nodes based on their activation values.
+        figsize (tuple, optional): A tuple indicating the size of the matplotlib figure.
+            Defaults to (10, 8).
+        priority_indices (list, optional): A list of indices to prioritize when creating
+            the layered positions. Nodes with these indices will be placed at the top of
+            their respective layers. Defaults to None.
+        sort_by_activation (bool, optional): A flag to sort the nodes based on their
+            activation values (after grouping by priority). Defaults to False.
+        fraction (float, optional): The fraction of the figure width to use for the
+            colorbar. Defaults to 0.03.
+        pad (float, optional): The padding between the colorbar and the plot. Defaults
+            to 0.02.
+        weight_decimals (int, optional): The number of decimal places to display for
+            edge weights. Defaults to 2.
+        neuron_to_sign (dict, optional): A dictionary mapping neuron names (as they
+            appear in path_df) to their signs (e.g. {'KCg-m': 1, 'Delta7': -1}).
+            Defaults to None.
+        sign_color_map (dict, optional): A dictionary mapping neuron signs to colors.
+            Defaults to red for excitatory, and blue for inhibitory. Edges are in
+            lightgrey by default.
+        node_activation_min (float, optional): The minimum value for node activation. If
+            not provided, the minimum value of node activations is used. Defaults to
+            None.
+        node_activation_max (float, optional): The maximum value for node activation. If
+            not provided, the maximum value of node activations is used. Defaults to
+            None.
 
     Returns:
         None: This function does not return a value. It generates a plot using
@@ -943,7 +960,11 @@ def plot_layered_paths(
                 path_df["post_activation"].values,
             ]
         )
-        norm = plt.Normalize(vmin=activations.min(), vmax=activations.max())
+        if node_activation_min is None:
+            node_activation_min = activations.min()
+        if node_activation_max is None:
+            node_activation_max = activations.max()
+        norm = plt.Normalize(vmin=node_activation_min, vmax=node_activation_max)
         color_map = plt.get_cmap("viridis")
         # Update graph with activation data
         nx.set_node_attributes(
@@ -1356,41 +1377,51 @@ def compare_connectivity(
     threshold: float = 0,
     sort_within: str = "column",
     sort_by: str | None = None,
+    threshold_axis: str = "row",
+    merge: str = "outer",
+    suffix_in: str = "column",
 ):
     """
     Compare the connectivity between two matrices.
 
     Args:
-        m1 (scipy.sparse matrix or numpy.ndarray): The first connectivity
-            matrix.
-        m2 (scipy.sparse matrix or numpy.ndarray): The second connectivity
-            matrix.
-        inidx1 (int, float, list, set, numpy.ndarray, or pandas.Series): The
-            indices of the presynaptic neurons in the first matrix.
-        outidx1 (int, float, list, set, numpy.ndarray, or pandas.Series): The
-            indices of the postsynaptic neurons in the first matrix.
-        inidx2 (int, float, list, set, numpy.ndarray, or pandas.Series): The
-            indices of the presynaptic neurons in the second matrix.
-        outidx2 (int, float, list, set, numpy.ndarray, or pandas.Series): The
-            indices of the postsynaptic neurons in the second matrix.
-        g1_pre (dict, optional): A dictionary mapping the presynaptic indices
-            to groups in the first matrix. Defaults to None.
-        g1_post (dict, optional): A dictionary mapping the postsynaptic
-            indices to groups in the first matrix. Defaults to None.
-        g2_pre (dict, optional): A dictionary mapping the presynaptic indices
-            to groups in the second matrix. Defaults to None.
-        g2_post (dict, optional): A dictionary mapping the postsynaptic
-            indices to groups in the second matrix. Defaults to None.
-        suffices (list, optional): A list of suffixes to append to the column
-            names of the two matrices. Defaults to ['_l', '_2'].
-        display (bool, optional): Whether to display the resulting DataFrame
-            in colour gradient. Defaults to True.
-        threshold (float, optional): The threshold below which to remove
-            values. Defaults to 0.
-        sort_within (str, optional): Whether to sort the DataFrame with
-            'column' (across rows) or 'row' (across columns). Defaults to
-            'column'.
+        m1 (scipy.sparse matrix or numpy.ndarray): The first connectivity matrix.
+        m2 (scipy.sparse matrix or numpy.ndarray): The second connectivity matrix.
+        inidx1 (int, float, list, set, numpy.ndarray, or pandas.Series): The indices of
+            the presynaptic neurons in the first matrix.
+        outidx1 (int, float, list, set, numpy.ndarray, or pandas.Series): The indices of
+            the postsynaptic neurons in the first matrix.
+        inidx2 (int, float, list, set, numpy.ndarray, or pandas.Series): The indices of
+            the presynaptic neurons in the second matrix.
+        outidx2 (int, float, list, set, numpy.ndarray, or pandas.Series): The indices of
+            the postsynaptic neurons in the second matrix.
+        g1_pre (dict, optional): A dictionary mapping the presynaptic indices to groups
+            in the first matrix. Defaults to None.
+        g1_post (dict, optional): A dictionary mapping the postsynaptic indices to
+            groups in the first matrix. Defaults to None.
+        g2_pre (dict, optional): A dictionary mapping the presynaptic indices to groups
+            in the second matrix. Defaults to None.
+        g2_post (dict, optional): A dictionary mapping the postsynaptic indices to
+            groups in the second matrix. Defaults to None.
+        suffices (list, optional): A list of suffixes to append to the column names of
+            the two matrices. Defaults to ['_l', '_2'].
+        display (bool, optional): Whether to display the resulting DataFrame in colour
+            gradient. Defaults to True.
+        threshold (float, optional): The threshold below which to remove values.
+            Defaults to 0.
+        sort_within (str, optional): Whether to sort the DataFrame with 'column' (across
+            rows) or 'row' (across columns). Defaults to 'column'.
         sort_by (str, optional): The column to sort by. Defaults to None.
+        threshold_axis (str, optional): The axis to apply the threshold to. Defaults to
+        'row' (removing entire rows if no value exceeds display_threshold).
+        merge (str, optional): The type of merge to perform on the two DataFrames.
+            When suffix_in is 'row' (separating input by suffices), the merge is
+            performed on the columns of the two DataFrames. When suffix_in is 'column'
+            (separating target by suffices), the merge is performed on the rows of the
+            two DataFrames. Possible values are 'inner', 'outer', 'left', and 'right'.
+            Defaults to 'outer'.
+        suffix_in (str, optional): Whether to put the suffixes on the rows or columns.
+            Possible values are 'row' and 'column'. Defaults to 'column'.
 
     Returns:
         pd.DataFrame: A DataFrame containing the connectivity values from the
@@ -1408,6 +1439,7 @@ def compare_connectivity(
         g1_post,
         display_output=False,
         display_threshold=threshold,
+        threshold_axis=threshold_axis,
     )
     df2 = result_summary(
         m2,
@@ -1417,17 +1449,29 @@ def compare_connectivity(
         g2_post,
         display_output=False,
         display_threshold=threshold,
+        threshold_axis=threshold_axis,
     )
+
+    if suffix_in not in ["row", "column"]:
+        raise ValueError("suffix_in should be either 'row' or 'column'.")
+
+    if suffix_in == "row":
+        # transpose the dataframes to have the same orientation
+        df1 = df1.T
+        df2 = df2.T
 
     df1.columns = [col + suffices[0] for col in df1.columns]
     df2.columns = [col + suffices[1] for col in df2.columns]
 
     # Join the dataframes on their index (row names), keeping all rows
-    df_merged = df1.merge(df2, left_index=True, right_index=True, how="outer")
+    df_merged = df1.merge(df2, left_index=True, right_index=True, how=merge)
     df_merged = df_merged.fillna(0)
     # order the columns alphabetically
     # Sort columns alphabetically
     df_merged = df_merged.reindex(sorted(df_merged.columns), axis=1)
+
+    if suffix_in == "row":
+        df_merged = df_merged.T
 
     if sort_within == "column":
         if sort_by is None:
@@ -1572,8 +1616,8 @@ def plot_output_grid(
     Plot the output grid for selected indices.
 
     Args:
-        grid_outputs (torch.Tensor|np.ndarray): The output grid tensor of
-            shape (grid_size**2, num_neurons, num_layers).
+        grid_outputs (torch.Tensor|np.ndarray): The output grid tensor of shape
+            (grid_size**2, num_neurons, num_layers).
         grid_coords (list): A list of grid coordinates. Best from function
             `make_grid_inputs()`.
         selected_index (int|list): The index or indices to plot.
@@ -1582,8 +1626,8 @@ def plot_output_grid(
         xlab (str, optional): The x-axis label. Defaults to 'v1 Activation'.
         ylab (str, optional): The y-axis label. Defaults to 'v2 Activation'.
         title (str, optional): The title of the plot. Defaults to None.
-        show_values (bool, optional): Whether to display the values on the
-            heatmap. Defaults to False.
+        show_values (bool, optional): Whether to display the values on the heatmap.
+            Defaults to False.
         fmt (str, optional): The format of the values. Defaults to '.2f'.
 
     Returns:
@@ -1593,7 +1637,7 @@ def plot_output_grid(
 
     # if grid_outputs is tensor, convert to numpy
     if isinstance(grid_outputs, torch.Tensor):
-        grid_outputs = grid_outputs.cpu().numpy()
+        grid_outputs = grid_outputs.detach().cpu().numpy()
 
     if title is None:
         title = f"Output Grid for {selected_index}"
