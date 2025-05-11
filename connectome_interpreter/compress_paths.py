@@ -181,7 +181,9 @@ def compress_paths(
         # Convert to CSC format for more efficient storage and operations
         sparse_result = sparse_result.tocsc()
         if save_to_disk:
-            sp.sparse.save_npz(f"{save_path}{save_prefix}{idx}.npz", sparse_result)
+            sp.sparse.save_npz(
+                os.path.join(save_path, f"{save_prefix}{idx}.npz"), sparse_result
+            )
         else:
             sparse_results.append(sparse_result)
 
@@ -407,6 +409,285 @@ def compress_paths_not_chunked(
 
 def compress_paths_signed(
     inprop,
+    idx_to_sign: dict,
+    target_layer_number: int,
+    threshold: float = 0,
+    output_threshold: float = 1e-4,
+    root: bool = False,
+    chunkSize: int = 2000,
+    save_path: str = "./",
+    return_results: bool = True,
+):
+    """Calculates the excitatory and inhibitory influences across specified layers of a
+    neural network, using PyTorch for GPU acceleration. Even numbers of inhibition is
+    treated as excitation.
+
+    Args:
+        inprop (scipy.sparse.csc_matrix): The initial connectivity matrix representing
+            direct connections between all neurons, shape (n_neurons, n_neurons).
+        idx_to_sign (dict): A dictionary mapping neuron indices to the sign of output
+            (1 for excitatory, -1 for inhibitory).
+        target_layer_number (int): The number of layers through which to calculate
+            influences. 1 for direct connections, 2 for one step away, etc.
+        threshold (float, optional): A value to threshold the influences during
+            calculation; influences below this value are set to zero, and not passed on.
+            Defaults to 0.
+        output_threshold (float, optional): A threshold for the final output to reduce
+            output file size, with values below this threshold set to zero. Defaults to
+            1e-4.
+        root (bool, optional): Whether to take the nth root of the output. This can be
+            understood as "the average direct connection strength" (when root=True), as
+            opposed to "the proportion of influence among all partners n steps away"
+            (when root=False). Defaults to False.
+        chunkSize (int, optional): The size of the chunks to split the matrix into for
+            matrix multiplication. Defaults to 5000. A chunk is a dense matrix of size
+            (chunkSize, n_neurons). This determines the memory usage: e.g. 2000 * 160000
+            * float32 / 8 bytes / 1e9 = 1.28 GB. We need two copies (one excitation, one
+            inhibition), plus the sparse representations of the (n_neurons, n_neurons)
+            matrix.
+        save_path (str, optional): Path to save the results. Defaults to "./".
+        return_results (bool, optional): Whether to return the results as a list
+            of sparse matrices. Defaults to True.
+
+    Returns:
+        Tuple[List[scipy.sparse.csc_matrix], List[scipy.sparse.csc_matrix]]:
+            Two lists of sparse matrices representing the excitatory and
+            inhibitory influences, respectively, up to the specified target
+            layer.
+    """
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    e_idx = [i for i in range(len(idx_to_sign)) if idx_to_sign[i] == 1]
+    i_idx = [i for i in range(len(idx_to_sign)) if idx_to_sign[i] == -1]
+
+    matrix_size = inprop.shape[0]
+    num_chunks = (matrix_size + chunkSize - 1) // chunkSize  # Ceiling division
+
+    # make a temporary directory to save the chunks
+    temp_dir = os.path.join(os.getcwd(), "temp_chunks")
+    if not os.path.exists(temp_dir):
+        os.makedirs(temp_dir)
+
+    direct_e_sender = inprop.copy()
+    # set i rows to 0
+    direct_e_sender[i_idx, :] = 0
+    direct_i_sender = inprop.copy()
+    # set e rows to 0
+    direct_i_sender[e_idx, :] = 0
+
+    if target_layer_number == 1:
+        return [direct_e_sender], [direct_i_sender]
+
+    direct_e_sender_tensor = scipy_sparse_to_pytorch(direct_e_sender, device=device)
+    direct_i_sender_tensor = scipy_sparse_to_pytorch(direct_i_sender, device=device)
+
+    for chunk_idx in tqdm(range(num_chunks)):
+        # Define the range for this chunk
+        start_row = chunk_idx * chunkSize
+        end_row = min((chunk_idx + 1) * chunkSize, matrix_size)
+        current_chunk_size = end_row - start_row
+
+        for layer in range(target_layer_number):
+            if layer == 0:
+                # For inprop^1, just take the corresponding rows, and turn into tensor
+                # shape: (chunkSize, n_neurons)
+                dense_e = torch.tensor(
+                    direct_e_sender[start_row:end_row, :].toarray(),
+                    dtype=torch.float32,
+                    device=device,
+                )
+                dense_i = torch.tensor(
+                    direct_i_sender[start_row:end_row, :].toarray(),
+                    dtype=torch.float32,
+                    device=device,
+                )
+            else:
+                past_dense_e = dense_e.clone()
+                # E = ee and ii added
+                # shape: (chunkSize, n_neurons)
+                dense_e = torch.sparse.mm(
+                    dense_e, direct_e_sender_tensor
+                ) + torch.sparse.mm(dense_i, direct_i_sender_tensor)
+
+                # I = E * I + I * E
+                # shape: (chunkSize, n_neurons)
+                dense_i = torch.sparse.mm(
+                    past_dense_e, direct_i_sender_tensor
+                ) + torch.sparse.mm(dense_i, direct_e_sender_tensor)
+
+            # Apply thresholding
+            if threshold > 0:
+                dense_e = torch.where(
+                    dense_e >= threshold,
+                    dense_e,
+                    torch.tensor(0.0, device=device),
+                )
+                dense_i = torch.where(
+                    dense_i >= threshold,
+                    dense_i,
+                    torch.tensor(0.0, device=device),
+                )
+
+            # force garbage collection after each multiplication
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            # Convert to csc for output
+            mask_e = torch.abs(dense_e) >= output_threshold
+            mask_i = torch.abs(dense_i) >= output_threshold
+            chunk_rows_e, chunk_cols_e = torch.nonzero(mask_e, as_tuple=True)
+            chunk_rows_i, chunk_cols_i = torch.nonzero(mask_i, as_tuple=True)
+            if root:
+                chunk_data_e = (
+                    (
+                        torch.sign(dense_e[chunk_rows_e, chunk_cols_e])
+                        * torch.abs(dense_e[chunk_rows_e, chunk_cols_e])
+                        ** (1 / (layer + 1))
+                    )
+                    .cpu()
+                    .numpy()
+                )
+                chunk_data_i = (
+                    (
+                        torch.sign(dense_i[chunk_rows_i, chunk_cols_i])
+                        * torch.abs(dense_i[chunk_rows_i, chunk_cols_i])
+                        ** (1 / (layer + 1))
+                    )
+                    .cpu()
+                    .numpy()
+                )
+            else:
+                chunk_data_e = dense_e[chunk_rows_e, chunk_cols_e].cpu().numpy()
+                chunk_data_i = dense_i[chunk_rows_i, chunk_cols_i].cpu().numpy()
+
+            # save the chunked data to disk as scipy sparse matrices
+            sparse_e = sp.sparse.coo_matrix(
+                (
+                    chunk_data_e,
+                    (chunk_rows_e.cpu().numpy(), chunk_cols_e.cpu().numpy()),
+                ),
+                shape=(current_chunk_size, matrix_size),
+            )
+            sparse_i = sp.sparse.coo_matrix(
+                (
+                    chunk_data_i,
+                    (chunk_rows_i.cpu().numpy(), chunk_cols_i.cpu().numpy()),
+                ),
+                shape=(current_chunk_size, matrix_size),
+            )
+            sparse_e.eliminate_zeros()
+            sparse_i.eliminate_zeros()
+
+            # save the sparse matrices to disk
+            sp.sparse.save_npz(
+                os.path.join(temp_dir, f"step_{layer}_e_{chunk_idx}.npz"), sparse_e
+            )
+            sp.sparse.save_npz(
+                os.path.join(temp_dir, f"step_{layer}_i_{chunk_idx}.npz"), sparse_i
+            )
+            del sparse_e, sparse_i
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    # Combine all data -----------------
+    print("Combining data from all chunks")
+    stepse = []
+    stepsi = []
+    # if save_path isn't already a directory, make it
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+
+    for layer in tqdm(range(target_layer_number)):
+        # first combine the es ----
+        rows = []
+        cols = []
+        data = []
+        for chunk_idx in range(num_chunks):
+            # load the chunked data from disk
+            sparse_e = sp.sparse.load_npz(
+                os.path.join(temp_dir, f"step_{layer}_e_{chunk_idx}.npz")
+            )
+            # adjust the row indices to account for the chunk offset
+            sparse_e.row += chunk_idx * chunkSize
+            # append the data to the lists
+            rows.append(sparse_e.row)
+            cols.append(sparse_e.col)
+            data.append(sparse_e.data)
+            # delete the sparse matrix to save memory
+            del sparse_e
+            gc.collect()
+
+        # combine the data
+        rows = np.concatenate(rows)
+        cols = np.concatenate(cols)
+        data = np.concatenate(data)
+        # create the sparse matrix
+        sparse_e = sp.sparse.coo_matrix(
+            (data, (rows, cols)), shape=(matrix_size, matrix_size)
+        ).tocsc()
+        sparse_e.eliminate_zeros()
+        # save the sparse matrix to disk
+        sp.sparse.save_npz(os.path.join(save_path, f"step_{layer}_e.npz"), sparse_e)
+        if return_results:
+            stepse.append(sparse_e)
+        # delete the sparse matrix to save memory
+        del sparse_e
+        gc.collect()
+
+        # now combine the is ----
+        rows = []
+        cols = []
+        data = []
+        for chunk_idx in range(num_chunks):
+            # load the chunked data from disk
+            sparse_i = sp.sparse.load_npz(
+                os.path.join(temp_dir, f"step_{layer}_i_{chunk_idx}.npz")
+            )
+            # adjust the row indices to account for the chunk offset
+            sparse_i.row += chunk_idx * chunkSize
+            # append the data to the lists
+            rows.append(sparse_i.row)
+            cols.append(sparse_i.col)
+            data.append(sparse_i.data)
+            # delete the sparse matrix to save memory
+            del sparse_i
+            gc.collect()
+        # combine the data
+        rows = np.concatenate(rows)
+        cols = np.concatenate(cols)
+        data = np.concatenate(data)
+        # create the sparse matrix
+        sparse_i = sp.sparse.coo_matrix(
+            (data, (rows, cols)), shape=(matrix_size, matrix_size)
+        ).tocsc()
+        sparse_i.eliminate_zeros()
+        if return_results:
+            stepsi.append(sparse_i)
+        # save the sparse matrix to disk
+        sp.sparse.save_npz(os.path.join(save_path, f"step_{layer}_i.npz"), sparse_i)
+        # delete the sparse matrix to save memory
+        del sparse_i
+        gc.collect()
+
+    # remove the temporary directory
+    for layer in range(target_layer_number):
+        for chunk_idx in range(num_chunks):
+            os.remove(os.path.join(temp_dir, f"step_{layer}_e_{chunk_idx}.npz"))
+            os.remove(os.path.join(temp_dir, f"step_{layer}_i_{chunk_idx}.npz"))
+    os.rmdir(temp_dir)
+    # remove all variables
+    del direct_e_sender, direct_i_sender
+    torch.cuda.empty_cache()
+    # clear the cache
+    gc.collect()
+
+    return stepse, stepsi
+
+
+def compress_paths_signed_no_chunking(
+    inprop,
     idx_to_sign,
     target_layer_number,
     threshold=0,
@@ -476,6 +757,8 @@ def compress_paths_signed(
 
     lne = torch.matmul(torch.diag(excitatory_mask), inprop_tensor)
     lni = torch.matmul(torch.diag(inhibitory_mask), inprop_tensor)
+    lne_initial = lne.clone()
+    lni_initial = lni.clone()
 
     steps_excitatory = []
     steps_inhibitory = []
@@ -484,21 +767,17 @@ def compress_paths_signed(
         if layer != 0:
             # if layer ==0, return the direct excitatory and inhibitory
             # connections separately
-            lne_new = torch.matmul(lne, steps_excitatory[0]) + torch.matmul(
-                lni, steps_inhibitory[0]
-            )
-            lni_new = torch.matmul(lne, steps_inhibitory[0]) + torch.matmul(
-                lni, steps_excitatory[0]
-            )
+            lne_new = torch.matmul(lne, lne_initial) + torch.matmul(lni, lni_initial)
+            lni = torch.matmul(lne, lni_initial) + torch.matmul(lni, lne_initial)
 
             # Apply thresholding
             if threshold > 0:
                 lne_new = torch_sparse_where(lne_new, threshold)
-                lni_new = torch_sparse_where(lni_new, threshold)
+                lni = torch_sparse_where(lni, threshold)
 
             # Dynamic representation based on density
             lne = dynamic_representation(lne_new)
-            lni = dynamic_representation(lni_new)
+            lni = dynamic_representation(lni)
             torch.cuda.empty_cache()
 
         # possible alternative implementation: first root and threshold, then
