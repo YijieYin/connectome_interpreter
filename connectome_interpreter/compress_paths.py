@@ -14,7 +14,7 @@ import scipy as sp
 import seaborn as sns
 import torch
 from IPython.display import display
-from scipy.sparse import csr_matrix, issparse, csc_matrix
+from scipy.sparse import csr_matrix, issparse, csc_matrix, coo_matrix
 from tqdm import tqdm
 
 from .utils import (
@@ -39,6 +39,8 @@ def compress_paths(
     save_to_disk: bool = False,
     save_path: str = "./",
     save_prefix: str = "step_",
+    return_results: bool = True,
+    high_cpu_ram: bool = True,
 ):
     """
     Computes A^0 to A^n by chunking the computation to save memory.
@@ -58,9 +60,15 @@ def compress_paths(
             the memory usage (on GPU if available). e.g. it might need A + (A.shape[0] *
             chunkSize) * float32 / 8 btes.
         device (torch.device): Device to use for computation. Uses GPU if available.
-        save_to_disk (bool): If True, save the results to disk, and return an empty list.
+        save_to_disk (bool): If True, save the results to disk.
         save_path (str): Path to save the results.
         save_prefix (str): Prefix to use for the saved files.
+        return_results (bool, optional): Whether to return the results as a list
+            of sparse matrices. Defaults to True. If False, returns an empty list.
+        high_cpu_ram (bool): if high_cpu_ram, keep all the resulting chunked sparse
+            matrices in memory, before combining and writing to disk altogether. if
+            False, write each chunk to disk to a temporary directory as soon as it is
+            computed, and combine them at the end.
 
     Returns:
         List[scipy.sparse.csr_matrix]: List of sparse matrices representing A^0 to A^n.
@@ -74,124 +82,277 @@ def compress_paths(
     matrix_size = A.shape[0]
     num_chunks = (matrix_size + chunkSize - 1) // chunkSize  # Ceiling division
 
-    # Initialize empty dictionaries of empty lists to collect COO data
-    rows = {idx: [] for idx in range(step_number)}
-    cols = {idx: [] for idx in range(step_number)}
-    data = {idx: [] for idx in range(step_number)}
+    if high_cpu_ram:
+        # Initialize empty dictionaries of empty lists to collect COO data
+        rows = {idx: [] for idx in range(step_number)}
+        cols = {idx: [] for idx in range(step_number)}
+        data = {idx: [] for idx in range(step_number)}
 
-    # Process each chunk
-    for chunk_idx in tqdm(range(num_chunks)):
-        # Define the range for this chunk
-        start_col = chunk_idx * chunkSize
-        end_col = min((chunk_idx + 1) * chunkSize, matrix_size)
-        current_chunk_size = end_col - start_col
+        # Process each chunk
+        for chunk_idx in tqdm(range(num_chunks)):
+            # Define the range for this chunk
+            start_col = chunk_idx * chunkSize
+            end_col = min((chunk_idx + 1) * chunkSize, matrix_size)
+            current_chunk_size = end_col - start_col
 
-        for power in range(step_number):
-            if power == 0:
-                # For A^1, we can simply extract the relevant columns from A
-                # Extract the relevant columns using COO format
-                indices = A._indices()
-                values = A._values()
+            for power in range(step_number):
+                if power == 0:
+                    # For A^1, we can simply extract the relevant columns from A
+                    # Extract the relevant columns using COO format
+                    indices = A._indices()
+                    values = A._values()
 
-                # Filter to only include the columns we care about
-                col_mask = (indices[1, :] >= start_col) & (indices[1, :] < end_col)
-                result_indices = indices[:, col_mask].clone()
-                result_values = values[col_mask].clone()
+                    # Filter to only include the columns we care about
+                    col_mask = (indices[1, :] >= start_col) & (indices[1, :] < end_col)
+                    result_indices = indices[:, col_mask].clone()
+                    result_values = values[col_mask].clone()
 
-                # Adjust column indices to be relative to start_col
-                result_indices[1, :] -= start_col
+                    # Adjust column indices to be relative to start_col
+                    result_indices[1, :] -= start_col
 
-                # Create the sparse tensor for this column chunk
-                result = torch.sparse_coo_tensor(
-                    result_indices,
-                    result_values,
-                    (matrix_size, current_chunk_size),
-                    device=device,
-                ).to_dense()
+                    # Create the sparse tensor for this column chunk
+                    result = torch.sparse_coo_tensor(
+                        result_indices,
+                        result_values,
+                        (matrix_size, current_chunk_size),
+                        device=device,
+                    ).to_dense()
 
-                if threshold > 0:
-                    result = torch.where(
-                        torch.abs(result) < threshold,
-                        torch.tensor(0.0).to(device),
-                        result,
+                    if threshold > 0:
+                        result = torch.where(
+                            torch.abs(result) < threshold,
+                            torch.tensor(0.0).to(device),
+                            result,
+                        )
+                else:
+                    result = torch.sparse.mm(A, result)
+
+                    if threshold > 0:
+                        result = torch.where(
+                            torch.abs(result) < threshold,
+                            torch.tensor(0.0).to(device),
+                            result,
+                        )
+
+                    # Force garbage collection after each multiplication
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                # Apply threshold and collect non-zero entries
+                if root:
+                    # take power-root of the result
+                    result_root = torch.sign(result) * torch.abs(result) ** (
+                        1 / (power + 1)
                     )
+
+                mask = torch.abs(result) >= output_threshold
+                chunk_rows, chunk_cols = torch.nonzero(mask, as_tuple=True)
+                if root:
+                    chunk_data = result_root[chunk_rows, chunk_cols].cpu().numpy()
+                else:
+                    chunk_data = result[chunk_rows, chunk_cols].cpu().numpy()
+
+                # Adjust column indices to global coordinates
+                chunk_cols = chunk_cols.cpu().numpy() + start_col
+                chunk_rows = chunk_rows.cpu().numpy()
+
+                # Append to our COO arrays
+                rows[power].append(chunk_rows)
+                cols[power].append(chunk_cols)
+                data[power].append(chunk_data)
+
+            # Clear memory
+            del result, mask, chunk_rows, chunk_cols, chunk_data
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        # Combine all data
+        print("Combining data from all chunks")
+        for idx in tqdm(range(step_number)):
+            if rows[idx]:  # Check if we collected any data
+                rows[idx] = np.concatenate(rows[idx])
+                cols[idx] = np.concatenate(cols[idx])
+                data[idx] = np.concatenate(data[idx])
             else:
-                result = torch.sparse.mm(A, result)
+                rows[idx] = np.array([])
+                cols[idx] = np.array([])
+                data[idx] = np.array([])
 
-                if threshold > 0:
-                    result = torch.where(
-                        torch.abs(result) < threshold,
-                        torch.tensor(0.0).to(device),
-                        result,
+        # Create sparse scipy matrix from collected data
+        sparse_results = []
+        for idx in range(step_number):
+            sparse_result = sp.sparse.coo_matrix(
+                (data[idx], (rows[idx], cols[idx])), shape=(matrix_size, matrix_size)
+            )
+
+            # Convert to CSC format for more efficient storage and operations
+            sparse_result = sparse_result.tocsc()
+            if save_to_disk:
+                sp.sparse.save_npz(
+                    os.path.join(save_path, f"{save_prefix}{idx}.npz"), sparse_result
+                )
+            else:
+                sparse_results.append(sparse_result)
+
+            print(
+                f"Final matrix {idx} has {sparse_result.nnz} non-zero elements ({sparse_result.nnz/(matrix_size**2)*100:.6f}% of full matrix)"
+            )
+
+        return sparse_results
+
+    else:
+        # make temporary directory to save the chunks
+        temp_dir = os.path.join(os.getcwd(), "temp_chunks")
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
+
+        # Process each chunk
+        for chunk_idx in tqdm(range(num_chunks)):
+            # Define the range for this chunk
+            start_col = chunk_idx * chunkSize
+            end_col = min((chunk_idx + 1) * chunkSize, matrix_size)
+            current_chunk_size = end_col - start_col
+
+            for power in range(step_number):
+                if power == 0:
+                    # For A^1, we can simply extract the relevant columns from A
+                    # Extract the relevant columns using COO format
+                    indices = A._indices()
+                    values = A._values()
+
+                    # Filter to only include the columns we care about
+                    col_mask = (indices[1, :] >= start_col) & (indices[1, :] < end_col)
+                    result_indices = indices[:, col_mask].clone()
+                    result_values = values[col_mask].clone()
+
+                    # Adjust column indices to be relative to start_col
+                    result_indices[1, :] -= start_col
+
+                    # Create the sparse tensor for this column chunk
+                    # shape: (matrix_size, current_chunk_size)
+                    result = torch.sparse_coo_tensor(
+                        result_indices,
+                        result_values,
+                        (matrix_size, current_chunk_size),
+                        device=device,
+                    ).to_dense()
+
+                    if threshold > 0:
+                        result = torch.where(
+                            torch.abs(result) < threshold,
+                            torch.tensor(0.0).to(device),
+                            result,
+                        )
+                else:
+                    # shape: (matrix_size, current_chunk_size)
+                    result = torch.sparse.mm(A, result)
+
+                    if threshold > 0:
+                        result = torch.where(
+                            torch.abs(result) < threshold,
+                            torch.tensor(0.0).to(device),
+                            result,
+                        )
+
+                    # Force garbage collection after each multiplication
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                # Apply threshold and collect non-zero entries
+                if root:
+                    # take power-root of the result
+                    result_root = torch.sign(result) * torch.abs(result) ** (
+                        1 / (power + 1)
                     )
 
-                # Force garbage collection after each multiplication
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                mask = torch.abs(result) >= output_threshold
+                chunk_rows, chunk_cols = torch.nonzero(mask, as_tuple=True)
+                if root:
+                    chunk_data = result_root[chunk_rows, chunk_cols].cpu().numpy()
+                else:
+                    chunk_data = result[chunk_rows, chunk_cols].cpu().numpy()
 
-            # Apply threshold and collect non-zero entries
-            if root:
-                # take power-root of the result
-                result_root = torch.sign(result) * torch.abs(result) ** (
-                    1 / (power + 1)
+                chunk_cols = chunk_cols.cpu().numpy()
+                chunk_rows = chunk_rows.cpu().numpy()
+
+                # save the chunked data to disk as scipy sparse matrices
+                # shape: (matrix_size, current_chunk_size)
+                sparse_chunk = sp.sparse.coo_matrix(
+                    (chunk_data, (chunk_rows, chunk_cols)),
+                    shape=(matrix_size, current_chunk_size),
+                )
+                sparse_chunk.eliminate_zeros()
+                sp.sparse.save_npz(
+                    os.path.join(temp_dir, f"step_{power}_chunk_{chunk_idx}.npz"),
+                    sparse_chunk,
                 )
 
-            mask = torch.abs(result) >= output_threshold
-            chunk_rows, chunk_cols = torch.nonzero(mask, as_tuple=True)
-            if root:
-                chunk_data = result_root[chunk_rows, chunk_cols].cpu().numpy()
-            else:
-                chunk_data = result[chunk_rows, chunk_cols].cpu().numpy()
+            # Clear memory
+            del result, mask, chunk_rows, chunk_cols, chunk_data
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-            # Adjust column indices to global coordinates
-            chunk_cols = chunk_cols.cpu().numpy() + start_col
-            chunk_rows = chunk_rows.cpu().numpy()
+        # Combine all data
+        print("Combining data from all chunks")
+        steps = []
+        # if save_path isn't already a directory, make it
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
 
-            # Append to our COO arrays
-            rows[power].append(chunk_rows)
-            cols[power].append(chunk_cols)
-            data[power].append(chunk_data)
+        for layer in tqdm(range(step_number)):
+            # first combine the es ----
+            rows = []
+            cols = []
+            data = []
+            for chunk_idx in range(num_chunks):
+                # load the chunked data from disk
+                a_sparse_chunk = sp.sparse.load_npz(
+                    os.path.join(temp_dir, f"step_{layer}_chunk_{chunk_idx}.npz")
+                )
+                # adjust the col indices to account for the chunk offset
+                a_sparse_chunk.col += chunk_idx * chunkSize
+                # append the data to the lists
+                rows.append(a_sparse_chunk.row)
+                cols.append(a_sparse_chunk.col)
+                data.append(a_sparse_chunk.data)
+                # delete the sparse matrix to save memory
+                del a_sparse_chunk
+                gc.collect()
 
-        # Clear memory
-        del result, mask, chunk_rows, chunk_cols, chunk_data
+            # combine the data
+            rows = np.concatenate(rows)
+            cols = np.concatenate(cols)
+            data = np.concatenate(data)
+            # create the sparse matrix
+            sparse_layer = sp.sparse.coo_matrix(
+                (data, (rows, cols)), shape=(matrix_size, matrix_size)
+            ).tocsc()
+            sparse_layer.eliminate_zeros()
+            # save the sparse matrix to disk
+            if save_to_disk:
+                sp.sparse.save_npz(
+                    os.path.join(save_path, f"{save_prefix}{layer}.npz"), sparse_layer
+                )
+
+            if return_results:
+                steps.append(sparse_layer)
+            # delete the sparse matrix to save memory
+            del sparse_layer
+            gc.collect()
+
+        # remove the temporary directory
+        for layer in range(step_number):
+            for chunk_idx in range(num_chunks):
+                os.remove(os.path.join(temp_dir, f"step_{layer}_chunk_{chunk_idx}.npz"))
+        os.rmdir(temp_dir)
+        torch.cuda.empty_cache()
+        # clear the cache
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    # Combine all data
-    print("Combining data from all chunks")
-    for idx in tqdm(range(step_number)):
-        if rows[idx]:  # Check if we collected any data
-            rows[idx] = np.concatenate(rows[idx])
-            cols[idx] = np.concatenate(cols[idx])
-            data[idx] = np.concatenate(data[idx])
-        else:
-            rows[idx] = np.array([])
-            cols[idx] = np.array([])
-            data[idx] = np.array([])
-
-    # Create sparse scipy matrix from collected data
-    sparse_results = []
-    for idx in range(step_number):
-        sparse_result = sp.sparse.coo_matrix(
-            (data[idx], (rows[idx], cols[idx])), shape=(matrix_size, matrix_size)
-        )
-
-        # Convert to CSC format for more efficient storage and operations
-        sparse_result = sparse_result.tocsc()
-        if save_to_disk:
-            sp.sparse.save_npz(
-                os.path.join(save_path, f"{save_prefix}{idx}.npz"), sparse_result
-            )
-        else:
-            sparse_results.append(sparse_result)
-
-        print(
-            f"Final matrix {idx} has {sparse_result.nnz} non-zero elements ({sparse_result.nnz/(matrix_size**2)*100:.6f}% of full matrix)"
-        )
-
-    return sparse_results
+        return steps
 
 
 def compress_paths_dense_chunked(
@@ -455,6 +616,12 @@ def compress_paths_signed(
             inhibitory influences, respectively, up to the specified target
             layer.
     """
+    # if inprop is not a coo matrix, convert it
+    if not issparse(inprop):
+        # raise error
+        raise ValueError("inprop must be a scipy sparse matrix")
+    if not isinstance(inprop, coo_matrix):
+        inprop = inprop.tocoo()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     e_idx = [i for i in range(len(idx_to_sign)) if idx_to_sign[i] == 1]
@@ -468,17 +635,31 @@ def compress_paths_signed(
     if not os.path.exists(temp_dir):
         os.makedirs(temp_dir)
 
-    direct_e_sender = inprop.copy()
-    # set i rows to 0
-    direct_e_sender[i_idx, :] = 0
-    direct_i_sender = inprop.copy()
-    # set e rows to 0
-    direct_i_sender[e_idx, :] = 0
+    # Filter out e/i rows directly in COO format
+    e_mask = np.isin(inprop.row, e_idx)
+    i_mask = np.isin(inprop.row, i_idx)
+
+    direct_e_sender = sp.sparse.coo_matrix(
+        (
+            inprop.data[e_mask],
+            (inprop.row[e_mask], inprop.col[e_mask]),
+        ),
+        shape=inprop.shape,
+    ).tocsr()
+    direct_i_sender = sp.sparse.coo_matrix(
+        (
+            inprop.data[i_mask],
+            (inprop.row[i_mask], inprop.col[i_mask]),
+        ),
+        shape=inprop.shape,
+    ).tocsr()
 
     if target_layer_number == 1:
-        return [direct_e_sender], [direct_i_sender]
+        return [direct_e_sender.tocsc()], [direct_i_sender.tocsc()]
 
+    # shape: (n_neurons, n_neurons)
     direct_e_sender_tensor = scipy_sparse_to_pytorch(direct_e_sender, device=device)
+    # shape: (n_neurons, n_neurons)
     direct_i_sender_tensor = scipy_sparse_to_pytorch(direct_i_sender, device=device)
 
     for chunk_idx in tqdm(range(num_chunks)):
