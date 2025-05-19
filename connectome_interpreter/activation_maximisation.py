@@ -662,7 +662,7 @@ def activations_to_df(
     if torch.is_tensor(model_input):
         model_input = model_input.cpu().numpy()
     if torch.is_tensor(out):
-        out = out.cpu().numpy()
+        out = out.detach().cpu().numpy()
 
     print("Getting activations...")
     # get activations from input and out, based on the mappings provided by
