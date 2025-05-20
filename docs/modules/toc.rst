@@ -9,3 +9,4 @@ Function documentation
     path_finding
     external_map
     utils
+    external_paths
