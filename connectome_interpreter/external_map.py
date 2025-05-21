@@ -28,28 +28,22 @@ def load_dataset(dataset: str) -> pd.DataFrame:
         dataset : str
             The name of the dataset to load. Options are:
 
-            - 'DoOR_adult': mapping from glomeruli to chemicals, from Munch
-                and Galizia DoOR dataset (https://www.nature.com/articles/srep21841).
-            - 'DoOR_adult_sfr_subtracted': mapping from glomeruli to chemicals,
-                with spontaneous firing rate subtracted. There are therefore
-                negative values.
-            - 'Dweck_adult_chem': mapping from glomeruli to chemicals
-                extracted from fruits, from Dweck et al. 2018
-                (https://www.cell.com/cell-reports/abstract/S2211-1247(18)30663-6).
+            - 'DoOR_adult': mapping from glomeruli to chemicals, from Munch and Galizia
+                DoOR dataset (https://www.nature.com/articles/srep21841).
+            - 'DoOR_adult_sfr_subtracted': mapping from glomeruli to chemicals, with
+                spontaneous firing rate subtracted. There are therefore negative values.
+            - 'Dweck_adult_chem': mapping from glomeruli to chemicals extracted from
+                fruits, from Dweck et al. 2018 (https://www.cell.com/cell-reports/abstract/S2211-1247(18)30663-6).
                 Firing rates normalised to between 0 and 1.
-            - 'Dweck_adult_fruit': mapping from glomeruli to fruits, from
-                Dweck et al. 2018. Number of responses normalised to between 0
-                and 1.
-            - 'Dweck_larva_chem': mapping from olfactory receptors to
-                chemicals, from Dweck et al. 2018. Firing rates normalised to
-                between 0 and 1.
-            - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits,
-                from Dweck et al. 2018. Number of responses normalised to
-                between 0 and 1.
-            - 'Nern2024': columnar coordinates of individual cells from a
-                collection of columnar cell types within the medulla of the
-                right optic lobe, from Nern et al. 2024
-                (https://www.biorxiv.org/content/10.1101/2024.04.16.589741v2).
+            - 'Dweck_adult_fruit': mapping from glomeruli to fruits, from Dweck et al.
+                2018. Number of responses normalised to between 0 and 1.
+            - 'Dweck_larva_chem': mapping from olfactory receptors to chemicals, from
+                Dweck et al. 2018. Firing rates normalised to between 0 and 1.
+            - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits from
+                Dweck et al. 2018. Number of responses normalised to between 0 and 1.
+            - 'Nern2024': columnar coordinates of individual cells from a collection of
+                columnar cell types within the medulla of the right optic lobe, from
+                Nern et al. 2024 (https://www.biorxiv.org/content/10.1101/2024.04.16.589741v2).
             - 'Matsliah2024': columnar coordinates of individual cells from a collection
                 of columnar cell types in the right optic lobe from FAFB, from Matsliah
                 et al. 2024 (https://www.nature.com/articles/s41586-024-07981-1).
@@ -57,9 +51,8 @@ def load_dataset(dataset: str) -> pd.DataFrame:
                 Badel et al. 2016 (https://www.cell.com/neuron/fulltext/S0896-6273(16)30201-X).
 
     Returns:
-        pd.DataFrame: The dataset as a pandas DataFrame. For the adult, the
-            glomeruli are in the rows. For the larva, receptors are in the
-            rows.
+        pd.DataFrame: The dataset as a pandas DataFrame. For the adult, the glomeruli
+            are in the rows. For the larva, receptors are in the rows.
     """
 
     try:
