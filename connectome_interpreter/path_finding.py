@@ -187,6 +187,10 @@ def find_path_iteratively(
     inidx = to_nparray(inidx)
     outidx = to_nparray(outidx)
 
+    if len(inidx) == 0 or len(outidx) == 0:
+        # raise error
+        raise ValueError("The input or output indices are empty!")
+
     if issparse(inprop_csc):
         # if stepsn is coo, turn into csc
         if inprop_csc.format == "coo":
@@ -624,23 +628,32 @@ def group_paths(
     post_group: dict,
     intermediate_group: dict | None = None,
     avg_within_connected: bool = False,
+    outprop: bool = False,
 ) -> pd.DataFrame:
     """
-    Group the paths by user-specified variable (e.g. cell type, cell class
-    etc.). Weights are summed across presynaptic neurons of the same group and
-    averaged across all postsynaptic neurons of the same group (even if some
-    postsynaptic neurons are not in `paths`).
+    Group the paths by user-specified variable (e.g. cell type, cell class etc.).
+    Weights are summed across presynaptic neurons of the same group and averaged across
+    all postsynaptic neurons of the same group (even if some postsynaptic neurons are
+    not in `paths`).
 
     Args:
-        paths (pd.DataFrame): The DataFrame containing the path data, looking
-            like the output from `find_path_iteratively()`.
-        pre_group (dict): A dictionary that maps pre-synaptic neuron indices
-            to their respective group.
-        post_group (dict): A dictionary that maps post-synaptic neuron indices
-            to their respective group.
-        intermediate_group (dict, optional): A dictionary that maps
-            intermediate neuron indices to their respective group. Defaults to
-            None. If None, it will be set to pre_group.
+        paths (pd.DataFrame): The DataFrame containing the path data, looking like the
+            output from `find_path_iteratively()`.
+        pre_group (dict): A dictionary that maps pre-synaptic neuron indices to their
+            respective group.
+        post_group (dict): A dictionary that maps post-synaptic neuron indices to their
+            respective group.
+        intermediate_group (dict, optional): A dictionary that maps intermediate neuron
+            indices to their respective group. Defaults to None. If None, it will be
+            set to pre_group.
+        avg_within_connected (bool, optional): If True, the average weight is calculated
+            only within neurons in the paths, instead of all neurons in the same cell
+            type. This can be useful for e.g. optic lobe where we sometimes want to only
+            take into account neurons locally connected. Defaults to False.
+        outprop (bool, optional): If True, get the summed output proportion (across
+            recipient single cells in the same cell type) for each average sender. If
+            False (default), get the summed input proportion across all senders for
+            each average recipient.
 
     Returns:
         pd.DataFrame: The grouped DataFrame containing the path data,
@@ -673,40 +686,86 @@ def group_paths(
         .astype(str)
     )
 
-    if not avg_within_connected:
-        # sometimes only one neuron in a type is connected to another type, so
-        # only this connection is in paths
-        # but to calculate the average weight between two types, we should
-        # take into account all the neurons of the post-synaptic type
-        # so let's count the number of neurons in each post-synaptic type
-        nneuron_per_type = count_keys_per_value(intermediate_group)
-        nneuron_per_type.update(count_keys_per_value(post_group))
-    else:
-        # count number of unique neurons in each type
-        nneuron_per_type = paths.groupby("post_type")["post"].nunique().to_dict()
+    if not outprop:
+        # in this case, calculating the summed input proportion across all senders for
+        # each average recipient
 
-    if "pre_activation" in paths.columns:
-        paths = (
-            paths.groupby(["layer", "pre_type", "post_type"])
-            .agg(
-                weight=("weight", "sum"),
-                pre_activation=("pre_activation", "mean"),
-                post_activation=("post_activation", "mean"),
+        if not avg_within_connected:
+            # sometimes only one neuron in a type is connected to another type, so
+            # only this connection is in paths
+            # but to calculate the average weight between two types, we should
+            # take into account all the neurons of the post-synaptic type
+            # so let's count the number of neurons in each post-synaptic type
+            nneuron_per_type = count_keys_per_value(intermediate_group)
+            nneuron_per_type.update(count_keys_per_value(post_group))
+        else:
+            # count number of unique neurons in each type
+            nneuron_per_type = paths.groupby("post_type")["post"].nunique().to_dict()
+
+        if "pre_activation" in paths.columns:
+            paths = (
+                paths.groupby(["layer", "pre_type", "post_type"])
+                .agg(
+                    weight=("weight", "sum"),
+                    pre_activation=("pre_activation", "mean"),
+                    post_activation=("post_activation", "mean"),
+                )
+                .reset_index()
             )
-            .reset_index()
-        )
-    else:
-        # sum across presynaptic neurons of the same type
-        paths = (
-            paths.groupby(["layer", "pre_type", "post_type"]).weight.sum().reset_index()
-        )
-    # divide by number of postsynaptic neurons of the same type
-    paths["nneuron_post"] = paths.post_type.map(nneuron_per_type)
-    paths["weight"] = paths.weight / paths.nneuron_post
-    paths.rename(columns={"pre_type": "pre", "post_type": "post"}, inplace=True)
-    paths.drop(columns="nneuron_post", inplace=True)
+        else:
+            # sum across presynaptic neurons of the same type
+            paths = (
+                paths.groupby(["layer", "pre_type", "post_type"])
+                .weight.sum()
+                .reset_index()
+            )
+        # divide by number of postsynaptic neurons of the same type
+        paths["nneuron_post"] = paths.post_type.map(nneuron_per_type)
+        paths["weight"] = paths.weight / paths.nneuron_post
+        paths.rename(columns={"pre_type": "pre", "post_type": "post"}, inplace=True)
+        paths.drop(columns="nneuron_post", inplace=True)
 
-    return paths
+        return paths
+
+    else:  # outprop
+        # in this case, calculating the summed output proportion (across recipient
+        # single cells in the same cell type) for each average sender
+        if not avg_within_connected:
+            # sometimes only one neuron in a type is connected to another type, so
+            # only this connection is in paths
+            # but to calculate the average weight between two types, we should
+            # take into account all the neurons of the post-synaptic type
+            # so let's count the number of neurons in each post-synaptic type
+            nneuron_per_type = count_keys_per_value(intermediate_group)
+            nneuron_per_type.update(count_keys_per_value(pre_group))
+        else:
+            # count number of unique neurons in each type
+            nneuron_per_type = paths.groupby("pre_type")["pre"].nunique().to_dict()
+
+        if "pre_activation" in paths.columns:
+            paths = (
+                paths.groupby(["layer", "pre_type", "post_type"])
+                .agg(
+                    weight=("weight", "sum"),
+                    pre_activation=("pre_activation", "mean"),
+                    post_activation=("post_activation", "mean"),
+                )
+                .reset_index()
+            )
+        else:
+            # sum across presynaptic neurons of the same type
+            paths = (
+                paths.groupby(["layer", "pre_type", "post_type"])
+                .weight.sum()
+                .reset_index()
+            )
+        # divide by number of presynaptic neurons of the same type
+        paths["nneuron_pre"] = paths.pre_type.map(nneuron_per_type)
+        paths["weight"] = paths.weight / paths.nneuron_pre
+        paths.rename(columns={"pre_type": "pre", "post_type": "post"}, inplace=True)
+        paths.drop(columns="nneuron_pre", inplace=True)
+
+        return paths
 
 
 def compare_layered_paths(
@@ -717,7 +776,9 @@ def compare_layered_paths(
     el_colours: List[str] = ["rosybrown", "burlywood"],
     legend_labels: List[str] = ["Path 1", "Path 2"],
     weight_decimals: int = 2,
+    weight_width_scale=5,
     figsize: tuple = (10, 8),
+    label_pos: List[float] = [0.7, 0.7],
 ):
     """
     Compare two layered paths by overlaying them and annotating the weights.
@@ -776,7 +837,9 @@ def compare_layered_paths(
 
     # Determine the width of the edges
     weights = [composite_G[u][v]["weight"] for u, v in composite_G.edges()]
-    widths = [max(0.1, w * 5) for w in weights]  # Scale weights for visibility
+    widths = [
+        max(0.1, w * weight_width_scale) for w in weights
+    ]  # Scale weights for visibility, min 0.1
 
     # Generate positions
     positions = create_layered_positions(composite_paths, priority_indices)
@@ -844,6 +907,7 @@ def compare_layered_paths(
         verticalalignment="top",
         font_color=el_colours[0],
         ax=ax,
+        label_pos=label_pos[0],
     )
     nx.draw_networkx_edge_labels(
         G2,
@@ -853,6 +917,7 @@ def compare_layered_paths(
         verticalalignment="bottom",
         font_color=el_colours[1],
         ax=ax,
+        label_pos=label_pos[1],
     )
 
     ax.set_ylim(0, 1)
@@ -1009,3 +1074,49 @@ def path_for_ngl(path):
     )
 
     return out
+
+
+def connected_components(
+    paths: pd.DataFrame,
+    threshold: float = 0,
+) -> list:
+    """
+    Find connected components in a directed graph represented by a DataFrame
+    of paths. The DataFrame should contain columns 'pre', 'post', and 'weight'.
+    The function filters the paths based on a weight threshold and then
+    constructs a directed graph using NetworkX. It identifies weakly connected
+    components in the graph and returns a list of DataFrames of paths, each
+    representing a connected component.
+
+    Args:
+        paths (pd.DataFrame): The DataFrame containing the path data, including
+            the layer number, pre-synaptic index, post-synaptic index, and
+            weight.
+        threshold (float, optional): The threshold for the weight of the
+            direct connection between pre and post. Defaults to 0.
+
+    Returns:
+        list: A list of DataFrames, each representing a connected component
+            in the directed graph.
+    """
+    paths = filter_paths(paths, threshold)
+    paths_unique_edges = paths.drop_duplicates(subset=["pre", "post"])
+    # Create a graph from the DataFrame
+    G = nx.from_pandas_edgelist(
+        paths_unique_edges,
+        source="pre",
+        target="post",
+        edge_attr="weight",
+        create_using=nx.DiGraph(),
+    )
+
+    # Find connected components
+    weak_components = list(nx.weakly_connected_components(G))
+
+    components = []
+    for i, component in enumerate(weak_components):
+        path = paths[paths.pre.isin(component) & paths.post.isin(component)]
+        path.loc[:, ["component_idx"]] = i
+        path = remove_excess_neurons(path)
+        components.append(path)
+    return components
