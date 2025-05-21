@@ -162,6 +162,8 @@ def hex_heatmap(
     sizing: dict | None = None,
     dpi: int = 72,
     custom_colorscale: list | None = None,
+    global_min: float | None = None,
+    global_max: float | None = None,
     dataset: str | None = "mcns_right",
 ) -> go.Figure:
     """
@@ -203,6 +205,12 @@ def hex_heatmap(
         custom_colorscale : list, default=None
             Custom colorscale for the heatmap. If None, defaults to white-to-blue
             colorscale [[0, "rgb(255, 255, 255)"], [1, "rgb(0, 20, 200)"]].
+        global_min : float, default=None
+            Global minimum value for the color scale.
+            If None, the minimum value of the data is used but if that is negative, use 0.
+        global_max : float, default=None
+            Global maximum value for the color scale.
+            If None, the maximum value of the data is used.
         dataset : str, default='mcns_right'
             The dataset to use for the hexagon locations. Options are:
 
@@ -248,6 +256,8 @@ def hex_heatmap(
             y=y_vals,
             mode="markers",
             marker_symbol=symbol_number,
+            customdata=np.stack([x_vals, y_vals, aseries.values], axis=-1),
+            hovertemplate="x: %{customdata[0]}<br>y: %{customdata[1]}<br>value: %{customdata[2]}",
             marker={
                 "cmin": global_min,
                 "cmax": global_max,
@@ -311,7 +321,7 @@ def hex_heatmap(
         "ticklen": 15,
         "tickwidth": 5,
         "axislinewidth": 3,
-        "markerlinewidth": 0.9,
+        "markerlinewidth": 0.5,  # 0.9,
         "cbar_thickness": 20,
         "cbar_len": 0.75,
     }
@@ -345,8 +355,10 @@ def hex_heatmap(
 
     # Get global min and max for consistent color scale
     # minimum of 0 and df.values.min()
-    global_min = min(0, df.values.min())
-    global_max = df.values.max()
+    if global_min is None:
+        global_min = min(0, df.values.min())
+    if global_max is None:
+        global_max = df.values.max()
 
     # Symbol number to choose to plot hexagons
     symbol_number = 15
@@ -383,6 +395,7 @@ def hex_heatmap(
     )
 
     # Convert index values (formatted as '-12,34') into separate x and y coordinates
+    df = df[(df.index != "nan") & (~df.index.isnull())]
     coords = [tuple(map(float, idx.split(","))) for idx in df.index]
     x_vals, y_vals = zip(*coords)  # Separate into x and y lists
 

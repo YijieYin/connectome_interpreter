@@ -71,7 +71,7 @@ def compress_paths(
             computed, and combine them at the end.
 
     Returns:
-        List[scipy.sparse.csr_matrix]: List of sparse matrices representing A^0 to A^n.
+        List[scipy.sparse.csc_matrix]: List of sparse matrices representing A^0 to A^n.
     """
     assert A.shape[0] == A.shape[1], "Matrix A must be square"
     assert step_number > 0, "Power n must be positive"
@@ -356,7 +356,7 @@ def compress_paths(
 
 
 def compress_paths_dense_chunked(
-    inprop: csr_matrix,
+    inprop: csc_matrix,
     step_number: int,
     threshold: float = 0,
     output_threshold: float = 1e-4,
@@ -421,9 +421,9 @@ def compress_paths_dense_chunked(
         before processing.
 
     Example:
-        >>> from scipy.sparse import csr_matrix
+        >>> from scipy.sparse import csc_matrix
         >>> import numpy as np
-        >>> inprop = csr_matrix(np.array([[0.1, 0.2], [0.3, 0.4]]))
+        >>> inprop = csc_matrix(np.array([[0.1, 0.2], [0.3, 0.4]]))
         >>> step_number = 2
         >>> compressed_paths = compress_paths(inprop, step_number,
                                               threshold=0.1,
@@ -1014,10 +1014,10 @@ def add_first_n_matrices(matrices, n):
             the number of matrices available in the list.
 
     Example:
-        >>> from scipy.sparse import csr_matrix
-        >>> matrices = [csr_matrix([[1, 2], [3, 4]]),
-                        csr_matrix([[5, 6], [7, 8]]),
-                        csr_matrix([[9, 10], [11, 12]])]
+        >>> from scipy.sparse import csc_matrix
+        >>> matrices = [csc_matrix([[1, 2], [3, 4]]),
+                        csc_matrix([[5, 6], [7, 8]]),
+                        csc_matrix([[9, 10], [11, 12]])]
         >>> n = 2
         >>> result_matrix = add_first_n_matrices(matrices, n)
         >>> print(result_matrix.toarray())
@@ -1310,8 +1310,11 @@ def contribution_by_path_lengths(
         width=width,
         height=height,
     )
-    fig.update_layout(xaxis=dict(tickmode="linear", tick0=1, dtick=1))
-    fig.show()
+    fig.update_layout(xaxis=dict(tickmode="linear", tick0=1, dtick=1),\
+                      yaxis=dict(tickmode="linear", tick0=0, dtick=contri.value.max()/5))
+    # fig.show()
+
+    return fig
 
 
 def contribution_by_path_lengths_heatmap(
@@ -1647,12 +1650,12 @@ def read_precomputed(
 
     steps_cpu = []
     # get npz files
-    files = os.listdir(f"{file_path}{prefix}")
+    files = os.listdir(os.path.join(file_path, prefix))
     files = [f for f in files if f.endswith(".npz")]
 
     if first_n is None:
         first_n = len(files)
 
     for i in range(first_n):
-        steps_cpu.append(sp.sparse.load_npz(f"{file_path}{prefix}/{prefix}_{i}.npz"))
+        steps_cpu.append(sp.sparse.load_npz(os.path.join(file_path, prefix, f"{prefix}_{i}.npz")))
     return steps_cpu
