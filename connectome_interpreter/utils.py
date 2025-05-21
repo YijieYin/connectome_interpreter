@@ -846,6 +846,8 @@ def plot_layered_paths(
     sign_color_map: dict = {1: "red", -1: "blue"},
     node_activation_min: float | None = None,
     node_activation_max: float | None = None,
+    weight_width_scale: float = 5,
+    label_pos: float = 0.7,
 ):
     """
     Plots a directed graph of layered paths with optional node coloring based on
@@ -890,6 +892,11 @@ def plot_layered_paths(
         node_activation_max (float, optional): The maximum value for node activation. If
             not provided, the maximum value of node activations is used. Defaults to
             None.
+        weight_width_scale (float, optional): A scaling factor for the edge widths.
+            Defaults to 5. The width of the edges is determined by multiplying the
+            weights by this scale factor, with a minimum width of 0.1.
+        label_pos (float, optional): The position of the edge labels. Defaults to 0.7.
+            Bigger values move the labels closer to the left of the edge.
 
     Returns:
         None: This function does not return a value. It generates a plot using
@@ -936,7 +943,9 @@ def plot_layered_paths(
 
     # Determine the width of the edges
     weights = [G[u][v]["weight"] for u, v in G.edges()]
-    widths = [max(0.1, w * 5) for w in weights]  # Scale weights for visibility
+    widths = [
+        max(0.1, w * weight_width_scale) for w in weights
+    ]  # Scale weights for visibility, min 0.1
 
     # Generate positions
     from .path_finding import create_layered_positions
@@ -1046,6 +1055,7 @@ def plot_layered_paths(
         G,
         pos=positions,
         edge_labels=edge_labels,
+        label_pos=label_pos,
         #  font_color='red'
         ax=ax,
     )
