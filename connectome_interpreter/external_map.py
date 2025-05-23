@@ -348,10 +348,11 @@ def hex_heatmap(
 
     # Get global min and max for consistent color scale
     # minimum of 0 and df.values.min()
+    vals = df.to_numpy()
     if global_min is None:
-        global_min = min(0, df.values.min())
+        global_min = min(0, vals.min())
     if global_max is None:
-        global_max = df.values.max()
+        global_max = vals.max()
 
     # Symbol number to choose to plot hexagons
     symbol_number = 15

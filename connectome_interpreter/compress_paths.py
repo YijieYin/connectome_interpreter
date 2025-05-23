@@ -97,9 +97,9 @@ def compress_paths(
     # Prepare temporary storage method
     if high_cpu_ram:
         # Initialize dictionaries to collect COO data
-        rows = {idx: [] for idx in range(step_number)}
-        cols = {idx: [] for idx in range(step_number)}
-        data = {idx: [] for idx in range(step_number)}
+        rows: dict[int, list[npt.NDArray]]  = {idx: [] for idx in range(step_number)}
+        cols: dict[int, list[npt.NDArray]]  = {idx: [] for idx in range(step_number)}
+        data: dict[int, list[npt.NDArray]]  = {idx: [] for idx in range(step_number)}
     else:
         # Create temporary directory for chunks
         temp_dir = os.path.join(os.getcwd(), "temp_chunks")
@@ -169,6 +169,7 @@ def compress_paths(
             chunk_rows, chunk_cols = torch.nonzero(mask, as_tuple=True)
 
             # Get values based on whether root was applied
+            chunk_data: npt.NDArray
             if root:
                 chunk_data = (
                     result_root[chunk_rows, chunk_cols]
@@ -182,8 +183,8 @@ def compress_paths(
                 )
 
             # Convert to CPU
-            chunk_cols = chunk_cols.cpu().numpy()
-            chunk_rows = chunk_rows.cpu().numpy()
+            chunk_cols: npt.NDArray = chunk_cols.cpu().numpy()
+            chunk_rows: npt.NDArray = chunk_rows.cpu().numpy()
 
             # Store the data based on RAM usage preference
             if high_cpu_ram:
@@ -1598,7 +1599,7 @@ def signed_effective_conn_from_paths(paths, group_dict=None, wide=True, idx_to_n
 
 
 def read_precomputed(
-    prefix: str, file_path: str = None, first_n: int | None = None
+    prefix: str, file_path: str | None = None, first_n: int | None = None
 ) -> List:
     """Reads the precomputed compressed paths.
 
