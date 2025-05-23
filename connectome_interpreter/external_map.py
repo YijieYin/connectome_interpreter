@@ -14,6 +14,7 @@ DATA_SOURCES: dict[str, str] = {
     "Dweck_larva_fruit": "data/Dweck2018/larva_fruit2or.csv",
     "Nern2024": "data/Nern2024/ME-columnar-cells-hex-location.csv",
     "Matsliah2024": "data/Matsliah2024/fafb_right_vis_cols.csv",
+    "Badel2016_PN": "data/Badel2016/Badel2016.csv",
 }
 
 
@@ -27,36 +28,31 @@ def load_dataset(dataset: str) -> pd.DataFrame:
         dataset : str
             The name of the dataset to load. Options are:
 
-            - 'DoOR_adult': mapping from glomeruli to chemicals, from Munch
-                and Galizia DoOR dataset (https://www.nature.com/articles/srep21841).
-            - 'DoOR_adult_sfr_subtracted': mapping from glomeruli to chemicals,
-                with spontaneous firing rate subtracted. There are therefore
-                negative values.
-            - 'Dweck_adult_chem': mapping from glomeruli to chemicals
-                extracted from fruits, from Dweck et al. 2018
-                (https://www.cell.com/cell-reports/abstract/S2211-1247(18)30663-6).
+            - 'DoOR_adult': mapping from glomeruli to chemicals, from Munch and Galizia
+                DoOR dataset (https://www.nature.com/articles/srep21841).
+            - 'DoOR_adult_sfr_subtracted': mapping from glomeruli to chemicals, with
+                spontaneous firing rate subtracted. There are therefore negative values.
+            - 'Dweck_adult_chem': mapping from glomeruli to chemicals extracted from
+                fruits, from Dweck et al. 2018 (https://www.cell.com/cell-reports/abstract/S2211-1247(18)30663-6).
                 Firing rates normalised to between 0 and 1.
-            - 'Dweck_adult_fruit': mapping from glomeruli to fruits, from
-                Dweck et al. 2018. Number of responses normalised to between 0
-                and 1.
-            - 'Dweck_larva_chem': mapping from olfactory receptors to
-                chemicals, from Dweck et al. 2018. Firing rates normalised to
-                between 0 and 1.
-            - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits,
-                from Dweck et al. 2018. Number of responses normalised to
-                between 0 and 1.
-            - 'Nern2024': columnar coordinates of individual cells from a
-                collection of columnar cell types within the medulla of the
-                right optic lobe, from Nern et al. 2024
-                (https://www.biorxiv.org/content/10.1101/2024.04.16.589741v2).
+            - 'Dweck_adult_fruit': mapping from glomeruli to fruits, from Dweck et al.
+                2018. Number of responses normalised to between 0 and 1.
+            - 'Dweck_larva_chem': mapping from olfactory receptors to chemicals, from
+                Dweck et al. 2018. Firing rates normalised to between 0 and 1.
+            - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits from
+                Dweck et al. 2018. Number of responses normalised to between 0 and 1.
+            - 'Nern2024': columnar coordinates of individual cells from a collection of
+                columnar cell types within the medulla of the right optic lobe, from
+                Nern et al. 2024 (https://www.biorxiv.org/content/10.1101/2024.04.16.589741v2).
             - 'Matsliah2024': columnar coordinates of individual cells from a collection
                 of columnar cell types in the right optic lobe from FAFB, from Matsliah
                 et al. 2024 (https://www.nature.com/articles/s41586-024-07981-1).
+            - 'Badel2016_PN': mapping from olfactory projection neurons to odours, from
+                Badel et al. 2016 (https://www.cell.com/neuron/fulltext/S0896-6273(16)30201-X).
 
     Returns:
-        pd.DataFrame: The dataset as a pandas DataFrame. For the adult, the
-            glomeruli are in the rows. For the larva, receptors are in the
-            rows.
+        pd.DataFrame: The dataset as a pandas DataFrame. For the adult, the glomeruli
+            are in the rows. For the larva, receptors are in the rows.
     """
 
     try:
@@ -109,6 +105,9 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
             - 'Nern2024': columnar coordinates of individual cells from a
                 collection of columnar cell types within the medulla of the
                 right optic lobe, from Nern et al. 2024.
+            - 'Badel2016_PN': mapping from olfactory projection neurons to odours, from
+                Badel et al. 2016 (https://www.cell.com/neuron/fulltext/S0896-6273(16)30201-X).
+
         custom_experiment : pd.DataFrame
             A custom experimental dataset to compare the connectomics data to.
             The row indices of this dataframe must match the row indices of df.
@@ -156,6 +155,8 @@ def hex_heatmap(
     sizing: dict | None = None,
     dpi: int = 72,
     custom_colorscale: list | None = None,
+    global_min: float | None = None,
+    global_max: float | None = None,
     dataset: str | None = "mcns_right",
 ) -> go.Figure:
     """
@@ -197,6 +198,12 @@ def hex_heatmap(
         custom_colorscale : list, default=None
             Custom colorscale for the heatmap. If None, defaults to white-to-blue
             colorscale [[0, "rgb(255, 255, 255)"], [1, "rgb(0, 20, 200)"]].
+        global_min : float, default=None
+            Global minimum value for the color scale.
+            If None, the minimum value of the data is used but if that is negative, use 0.
+        global_max : float, default=None
+            Global maximum value for the color scale.
+            If None, the maximum value of the data is used.
         dataset : str, default='mcns_right'
             The dataset to use for the hexagon locations. Options are:
 
@@ -242,6 +249,8 @@ def hex_heatmap(
             y=y_vals,
             mode="markers",
             marker_symbol=symbol_number,
+            customdata=np.stack([x_vals, y_vals, aseries.values], axis=-1),
+            hovertemplate="x: %{customdata[0]}<br>y: %{customdata[1]}<br>value: %{customdata[2]}",
             marker={
                 "cmin": global_min,
                 "cmax": global_max,
@@ -305,7 +314,7 @@ def hex_heatmap(
         "ticklen": 15,
         "tickwidth": 5,
         "axislinewidth": 3,
-        "markerlinewidth": 0.9,
+        "markerlinewidth": 0.5,  # 0.9,
         "cbar_thickness": 20,
         "cbar_len": 0.75,
     }
@@ -338,9 +347,12 @@ def hex_heatmap(
     fsize_title_px = sizing["fsize_title_pt"] * (1 / POINTS_PER_INCH) * pixelsperinch
 
     # Get global min and max for consistent color scale
-    vals = df.to_numpy()  # no-copy, may coerce types
-    global_min = min(0, vals.min())
-    global_max = vals.max()
+    # minimum of 0 and df.values.min()
+    vals = df.to_numpy()
+    if global_min is None:
+        global_min = min(0, vals.min())
+    if global_max is None:
+        global_max = vals.max()
 
     # Symbol number to choose to plot hexagons
     symbol_number = 15
@@ -377,6 +389,7 @@ def hex_heatmap(
     )
 
     # Convert index values (formatted as '-12,34') into separate x and y coordinates
+    df = df[(df.index != "nan") & (~df.index.isnull())]
     coords = [tuple(map(float, idx.split(","))) for idx in df.index]
     x_vals, y_vals = zip(*coords)  # Separate into x and y lists
 
@@ -469,3 +482,82 @@ def hex_heatmap(
         raise ValueError("df must be a pd.Series or pd.DataFrame")
 
     return fig
+
+
+def looming_stimulus(start_coords, all_coords, n_time=4):
+    """
+    Generate a list of lists of coordinates for a looming stimulus. The stimulus starts
+    at the start_coords and expands outwards in a hexagonal pattern. The stimulus
+    expands for n_time steps. Currently the expansion happens one layer at a time.
+
+    Args
+        start_coords : list
+            List of strings of the form 'x,y' where x and y are the coordinates of the
+            starting hexes for the stimulus.
+        all_coords : list
+            List of strings of the form 'x,y' where x and y are the coordinates of all
+            hexes in the grid.
+        n_time : int, default=4
+            Number of time steps for the stimulus to expand.
+
+    Returns:
+        stim_str : list
+            List of lists of strings of the form 'x,y' where x and y are the coordinates
+            of the hexes that are stimulated at each time step.
+    """
+    coords = [tuple(map(float, idx.split(","))) for idx in all_coords]
+    x_vals, y_vals = zip(*coords)  # Separate into x and y lists
+
+    # sort and rank x_vals
+    x_sorted = sorted(list(set(x_vals)))
+    x_to_rank = {x: rank for rank, x in enumerate(x_sorted)}
+    rank_to_x = {rank: x for rank, x in enumerate(x_sorted)}
+    y_sorted = sorted(list(set(y_vals)))
+    y_to_rank = {y: rank for rank, y in enumerate(y_sorted)}
+    rank_to_y = {rank: y for rank, y in enumerate(y_sorted)}
+
+    start = [tuple(map(float, idx.split(","))) for idx in start_coords]
+    stimulus = []
+    stimulus.append(start)
+    for atime in range(n_time):
+        for x, y in start:
+            start_copy = start.copy()
+            # hexes above and below x
+            if y_to_rank[y] + 2 in rank_to_y:
+                start_copy.append((x, rank_to_y[y_to_rank[y] + 2]))
+            if y_to_rank[y] - 2 in rank_to_y:
+                start_copy.append((x, rank_to_y[y_to_rank[y] - 2]))
+            # hexes to the left
+            if x_to_rank[x] + 1 in rank_to_x:
+                if y_to_rank[y] + 1 in rank_to_y:
+                    start_copy.append(
+                        (rank_to_x[x_to_rank[x] + 1], rank_to_y[y_to_rank[y] + 1])
+                    )
+                if y_to_rank[y] - 1 in rank_to_y:
+                    start_copy.append(
+                        (rank_to_x[x_to_rank[x] + 1], rank_to_y[y_to_rank[y] - 1])
+                    )
+            # hexes to the right
+            if x_to_rank[x] - 1 in rank_to_x:
+                if y_to_rank[y] + 1 in rank_to_y:
+                    start_copy.append(
+                        (rank_to_x[x_to_rank[x] - 1], rank_to_y[y_to_rank[y] + 1])
+                    )
+                if y_to_rank[y] - 1 in rank_to_y:
+                    start_copy.append(
+                        (rank_to_x[x_to_rank[x] - 1], rank_to_y[y_to_rank[y] - 1])
+                    )
+
+            start = list(set(start_copy))
+        stimulus.append(start)
+
+    stim_str = []
+    for atime in range(n_time):
+        stim_atime = []
+        for x, y in stimulus[atime]:
+            # Format x and y to remove .0 if they're integers
+            x_str = str(int(x)) if x == int(x) else str(x)
+            y_str = str(int(y)) if y == int(y) else str(y)
+            stim_atime.append(f"{x_str},{y_str}")
+        stim_str.append(stim_atime)
+    return stim_str
