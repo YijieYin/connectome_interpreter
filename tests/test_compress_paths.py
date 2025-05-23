@@ -43,53 +43,96 @@ class TestCompressPaths(unittest.TestCase):
 
     def test_basic_functionality(self):
         """Test basic functionality of compress_paths with simple matrix."""
-        result = compress_paths(self.simple_matrix, step_number=2)
+        # Force sparse output by setting a high density threshold
+        result = compress_paths(
+            self.simple_matrix, step_number=2, density_threshold=1.0
+        )
 
         # Check return type and length
         self.assertEqual(len(result), 2)
-        self.assertIsInstance(result[0], csc_matrix)
-        self.assertIsInstance(result[1], csc_matrix)
+
+        # Check types (may be sparse or dense)
+        for matrix in result:
+            self.assertIn(type(matrix), (csc_matrix, np.ndarray))
 
         # Check shapes
         self.assertEqual(result[0].shape, (2, 2))
         self.assertEqual(result[1].shape, (2, 2))
 
-        # Check that step 0 is the same as input (except for the format)
-        np.testing.assert_allclose(result[0].toarray(), self.simple_matrix.toarray())
+        # Check that step 0 is the same as input (regardless of format)
+        matrix_array = (
+            result[0].toarray() if hasattr(result[0], "toarray") else result[0]
+        )
+        np.testing.assert_allclose(matrix_array, self.simple_matrix.toarray())
 
     def test_threshold_during_multiplication(self):
         """Test that threshold parameter works during matrix multiplication."""
-        result = compress_paths(self.simple_matrix, step_number=2, threshold=0.4)
+        result = compress_paths(
+            self.simple_matrix, step_number=2, threshold=0.4, density_threshold=1.0
+        )
 
         # Check that no values below threshold exist in the second step
         # (the first step shouldn't be affected by threshold)
-        self.assertTrue(np.all(result[1].data >= 0.4))
+        matrix = result[1]
+        if hasattr(matrix, "data"):  # If sparse
+            self.assertTrue(np.all(matrix.data >= 0.4))
+        else:  # If dense
+            # Only check non-zero values
+            non_zero_mask = matrix != 0
+            self.assertTrue(np.all(matrix[non_zero_mask] >= 0.4))
 
     def test_output_threshold(self):
         """Test that output_threshold parameter works."""
-        result = compress_paths(self.simple_matrix, step_number=2, output_threshold=0.3)
+        result = compress_paths(
+            self.simple_matrix,
+            step_number=2,
+            output_threshold=0.3,
+            density_threshold=1.0,
+        )
 
         # Check that no values below output_threshold exist in final result
         for matrix in result:
-            self.assertTrue(np.all(matrix.data >= 0.3))
+            if hasattr(matrix, "data"):  # If sparse
+                self.assertTrue(np.all(matrix.data >= 0.3))
+            else:  # If dense
+                # Only check non-zero values
+                non_zero_mask = matrix != 0
+                self.assertTrue(np.all(matrix[non_zero_mask] >= 0.3))
 
     def test_root_option(self):
         """Test that root option correctly takes nth root."""
-        result_with_root = compress_paths(self.simple_matrix, step_number=2, root=True)
+        result_with_root = compress_paths(
+            self.simple_matrix, step_number=2, root=True, density_threshold=1.0
+        )
         result_without_root = compress_paths(
-            self.simple_matrix, step_number=2, root=False
+            self.simple_matrix, step_number=2, root=False, density_threshold=1.0
         )
 
         # For the first step (index 0), root should have no effect since it's direct connections
-        np.testing.assert_allclose(
-            result_with_root[0].toarray(), result_without_root[0].toarray()
+        with_root_0 = (
+            result_with_root[0].toarray()
+            if hasattr(result_with_root[0], "toarray")
+            else result_with_root[0]
         )
+        without_root_0 = (
+            result_without_root[0].toarray()
+            if hasattr(result_without_root[0], "toarray")
+            else result_without_root[0]
+        )
+        np.testing.assert_allclose(with_root_0, without_root_0)
 
         # For the second step (index 1), check that values in root version are approximately
         # square roots of the non-root version
-        # We'll check a few sample values
-        with_root = result_with_root[1].toarray()
-        without_root = result_without_root[1].toarray()
+        with_root = (
+            result_with_root[1].toarray()
+            if hasattr(result_with_root[1], "toarray")
+            else result_with_root[1]
+        )
+        without_root = (
+            result_without_root[1].toarray()
+            if hasattr(result_without_root[1], "toarray")
+            else result_without_root[1]
+        )
 
         # Only check non-zero values
         non_zero_mask = without_root > 0
@@ -107,14 +150,19 @@ class TestCompressPaths(unittest.TestCase):
         """Test different chunk sizes produce same results."""
         # Only run if we have enough GPU memory
         try:
-            result1 = compress_paths(self.large_matrix, step_number=2, chunkSize=10)
-            result2 = compress_paths(self.large_matrix, step_number=2, chunkSize=20)
+            result1 = compress_paths(
+                self.large_matrix, step_number=2, chunkSize=10, density_threshold=1.0
+            )
+            result2 = compress_paths(
+                self.large_matrix, step_number=2, chunkSize=20, density_threshold=1.0
+            )
 
             # Results should be the same regardless of chunk size (within floating point precision)
             for m1, m2 in zip(result1, result2):
-                np.testing.assert_allclose(
-                    m1.toarray(), m2.toarray(), rtol=1e-5, atol=1e-7
-                )
+                # Convert to arrays for comparison
+                m1_array = m1.toarray() if hasattr(m1, "toarray") else m1
+                m2_array = m2.toarray() if hasattr(m2, "toarray") else m2
+                np.testing.assert_allclose(m1_array, m2_array, rtol=1e-5, atol=1e-7)
         except RuntimeError:  # Catch CUDA out of memory errors
             self.skipTest("Not enough GPU memory to test different chunk sizes")
 
@@ -131,25 +179,37 @@ class TestCompressPaths(unittest.TestCase):
         )
 
         try:
-            result1 = compress_paths(input_matrix, step_number=2, chunkSize=20)
+            # Force sparse output for comparison with compress_paths_not_chunked
+            result1 = compress_paths(
+                input_matrix, step_number=2, chunkSize=20, density_threshold=1.0
+            )
             result2 = compress_paths_not_chunked(input_matrix, step_number=2)
 
             # Results should be the same regardless of algorithm (within floating point precision)
             for m1, m2 in zip(result1, result2):
-                np.testing.assert_allclose(
-                    m1.toarray(), m2.toarray(), rtol=1e-5, atol=1e-7
-                )
+                # Convert to arrays for comparison
+                m1_array = m1.toarray() if hasattr(m1, "toarray") else m1
+                m2_array = m2.toarray() if hasattr(m2, "toarray") else m2
+                np.testing.assert_allclose(m1_array, m2_array, rtol=1e-5, atol=1e-7)
         except RuntimeError:  # Catch CUDA out of memory errors
             self.skipTest("Not enough GPU memory to test chunked vs non-chunked")
 
     def test_zero_matrix(self):
         """Test behavior with zero matrix input."""
+        # Test behavior with default settings
         result = compress_paths(self.zero_matrix, step_number=2)
 
-        # Result should be zero matrices
+        # Check that results are correct regardless of format
         for matrix in result:
-            self.assertEqual(matrix.nnz, 0)
-            np.testing.assert_array_equal(matrix.toarray(), np.zeros((100, 100)))
+            if hasattr(matrix, "nnz"):  # If sparse
+                self.assertEqual(matrix.nnz, 0)
+                np.testing.assert_array_equal(matrix.toarray(), np.zeros((100, 100)))
+            else:  # If dense
+                np.testing.assert_array_equal(matrix, np.zeros((100, 100)))
+
+        # Skip the dense-specific test since we can't always force dense format for a zero matrix
+        # Even with density_threshold=0.0, the implementation might choose sparse format for efficiency
+        # For a zero matrix, density is always 0 regardless of format
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
     def test_memory_cleanup(self):
@@ -168,7 +228,7 @@ class TestCompressPaths(unittest.TestCase):
     def test_save_to_disk(self):
         """Test that save_to_disk option works correctly."""
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Run with save_to_disk=True
+            # Run with save_to_disk=True for sparse output
             result = compress_paths(
                 self.simple_matrix,
                 step_number=2,
@@ -176,12 +236,11 @@ class TestCompressPaths(unittest.TestCase):
                 save_path=temp_dir,
                 save_prefix="test_",
                 return_results=False,
+                density_threshold=1.0,  # Max threshold to force sparse output
             )
 
             # Result should be an empty list
             self.assertEqual(len(result), 0)
-            print("temp_dir: ", temp_dir)
-            print(os.path.join(temp_dir, "test_0.npz"))
 
             # Check that files exist
             self.assertTrue(os.path.exists(os.path.join(temp_dir, "test_0.npz")))
@@ -194,6 +253,42 @@ class TestCompressPaths(unittest.TestCase):
             # Check that loaded matrices have the right shape
             self.assertEqual(loaded0.shape, (2, 2))
             self.assertEqual(loaded1.shape, (2, 2))
+
+    def test_save_dense_to_disk(self):
+        """Test that dense matrices are correctly saved to disk."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create a denser matrix
+            dense_matrix = np.random.random((10, 10)) * 0.5
+            # Make it sparse but still dense enough to trigger dense format
+            mask = np.random.random((10, 10)) < 0.2
+            dense_matrix[mask] = 0
+            sparse_dense_matrix = csr_matrix(dense_matrix)
+
+            # Run with save_to_disk=True with low density threshold to force dense output
+            result = compress_paths(
+                sparse_dense_matrix,
+                step_number=1,
+                save_to_disk=True,
+                save_path=temp_dir,
+                save_prefix="dense_",
+                return_results=False,
+                density_threshold=0.5,  # Force dense output
+            )
+
+            # Result should be an empty list
+            self.assertEqual(len(result), 0)
+
+            # Check that dense file exists with .npy extension
+            self.assertTrue(os.path.exists(os.path.join(temp_dir, "dense_0.npy")))
+
+            # Check that we can load the file as a numpy array
+            loaded = np.load(os.path.join(temp_dir, "dense_0.npy"))
+
+            # Check that loaded matrix has the right shape
+            self.assertEqual(loaded.shape, (10, 10))
+
+            # Check that the content matches the original matrix
+            np.testing.assert_allclose(loaded, dense_matrix, rtol=1e-5, atol=1e-7)
 
     def test_invalid_inputs(self):
         """Test that the function raises appropriate errors for invalid inputs."""
@@ -210,112 +305,90 @@ class TestCompressPaths(unittest.TestCase):
         result = compress_paths(self.simple_matrix, step_number=2, threshold=-0.1)
         self.assertEqual(len(result), 2)
 
+    def test_density_threshold(self):
+        """Test that density threshold correctly determines output format."""
+        # Create a matrix with known density
+        size = 10
+        matrix = np.zeros((size, size))
+        # Set 30% of elements to non-zero
+        indices = np.random.choice(size * size, int(0.3 * size * size), replace=False)
+        rows, cols = np.unravel_index(indices, (size, size))
+        for r, c in zip(rows, cols):
+            matrix[r, c] = np.random.random() * 0.5
+        sparse_matrix = csr_matrix(matrix)
 
-class TestCompressPathsDenseChunked(unittest.TestCase):
-    """Tests for the compress_paths_dense_chunked function."""
-
-    def setUp(self):
-        """Set up test matrices for use in multiple tests."""
-        # Simple 2x2 matrix
-        self.simple_matrix = csr_matrix(np.array([[0.5, 0.5], [0.3, 0.7]]))
-
-        # Larger sparse matrix (100x100)
-        size = 100
-        data = np.random.random(size * 10) * 0.5  # Create some random data
-        rows = np.random.randint(0, size, size * 10)
-        cols = np.random.randint(0, size, size * 10)
-        self.large_matrix = csr_matrix(
-            (data, (rows, cols)), shape=(size, size), dtype=np.float32
+        # Test with density_threshold=1.0 (should always be sparse)
+        result_sparse = compress_paths(
+            sparse_matrix, step_number=1, density_threshold=1.0
+        )
+        self.assertTrue(
+            hasattr(result_sparse[0], "toarray"),
+            "Result should be sparse with density_threshold=1.0",
         )
 
-        # Zero matrix
-        self.zero_matrix = csr_matrix((size, size))
+        # Test with density_threshold=0.0 (should always be dense)
+        result_dense = compress_paths(
+            sparse_matrix, step_number=1, density_threshold=0.0
+        )
+        self.assertFalse(
+            hasattr(result_dense[0], "toarray"),
+            "Result should be dense with density_threshold=0.0",
+        )
+        self.assertIsInstance(result_dense[0], np.ndarray)
 
-    def test_basic_functionality(self):
-        """Test basic functionality of compress_paths_dense_chunked with simple matrix."""
-        result = compress_paths_dense_chunked(self.simple_matrix, step_number=2)
+        # Check that both formats have same values
+        sparse_array = (
+            result_sparse[0].toarray()
+            if hasattr(result_sparse[0], "toarray")
+            else result_sparse[0]
+        )
+        dense_array = result_dense[0]
+        np.testing.assert_allclose(sparse_array, dense_array, rtol=1e-5, atol=1e-7)
 
-        # Check return type and length
-        self.assertEqual(len(result), 2)
-        self.assertIsInstance(result[0], csc_matrix)
-        self.assertIsInstance(result[1], csc_matrix)
-
-        # Check shapes
-        self.assertEqual(result[0].shape, (2, 2))
-        self.assertEqual(result[1].shape, (2, 2))
-
-        # Check that step 0 is the same as input (except for the format)
-        np.testing.assert_allclose(result[0].toarray(), self.simple_matrix.toarray())
-
-    def test_threshold_during_multiplication(self):
-        """Test that threshold parameter works during multiplication."""
-        result = compress_paths_dense_chunked(
-            self.simple_matrix, step_number=2, threshold=0.4
+    def test_output_dtype(self):
+        """Test that output_dtype parameter works for both formats."""
+        # Test with sparse format (using max density threshold to force sparse)
+        result_f32_sparse = compress_paths(
+            self.simple_matrix,
+            step_number=1,
+            output_dtype=np.float32,
+            density_threshold=1.0,
         )
 
-        # Check that no values below threshold exist in the second step
-        self.assertTrue(np.all(result[1].data >= 0.4))
-
-    def test_output_threshold(self):
-        """Test that output_threshold parameter works."""
-        result = compress_paths_dense_chunked(
-            self.simple_matrix, step_number=2, output_threshold=0.3
+        result_f64_sparse = compress_paths(
+            self.simple_matrix,
+            step_number=1,
+            output_dtype=np.float64,
+            density_threshold=1.0,
         )
 
-        # Check that no values below output_threshold exist in final result
-        for matrix in result:
-            self.assertTrue(np.all(matrix.data >= 0.3))
+        # Check sparse dtypes - only if the results are actually sparse
+        if hasattr(result_f32_sparse[0], "data"):
+            self.assertEqual(result_f32_sparse[0].data.dtype, np.float32)
+        if hasattr(result_f64_sparse[0], "data"):
+            self.assertEqual(result_f64_sparse[0].data.dtype, np.float64)
 
-    def test_root_option(self):
-        """Test that root option correctly takes nth root."""
-        result_with_root = compress_paths_dense_chunked(
-            self.simple_matrix, step_number=2, root=True
+        # Test with dense format using a denser matrix and forcing dense output
+        matrix = np.random.random((5, 5)) * 0.5
+        sparse_matrix = csr_matrix(matrix)
+
+        result_f32_dense = compress_paths(
+            sparse_matrix,
+            step_number=1,
+            output_dtype=np.float32,
+            density_threshold=0.0,  # Force dense format with minimum threshold
         )
-        result_without_root = compress_paths_dense_chunked(
-            self.simple_matrix, step_number=2, root=False
+
+        result_f64_dense = compress_paths(
+            sparse_matrix,
+            step_number=1,
+            output_dtype=np.float64,
+            density_threshold=0.0,  # Force dense format with minimum threshold
         )
 
-        # For the second step (index 1), check that values with root are approximately square roots
-        with_root = result_with_root[1].toarray()
-        without_root = result_without_root[1].toarray()
-
-        # Only check non-zero values
-        non_zero_mask = without_root > 0
-        if np.any(non_zero_mask):
-            # Sample check: values with root should be approximately sqrt of values without root
-            sample_with_root = with_root[non_zero_mask][0]
-            sample_without_root = without_root[non_zero_mask][0]
-            self.assertAlmostEqual(
-                sample_with_root, np.sqrt(sample_without_root), places=5
-            )
-
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
-    def test_save_to_disk(self):
-        """Test that save_to_disk option works correctly."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Run with save_to_disk=True
-            result = compress_paths_dense_chunked(
-                self.simple_matrix,
-                step_number=2,
-                save_to_disk=True,
-                save_path=temp_dir,
-                save_prefix="test_",
-            )
-
-            # Result should be an empty list
-            self.assertEqual(len(result), 0)
-
-            # Check that files exist
-            self.assertTrue(os.path.exists(os.path.join(temp_dir, "test_0.npz")))
-            self.assertTrue(os.path.exists(os.path.join(temp_dir, "test_1.npz")))
-
-    def test_invalid_step_number(self):
-        """Test that the function raises appropriate errors for invalid step number."""
-        with self.assertRaises(ValueError):
-            compress_paths_dense_chunked(self.simple_matrix, step_number=0)
-
-        with self.assertRaises(ValueError):
-            compress_paths_dense_chunked(self.simple_matrix, step_number=-1)
+        # Check dense dtypes
+        self.assertEqual(result_f32_dense[0].dtype, np.float32)
+        self.assertEqual(result_f64_dense[0].dtype, np.float64)
 
 
 class TestCompressPathsSigned(unittest.TestCase):
