@@ -30,7 +30,7 @@ from .utils import (
 
 
 def compress_paths(
-    A: sp.sparse.maxtrix,
+    A: sp.sparse.spmatrix,
     step_number: int,
     threshold: float = 0,
     output_threshold: float = 1e-4,
