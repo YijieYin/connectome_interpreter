@@ -413,15 +413,15 @@ def activation_maximisation(
     # if using Weight & Biases
     if wandb:
         try:
-            import wandb
+            import wandb as wandb_lib
         except ImportError as exc:
             raise ImportError(
                 "wandb is not installed. Please install it using 'pip install wandb' or set wandb=False."
             ) from exc
 
-        wandb.init(project="connectome_interpreter")
+        wandb_lib.init(project="connectome_interpreter")
 
-        wandb.log(
+        wandb_lib.log(
             {
                 "learning_rate": learning_rate,
                 "input_regularization_lambda": in_reg_lambda,
@@ -662,7 +662,7 @@ def activations_to_df(
     if torch.is_tensor(model_input):
         model_input = model_input.cpu().numpy()
     if torch.is_tensor(out):
-        out = out.cpu().numpy()
+        out = out.detach().cpu().numpy()
 
     print("Getting activations...")
     # get activations from input and out, based on the mappings provided by

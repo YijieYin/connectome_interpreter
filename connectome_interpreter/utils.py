@@ -18,7 +18,7 @@ from scipy.sparse import coo_matrix, issparse
 import seaborn as sns
 
 # types that can be made into a numeric numpy array
-arrayable = Real | Collection[Real]
+arrayable = npt.ArrayLike
 
 
 def dynamic_representation(tensor, density_threshold=0.2):
@@ -648,6 +648,7 @@ def get_ngl_link(
         raise ValueError("df_format should be either 'wide' or 'long'")
 
     for i, ite in enumerate(iterate_over):
+        cmap: plt.Colormap
         if diff_colours_per_layer:
             color = random.choice(colors)
             cmap = mcl.LinearSegmentedColormap.from_list(
@@ -851,6 +852,7 @@ def plot_layered_paths(
     highlight_nodes: list[str] = [],
     interactive: bool = False,
     file_name: str = "layered_paths",
+    label_pos: float = 0.7,
 ):
     """
     Plots a directed graph of layered paths with optional node coloring based on
@@ -911,6 +913,8 @@ def plot_layered_paths(
         file_name (str, optional): The name of the file to save the plot. 
             Defaults to "layered_paths" in the local directory 
             (.html if interactive and .pdf if static).
+        label_pos (float, optional): The position of the edge labels. Defaults to 0.7.
+            Bigger values move the labels closer to the left of the edge.
 
     Returns:
         None: This function does not return a value. It generates a plot using
@@ -962,7 +966,6 @@ def plot_layered_paths(
     # Labels for nodes
     labels = dict(zip(path_df.post_layer, path_df.post))
     labels.update(dict(zip(path_df.pre_layer, path_df.pre)))
-
 
     # Generate positions
     from .path_finding import create_layered_positions
@@ -1129,6 +1132,7 @@ def plot_layered_paths(
                 G,
                 pos=positions,
                 edge_labels=edge_labels,
+                label_pos=label_pos,
                 font_size=14,
                 rotate=False,
                 ax=ax,

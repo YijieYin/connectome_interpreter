@@ -25,41 +25,21 @@ def load_dataset(dataset: str) -> pd.DataFrame:
     in this repository: https://github.com/YijieYin/interpret_connectome.
 
     Args:
-        dataset : str
-            The name of the dataset to load. Options are:
+        dataset: (str) The name of the dataset to load. Options are:
 
-            - 'DoOR_adult': mapping from glomeruli to chemicals, from Munch
-                and Galizia DoOR dataset (https://www.nature.com/articles/srep21841).
-            - 'DoOR_adult_sfr_subtracted': mapping from glomeruli to chemicals,
-                with spontaneous firing rate subtracted. There are therefore
-                negative values.
-            - 'Dweck_adult_chem': mapping from glomeruli to chemicals
-                extracted from fruits, from Dweck et al. 2018
-                (https://www.cell.com/cell-reports/abstract/S2211-1247(18)30663-6).
-                Firing rates normalised to between 0 and 1.
-            - 'Dweck_adult_fruit': mapping from glomeruli to fruits, from
-                Dweck et al. 2018. Number of responses normalised to between 0
-                and 1.
-            - 'Dweck_larva_chem': mapping from olfactory receptors to
-                chemicals, from Dweck et al. 2018. Firing rates normalised to
-                between 0 and 1.
-            - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits,
-                from Dweck et al. 2018. Number of responses normalised to
-                between 0 and 1.
-            - 'Nern2024': columnar coordinates of individual cells from a
-                collection of columnar cell types within the medulla of the
-                right optic lobe, from Nern et al. 2024
-                (https://www.biorxiv.org/content/10.1101/2024.04.16.589741v2).
-            - 'Matsliah2024': columnar coordinates of individual cells from a collection
-                of columnar cell types in the right optic lobe from FAFB, from Matsliah
-                et al. 2024 (https://www.nature.com/articles/s41586-024-07981-1).
-            - 'Badel2016_PN': mapping from olfactory projection neurons to odours, from
-                Badel et al. 2016 (https://www.cell.com/neuron/fulltext/S0896-6273(16)30201-X).
+            - 'DoOR_adult': mapping from glomeruli to chemicals, from Munch and Galizia DoOR dataset (https://www.nature.com/articles/srep21841).
+            - 'DoOR_adult_sfr_subtracted': mapping from glomeruli to chemicals, with spontaneous firing rate subtracted. There are therefore negative values.
+            - 'Dweck_adult_chem': mapping from glomeruli to chemicals extracted from fruits, from Dweck et al. 2018 (https://www.cell.com/cell-reports/abstract/S2211-1247(18)30663-6). Firing rates normalised to between 0 and 1.
+            - 'Dweck_adult_fruit': mapping from glomeruli to fruits, from Dweck et al. 2018. Number of responses normalised to between 0 and 1.
+            - 'Dweck_larva_chem': mapping from olfactory receptors to chemicals, from Dweck et al. 2018. Firing rates normalised to between 0 and 1.
+            - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits from Dweck et al. 2018. Number of responses normalised to between 0 and 1.
+            - 'Nern2024': columnar coordinates of individual cells from a collection of columnar cell types within the medulla of the right optic lobe, from Nern et al. 2024 (https://www.biorxiv.org/content/10.1101/2024.04.16.589741v2).
+            - 'Matsliah2024': columnar coordinates of individual cells from a collection of columnar cell types in the right optic lobe from FAFB, from Matsliah et al. 2024 (https://www.nature.com/articles/s41586-024-07981-1).
+            - 'Badel2016_PN': mapping from olfactory projection neurons to odours, from Badel et al. 2016 (https://www.cell.com/neuron/fulltext/S0896-6273(16)30201-X).
 
     Returns:
-        pd.DataFrame: The dataset as a pandas DataFrame. For the adult, the
-            glomeruli are in the rows. For the larva, receptors are in the
-            rows.
+        pd.DataFrame: The dataset as a pandas DataFrame. For the adult, the glomeruli
+        are in the rows. For the larva, receptors are in the rows.
     """
 
     try:
@@ -84,45 +64,26 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
     neuron's input.
 
     Args:
-        df : pd.DataFrame
-            The connectivity data. Standardised input (e.g. glomeruli,
+        df (pd.DataFrame): The connectivity data. Standardised input (e.g. glomeruli,
             receptors) in rows, observations (target neurons) in columns.
-        dataset : str
-            The name of the dataset to load. Options are:
+        dataset (str): The name of the dataset to load. Options are:
 
-            - 'DoOR_adult': mapping from glomeruli to chemicals, from Munch
-                and Galizia DoOR dataset
-                (https://www.nature.com/articles/srep21841).
-            - 'DoOR_adult_sfr_subtracted': mapping from glomeruli to chemicals,
-                with spontaneous firing rate subtracted. There are therefore
-                negative values.
-            - 'Dweck_adult_chem': mapping from glomeruli to chemicals
-                extracted from fruits, from Dweck et al. 2018
-                (https://www.cell.com/cell-reports/abstract/S2211-1247(18)30663-6).
-                Firing rates normalised to between 0 and 1.
-            - 'Dweck_adult_fruit': mapping from glomeruli to fruits, from
-                Dweck et al. 2018. Number of responses normalised to between
-                0 and 1.
-            - 'Dweck_larva_chem': mapping from olfactory receptors to
-                chemicals, from Dweck et al. 2018. Firing rates normalised to
-                between 0 and 1.
-            - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits,
-                from Dweck et al. 2018. Number of responses normalised to
-                between 0 and 1.
-            - 'Nern2024': columnar coordinates of individual cells from a
-                collection of columnar cell types within the medulla of the
-                right optic lobe, from Nern et al. 2024.
-            - 'Badel2016_PN': mapping from olfactory projection neurons to odours, from
-                Badel et al. 2016 (https://www.cell.com/neuron/fulltext/S0896-6273(16)30201-X).
+            - 'DoOR_adult': mapping from glomeruli to chemicals, from Munch and Galizia DoOR dataset (https://www.nature.com/articles/srep21841).
+            - 'DoOR_adult_sfr_subtracted': mapping from glomeruli to chemicals, with spontaneous firing rate subtracted. There are therefore negative values.
+            - 'Dweck_adult_chem': mapping from glomeruli to chemicals extracted from fruits, from Dweck et al. 2018 (https://www.cell.com/cell-reports/abstract/S2211-1247(18)30663-6). Firing rates normalised to between 0 and 1.
+            - 'Dweck_adult_fruit': mapping from glomeruli to fruits, from Dweck et al. 2018. Number of responses normalised to between 0 and 1.
+            - 'Dweck_larva_chem': mapping from olfactory receptors to chemicals, from Dweck et al. 2018. Firing rates normalised to between 0 and 1.
+            - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits, from Dweck et al. 2018. Number of responses normalised to between 0 and 1.
+            - 'Nern2024': columnar coordinates of individual cells from a collection of columnar cell types within the medulla of the right optic lobe, from Nern et al. 2024.
+            - 'Badel2016_PN': mapping from olfactory projection neurons to odours, from Badel et al. 2016 (https://www.cell.com/neuron/fulltext/S0896-6273(16)30201-X).
 
-        custom_experiment : pd.DataFrame
-            A custom experimental dataset to compare the connectomics data to.
-            The row indices of this dataframe must match the row indices of df.
-            They are the units of comparison (e.g. glomeruli).
+        custom_experiment (pd.DataFrame): A custom experimental dataset to compare the
+            connectomics data to. The row indices of this dataframe must match the row
+            indices of df. They are the units of comparison (e.g. glomeruli).
 
     Returns:
-        pd.DataFrame: The similarity between the connectomics data and the
-            experimental data. Rows are neurons, columns are external stimulus.
+        pd.DataFrame: The similarity between the connectomics data and the experimental
+        data. Rows are neurons, columns are external stimulus.
     """
 
     # try:
@@ -162,6 +123,8 @@ def hex_heatmap(
     sizing: dict | None = None,
     dpi: int = 72,
     custom_colorscale: list | None = None,
+    global_min: float | None = None,
+    global_max: float | None = None,
     dataset: str | None = "mcns_right",
 ) -> go.Figure:
     """
@@ -203,16 +166,17 @@ def hex_heatmap(
         custom_colorscale : list, default=None
             Custom colorscale for the heatmap. If None, defaults to white-to-blue
             colorscale [[0, "rgb(255, 255, 255)"], [1, "rgb(0, 20, 200)"]].
+        global_min : float, default=None
+            Global minimum value for the color scale.
+            If None, the minimum value of the data is used but if that is negative, use 0.
+        global_max : float, default=None
+            Global maximum value for the color scale.
+            If None, the maximum value of the data is used.
         dataset : str, default='mcns_right'
             The dataset to use for the hexagon locations. Options are:
 
-                - 'mcns_right': columnar coordinates of individual cells from columnar
-                    cell types: L1, L2, L3, L5, Mi1, Mi4, Mi9, C2, C3, Tm1, Tm2, Tm4,
-                    Tm9, Tm20, T1, within the medulla of the right optic lobe, from
-                    Nern et al. 2024.
-                - 'fafb_right': columnar coordinates of individual cells from columnar
-                    cell types, in the right optic lobe of FAFB, from Matsliah et al.
-                    2024.
+                - 'mcns_right': columnar coordinates of individual cells from columnar cell types: L1, L2, L3, L5, Mi1, Mi4, Mi9, C2, C3, Tm1, Tm2, Tm4, Tm9, Tm20, T1, within the medulla of the right optic lobe, from Nern et al. 2024.
+                - 'fafb_right': columnar coordinates of individual cells from columnar cell types, in the right optic lobe of FAFB, from Matsliah et al. 2024.
 
     Returns:
         fig : go.Figure
@@ -248,6 +212,8 @@ def hex_heatmap(
             y=y_vals,
             mode="markers",
             marker_symbol=symbol_number,
+            customdata=np.stack([x_vals, y_vals, aseries.values], axis=-1),
+            hovertemplate="x: %{customdata[0]}<br>y: %{customdata[1]}<br>value: %{customdata[2]}",
             marker={
                 "cmin": global_min,
                 "cmax": global_max,
@@ -311,7 +277,7 @@ def hex_heatmap(
         "ticklen": 15,
         "tickwidth": 5,
         "axislinewidth": 3,
-        "markerlinewidth": 0.9,
+        "markerlinewidth": 0.5,  # 0.9,
         "cbar_thickness": 20,
         "cbar_len": 0.75,
     }
@@ -345,8 +311,11 @@ def hex_heatmap(
 
     # Get global min and max for consistent color scale
     # minimum of 0 and df.values.min()
-    global_min = min(0, df.values.min())
-    global_max = df.values.max()
+    vals = df.to_numpy()
+    if global_min is None:
+        global_min = min(0, vals.min())
+    if global_max is None:
+        global_max = vals.max()
 
     # Symbol number to choose to plot hexagons
     symbol_number = 15
@@ -383,6 +352,7 @@ def hex_heatmap(
     )
 
     # Convert index values (formatted as '-12,34') into separate x and y coordinates
+    df = df[(df.index != "nan") & (~df.index.isnull())]
     coords = [tuple(map(float, idx.split(","))) for idx in df.index]
     x_vals, y_vals = zip(*coords)  # Separate into x and y lists
 
@@ -483,20 +453,16 @@ def looming_stimulus(start_coords, all_coords, n_time=4):
     at the start_coords and expands outwards in a hexagonal pattern. The stimulus
     expands for n_time steps. Currently the expansion happens one layer at a time.
 
-    Args
-        start_coords : list
-            List of strings of the form 'x,y' where x and y are the coordinates of the
-            starting hexes for the stimulus.
-        all_coords : list
-            List of strings of the form 'x,y' where x and y are the coordinates of all
-            hexes in the grid.
-        n_time : int, default=4
-            Number of time steps for the stimulus to expand.
+    Args:
+        start_coords (list): List of strings of the form 'x,y' where x and y are the
+            coordinates of the starting hexes for the stimulus.
+        all_coords (list): List of strings of the form 'x,y' where x and y are the
+            coordinates of all hexes in the grid.
+        n_time (int): Default=4. Number of time steps for the stimulus to expand.
 
     Returns:
-        stim_str : list
-            List of lists of strings of the form 'x,y' where x and y are the coordinates
-            of the hexes that are stimulated at each time step.
+        stim_str (list): List of lists of strings of the form 'x,y' where x and y are
+        the coordinates of the hexes that are stimulated at each time step.
     """
     coords = [tuple(map(float, idx.split(","))) for idx in all_coords]
     x_vals, y_vals = zip(*coords)  # Separate into x and y lists

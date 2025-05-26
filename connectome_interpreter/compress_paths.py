@@ -8,6 +8,7 @@ import gc
 import ipywidgets as widgets
 import matplotlib.pyplot as plt
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 import plotly.express as px
 import scipy as sp
@@ -29,7 +30,7 @@ from .utils import (
 
 
 def compress_paths(
-    A,
+    A: sp.sparse.spmatrix,
     step_number: int,
     threshold: float = 0,
     output_threshold: float = 1e-4,
@@ -41,11 +42,13 @@ def compress_paths(
     save_prefix: str = "step_",
     return_results: bool = True,
     high_cpu_ram: bool = True,
+    output_dtype: np.dtype = np.float32,
+    density_threshold: float = 0.2,  # Save as dense if density exceeds this
 ):
     """
     Computes A^0 to A^n by chunking the computation to save memory.
-    Results are thresholded and returned as a list of sparse scipy matrices (or saved to
-    save_path).
+    Results are thresholded and returned as a list of sparse scipy matrices or numpy
+    arrays.
 
     Args:
         A (scipy.sparse.matrix): The connectivity matrix as a scipy
@@ -53,7 +56,7 @@ def compress_paths(
         step_number (int): Power to raise A to.
         threshold (float): Threshold to apply to the matrix after each multiplication.
             If 0, no thresholding is applied.
-        output_threshold (float): Threshold to apply to the output, but not during
+        output_threshold (float): Threshold to apply to the output (>=), but not during
             matrix multiplication.
         root (bool): If True, take the n-th root of the result in output.
         chunkSize (int): Size of the chunks to process at a time. This determines
@@ -69,217 +72,130 @@ def compress_paths(
             matrices in memory, before combining and writing to disk altogether. if
             False, write each chunk to disk to a temporary directory as soon as it is
             computed, and combine them at the end.
+        output_dtype (np.dtype): Data type to use for the output matrices. Defaults
+            to np.float32.
+        density_threshold (float): If the density of the matrix exceeds this threshold,
+            the matrix is saved as dense. Defaults to 0.2.
 
     Returns:
-        List[scipy.sparse.csr_matrix]: List of sparse matrices representing A^0 to A^n.
+        List[scipy.sparse.csr_matrix or numpy.ndarray]: List of matrices representing
+        A^0 to A^n.
     """
     assert A.shape[0] == A.shape[1], "Matrix A must be square"
     assert step_number > 0, "Power n must be positive"
 
-    # turn A into a torch sparse tensor
+    # Turn A into a torch sparse tensor
     A = scipy_sparse_to_pytorch(A).to(device)
 
     matrix_size = A.shape[0]
     num_chunks = (matrix_size + chunkSize - 1) // chunkSize  # Ceiling division
 
+    # Create save directory if needed
+    if save_to_disk and not os.path.exists(save_path):
+        os.makedirs(save_path)
+
+    # Prepare temporary storage method
     if high_cpu_ram:
-        # Initialize empty dictionaries of empty lists to collect COO data
-        rows = {idx: [] for idx in range(step_number)}
-        cols = {idx: [] for idx in range(step_number)}
-        data = {idx: [] for idx in range(step_number)}
-
-        # Process each chunk
-        for chunk_idx in tqdm(range(num_chunks)):
-            # Define the range for this chunk
-            start_col = chunk_idx * chunkSize
-            end_col = min((chunk_idx + 1) * chunkSize, matrix_size)
-            current_chunk_size = end_col - start_col
-
-            for power in range(step_number):
-                if power == 0:
-                    # For A^1, we can simply extract the relevant columns from A
-                    # Extract the relevant columns using COO format
-                    indices = A._indices()
-                    values = A._values()
-
-                    # Filter to only include the columns we care about
-                    col_mask = (indices[1, :] >= start_col) & (indices[1, :] < end_col)
-                    result_indices = indices[:, col_mask].clone()
-                    result_values = values[col_mask].clone()
-
-                    # Adjust column indices to be relative to start_col
-                    result_indices[1, :] -= start_col
-
-                    # Create the sparse tensor for this column chunk
-                    result = torch.sparse_coo_tensor(
-                        result_indices,
-                        result_values,
-                        (matrix_size, current_chunk_size),
-                        device=device,
-                    ).to_dense()
-
-                    if threshold > 0:
-                        result = torch.where(
-                            torch.abs(result) < threshold,
-                            torch.tensor(0.0).to(device),
-                            result,
-                        )
-                else:
-                    result = torch.sparse.mm(A, result)
-
-                    if threshold > 0:
-                        result = torch.where(
-                            torch.abs(result) < threshold,
-                            torch.tensor(0.0).to(device),
-                            result,
-                        )
-
-                    # Force garbage collection after each multiplication
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
-                # Apply threshold and collect non-zero entries
-                if root:
-                    # take power-root of the result
-                    result_root = torch.sign(result) * torch.abs(result) ** (
-                        1 / (power + 1)
-                    )
-
-                mask = torch.abs(result) >= output_threshold
-                chunk_rows, chunk_cols = torch.nonzero(mask, as_tuple=True)
-                if root:
-                    chunk_data = result_root[chunk_rows, chunk_cols].cpu().numpy()
-                else:
-                    chunk_data = result[chunk_rows, chunk_cols].cpu().numpy()
-
-                # Adjust column indices to global coordinates
-                chunk_cols = chunk_cols.cpu().numpy() + start_col
-                chunk_rows = chunk_rows.cpu().numpy()
-
-                # Append to our COO arrays
-                rows[power].append(chunk_rows)
-                cols[power].append(chunk_cols)
-                data[power].append(chunk_data)
-
-            # Clear memory
-            del result, mask, chunk_rows, chunk_cols, chunk_data
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-        # Combine all data
-        print("Combining data from all chunks")
-        for idx in tqdm(range(step_number)):
-            if rows[idx]:  # Check if we collected any data
-                rows[idx] = np.concatenate(rows[idx])
-                cols[idx] = np.concatenate(cols[idx])
-                data[idx] = np.concatenate(data[idx])
-            else:
-                rows[idx] = np.array([])
-                cols[idx] = np.array([])
-                data[idx] = np.array([])
-
-        # Create sparse scipy matrix from collected data
-        sparse_results = []
-        for idx in range(step_number):
-            sparse_result = sp.sparse.coo_matrix(
-                (data[idx], (rows[idx], cols[idx])), shape=(matrix_size, matrix_size)
-            )
-
-            # Convert to CSC format for more efficient storage and operations
-            sparse_result = sparse_result.tocsc()
-            if save_to_disk:
-                sp.sparse.save_npz(
-                    os.path.join(save_path, f"{save_prefix}{idx}.npz"), sparse_result
-                )
-            else:
-                sparse_results.append(sparse_result)
-
-            print(
-                f"Final matrix {idx} has {sparse_result.nnz} non-zero elements ({sparse_result.nnz/(matrix_size**2)*100:.6f}% of full matrix)"
-            )
-
-        return sparse_results
-
+        # Initialize dictionaries to collect COO data
+        rows: dict[int, list[npt.NDArray]]  = {idx: [] for idx in range(step_number)}
+        cols: dict[int, list[npt.NDArray]]  = {idx: [] for idx in range(step_number)}
+        data: dict[int, list[npt.NDArray]]  = {idx: [] for idx in range(step_number)}
     else:
-        # make temporary directory to save the chunks
+        # Create temporary directory for chunks
         temp_dir = os.path.join(os.getcwd(), "temp_chunks")
         if not os.path.exists(temp_dir):
             os.makedirs(temp_dir)
 
-        # Process each chunk
-        for chunk_idx in tqdm(range(num_chunks)):
-            # Define the range for this chunk
-            start_col = chunk_idx * chunkSize
-            end_col = min((chunk_idx + 1) * chunkSize, matrix_size)
-            current_chunk_size = end_col - start_col
+    # Process each chunk
+    for chunk_idx in tqdm(range(num_chunks)):
+        # Define the range for this chunk
+        start_col = chunk_idx * chunkSize
+        end_col = min((chunk_idx + 1) * chunkSize, matrix_size)
+        current_chunk_size = end_col - start_col
 
-            for power in range(step_number):
-                if power == 0:
-                    # For A^1, we can simply extract the relevant columns from A
-                    # Extract the relevant columns using COO format
-                    indices = A._indices()
-                    values = A._values()
+        for power in range(step_number):
+            # Compute the result for this chunk and power
+            if power == 0:
+                # For A^1, extract the relevant columns from A
+                indices = A._indices()
+                values = A._values()
 
-                    # Filter to only include the columns we care about
-                    col_mask = (indices[1, :] >= start_col) & (indices[1, :] < end_col)
-                    result_indices = indices[:, col_mask].clone()
-                    result_values = values[col_mask].clone()
+                # Filter to include only columns in current chunk
+                col_mask = (indices[1, :] >= start_col) & (indices[1, :] < end_col)
+                result_indices = indices[:, col_mask].clone()
+                result_values = values[col_mask].clone()
 
-                    # Adjust column indices to be relative to start_col
-                    result_indices[1, :] -= start_col
+                # Adjust column indices to be relative to start_col
+                result_indices[1, :] -= start_col
 
-                    # Create the sparse tensor for this column chunk
-                    # shape: (matrix_size, current_chunk_size)
-                    result = torch.sparse_coo_tensor(
-                        result_indices,
-                        result_values,
-                        (matrix_size, current_chunk_size),
-                        device=device,
-                    ).to_dense()
+                # Create sparse tensor for this column chunk
+                result = torch.sparse_coo_tensor(
+                    result_indices,
+                    result_values,
+                    (matrix_size, current_chunk_size),
+                    device=device,
+                ).to_dense()
 
-                    if threshold > 0:
-                        result = torch.where(
-                            torch.abs(result) < threshold,
-                            torch.tensor(0.0).to(device),
-                            result,
-                        )
-                else:
-                    # shape: (matrix_size, current_chunk_size)
-                    result = torch.sparse.mm(A, result)
+                if threshold > 0:
+                    result = torch.where(
+                        torch.abs(result) < threshold,
+                        torch.tensor(0.0).to(device),
+                        result,
+                    )
+            else:
+                # Matrix multiplication for higher powers
+                result = torch.sparse.mm(A, result)
 
-                    if threshold > 0:
-                        result = torch.where(
-                            torch.abs(result) < threshold,
-                            torch.tensor(0.0).to(device),
-                            result,
-                        )
-
-                    # Force garbage collection after each multiplication
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
-                # Apply threshold and collect non-zero entries
-                if root:
-                    # take power-root of the result
-                    result_root = torch.sign(result) * torch.abs(result) ** (
-                        1 / (power + 1)
+                if threshold > 0:
+                    result = torch.where(
+                        torch.abs(result) < threshold,
+                        torch.tensor(0.0).to(device),
+                        result,
                     )
 
-                mask = torch.abs(result) >= output_threshold
-                chunk_rows, chunk_cols = torch.nonzero(mask, as_tuple=True)
-                if root:
-                    chunk_data = result_root[chunk_rows, chunk_cols].cpu().numpy()
-                else:
-                    chunk_data = result[chunk_rows, chunk_cols].cpu().numpy()
+                # Force garbage collection
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
-                chunk_cols = chunk_cols.cpu().numpy()
-                chunk_rows = chunk_rows.cpu().numpy()
+            # Apply root if requested
+            if root:
+                result_root = torch.sign(result) * torch.abs(result) ** (
+                    1 / (power + 1)
+                )
 
-                # save the chunked data to disk as scipy sparse matrices
-                # shape: (matrix_size, current_chunk_size)
+            # Apply output threshold and collect non-zero entries
+            mask = torch.abs(result) >= output_threshold
+            chunk_rows, chunk_cols = torch.nonzero(mask, as_tuple=True)
+
+            # Get values based on whether root was applied
+            chunk_data: npt.NDArray
+            if root:
+                chunk_data = (
+                    result_root[chunk_rows, chunk_cols]
+                    .cpu()
+                    .numpy()
+                    .astype(output_dtype)
+                )
+            else:
+                chunk_data = (
+                    result[chunk_rows, chunk_cols].cpu().numpy().astype(output_dtype)
+                )
+
+            # Convert to CPU
+            chunk_cols: npt.NDArray = chunk_cols.cpu().numpy()
+            chunk_rows: npt.NDArray = chunk_rows.cpu().numpy()
+
+            # Store the data based on RAM usage preference
+            if high_cpu_ram:
+                # Adjust column indices to global coordinates
+                global_cols = chunk_cols + start_col
+                # Store in memory
+                rows[power].append(chunk_rows)
+                cols[power].append(global_cols)
+                data[power].append(chunk_data)
+            else:
+                # Save chunk to disk
                 sparse_chunk = sp.sparse.coo_matrix(
                     (chunk_data, (chunk_rows, chunk_cols)),
                     shape=(matrix_size, current_chunk_size),
@@ -290,73 +206,120 @@ def compress_paths(
                     sparse_chunk,
                 )
 
-            # Clear memory
-            del result, mask, chunk_rows, chunk_cols, chunk_data
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        # Clear memory
+        del result, mask, chunk_rows, chunk_cols, chunk_data
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-        # Combine all data
-        print("Combining data from all chunks")
-        steps = []
-        # if save_path isn't already a directory, make it
-        if not os.path.exists(save_path):
-            os.makedirs(save_path)
+    # Combine chunks and save results
+    print("Combining data from all chunks")
+    results = []
 
-        for layer in tqdm(range(step_number)):
-            # first combine the es ----
-            rows = []
-            cols = []
-            data = []
+    for power in tqdm(range(step_number)):
+        # Get all data for current power
+        if high_cpu_ram:
+            # Combine data from memory
+            if rows[power]:  # Check if data was collected
+                all_rows = np.concatenate(rows[power])
+                all_cols = np.concatenate(cols[power])
+                all_data = np.concatenate(data[power])
+            else:
+                all_rows = np.array([])
+                all_cols = np.array([])
+                all_data = np.array([])
+        else:
+            # Combine data from disk
+            all_rows, all_cols, all_data = [], [], []
+
             for chunk_idx in range(num_chunks):
-                # load the chunked data from disk
-                a_sparse_chunk = sp.sparse.load_npz(
-                    os.path.join(temp_dir, f"step_{layer}_chunk_{chunk_idx}.npz")
+                # Load chunk from disk
+                sparse_chunk = sp.sparse.load_npz(
+                    os.path.join(temp_dir, f"step_{power}_chunk_{chunk_idx}.npz")
                 )
-                # adjust the col indices to account for the chunk offset
-                a_sparse_chunk.col += chunk_idx * chunkSize
-                # append the data to the lists
-                rows.append(a_sparse_chunk.row)
-                cols.append(a_sparse_chunk.col)
-                data.append(a_sparse_chunk.data)
-                # delete the sparse matrix to save memory
-                del a_sparse_chunk
+                # Adjust column indices
+                sparse_chunk.col += chunk_idx * chunkSize
+                # Append data
+                all_rows.append(sparse_chunk.row)
+                all_cols.append(sparse_chunk.col)
+                all_data.append(sparse_chunk.data)
+                # Clean up
+                del sparse_chunk
                 gc.collect()
 
-            # combine the data
-            rows = np.concatenate(rows)
-            cols = np.concatenate(cols)
-            data = np.concatenate(data)
-            # create the sparse matrix
-            sparse_layer = sp.sparse.coo_matrix(
-                (data, (rows, cols)), shape=(matrix_size, matrix_size)
-            ).tocsc()
-            sparse_layer.eliminate_zeros()
-            # save the sparse matrix to disk
+            # Combine all chunks
+            all_rows = np.concatenate(all_rows)
+            all_cols = np.concatenate(all_cols)
+            all_data = np.concatenate(all_data)
+
+        # Calculate density from the data directly
+        nnz = len(all_data)
+        density = nnz / (matrix_size**2)
+        print(
+            f"Matrix {power} has {nnz} non-zero elements ({density*100:.6f}% of full matrix)"
+        )
+
+        # Choose the appropriate format based on density
+        if density > density_threshold:
+            print(
+                f"Creating matrix {power} in dense format (density: {density*100:.6f}%)"
+            )
+            # Create dense matrix directly instead of converting from sparse
+            dense_result = np.zeros((matrix_size, matrix_size), dtype=output_dtype)
+            dense_result[all_rows, all_cols] = all_data
+
+            # Save to disk if requested
             if save_to_disk:
-                sp.sparse.save_npz(
-                    os.path.join(save_path, f"{save_prefix}{layer}.npz"), sparse_layer
+                np.save(
+                    os.path.join(save_path, f"{save_prefix}{power}.npy"), dense_result
                 )
 
+            # Add to results if requested
             if return_results:
-                steps.append(sparse_layer)
-            # delete the sparse matrix to save memory
-            del sparse_layer
-            gc.collect()
+                results.append(dense_result)
 
-        # remove the temporary directory
-        for layer in range(step_number):
-            for chunk_idx in range(num_chunks):
-                os.remove(os.path.join(temp_dir, f"step_{layer}_chunk_{chunk_idx}.npz"))
-        os.rmdir(temp_dir)
-        torch.cuda.empty_cache()
-        # clear the cache
+            # Clean up
+            del dense_result
+        else:
+            # Create sparse matrix
+            sparse_result = sp.sparse.coo_matrix(
+                (all_data, (all_rows, all_cols)), shape=(matrix_size, matrix_size)
+            ).tocsc()
+            sparse_result.eliminate_zeros()
+
+            # Save sparse matrix if requested
+            if save_to_disk:
+                sp.sparse.save_npz(
+                    os.path.join(save_path, f"{save_prefix}{power}.npz"), sparse_result
+                )
+
+            # Add to results if requested
+            if return_results:
+                results.append(sparse_result)
+
+            # Clean up
+            del sparse_result
+
+        # Clean up
+        del all_rows, all_cols, all_data
         gc.collect()
-        return steps
+
+    # Clean up temporary files if using disk storage
+    if not high_cpu_ram:
+        for power in range(step_number):
+            for chunk_idx in range(num_chunks):
+                os.remove(os.path.join(temp_dir, f"step_{power}_chunk_{chunk_idx}.npz"))
+        os.rmdir(temp_dir)
+
+    # Final cleanup
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    return results
 
 
 def compress_paths_dense_chunked(
-    inprop: csr_matrix,
+    inprop: csc_matrix,
     step_number: int,
     threshold: float = 0,
     output_threshold: float = 1e-4,
@@ -421,9 +384,9 @@ def compress_paths_dense_chunked(
         before processing.
 
     Example:
-        >>> from scipy.sparse import csr_matrix
+        >>> from scipy.sparse import csc_matrix
         >>> import numpy as np
-        >>> inprop = csr_matrix(np.array([[0.1, 0.2], [0.3, 0.4]]))
+        >>> inprop = csc_matrix(np.array([[0.1, 0.2], [0.3, 0.4]]))
         >>> step_number = 2
         >>> compressed_paths = compress_paths(inprop, step_number,
                                               threshold=0.1,
@@ -1014,10 +977,10 @@ def add_first_n_matrices(matrices, n):
             the number of matrices available in the list.
 
     Example:
-        >>> from scipy.sparse import csr_matrix
-        >>> matrices = [csr_matrix([[1, 2], [3, 4]]),
-                        csr_matrix([[5, 6], [7, 8]]),
-                        csr_matrix([[9, 10], [11, 12]])]
+        >>> from scipy.sparse import csc_matrix
+        >>> matrices = [csc_matrix([[1, 2], [3, 4]]),
+                        csc_matrix([[5, 6], [7, 8]]),
+                        csc_matrix([[9, 10], [11, 12]])]
         >>> n = 2
         >>> result_matrix = add_first_n_matrices(matrices, n)
         >>> print(result_matrix.toarray())
@@ -1054,6 +1017,7 @@ def result_summary(
     sort_names: str | List | None = None,
     pre_in_column: bool = False,
     include_undefined_groups: bool = False,
+    outprop: bool = False,
 ):
     """Generates a summary of connections between different types of neurons,
     represented by their input and output indexes. The function calculates the
@@ -1135,16 +1099,22 @@ def result_summary(
         columns=[str(outidx_map[key]) for key in outidx],
     )
 
-    # Sum across rows: presynaptic neuron is in the rows
-    # summing across neurons of the same type: total amount of input from that
-    # type for the postsynaptic neuron
-    summed_df = df.groupby(df.index).sum()
+    if not outprop:
+        # Sum across rows: presynaptic neuron is in the rows
+        # summing across neurons of the same type: total amount of input from that
+        # type for the postsynaptic neuron
+        summed_df = df.groupby(df.index).sum()
 
-    # Average across columns and transpose back
-    # averaging across columns of the same type:
-    # on average, a neuron of that type receives x% input from a presynaptic
-    # type
-    result_df = summed_df.T.groupby(level=0).mean().T
+        # Average across columns and transpose back
+        # averaging across columns of the same type:
+        # on average, a neuron of that type receives x% input from a presynaptic type
+        result_df = summed_df.T.groupby(level=0).mean().T
+    else:
+        # calculate the output proportion from an average source neuron to a target type
+        # so first sum across columns
+        summed_df = df.T.groupby(level=0).sum().T
+        # then average across rows
+        result_df = summed_df.groupby(summed_df.index).mean()
 
     if pre_in_column:
         result_df = result_df.T
@@ -1220,29 +1190,28 @@ def contribution_by_path_lengths(
     width: int = 800,
     height: int = 400,
 ):
-    """Plots the connection strength from all of inidx (grouped by inidx_map)
-    to an average outidx (grouped by outidx_map) over different path lengths.
-    Either inidx_map or outidx_map, but not both, should be provided. If
-    neither is provided, presynaptic neurons are grouped together. Direct
-    connections are in path_length 1.
+    """Plots the connection strength from all of inidx (grouped by inidx_map) to an
+    average outidx (grouped by outidx_map) over different path lengths. Either inidx_map
+    or outidx_map, but not both, should be provided. If neither is provided, presynaptic
+    neurons are grouped together. Direct connections are in path_length 1.
 
     Args:
-        steps (list of scipy.sparse matrices): List of sparse matrices, each
-            representing synaptic strengths for a specific path length.
-        inidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array
-            of indices representing input (presynaptic) neurons.
-        outidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array
-            of indices representing output (postsynaptic) neurons.
-        outidx_map (dict): Mapping from indices to postsynaptic neuron groups.
-            Only one of inidx_map and outidx_map should be specified.
-        inidx_map (dict): Mapping from indices to presynaptic neuron groups.
-            Only one of inidx_map and outidx_map should be specified.
+        steps (list of scipy.sparse matrices or numpy.array): List of sparse matrices,
+            each representing synaptic strengths for a specific path length.
+        inidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of indices
+            representing input (presynaptic) neurons.
+        outidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of
+            indices representing output (postsynaptic) neurons.
+        outidx_map (dict): Mapping from indices to postsynaptic neuron groups. Only one
+            of inidx_map and outidx_map should be specified.
+        inidx_map (dict): Mapping from indices to presynaptic neuron groups. Only one of
+            inidx_map and outidx_map should be specified.
         width (int, optional): The width of the plot. Defaults to 800.
         height (int, optional): The height of the plot. Defaults to 400.
 
     Returns:
-        None: Displays an interactive line plot showing the connection strength
-            from all of inidx to an average outidx over different path lengths.
+        None: Displays an interactive line plot showing the connection strength from all
+            of inidx to an average outidx over different path lengths.
 
     """
 
@@ -1268,9 +1237,13 @@ def contribution_by_path_lengths(
 
     rows = []
     for step in steps:
+        if hasattr(step, "toarray"):
+            data = step[:, outidx][inidx, :].toarray()
+        else:
+            data = step[inidx, :][:, outidx]
         if inidx_map is not None:
             df = pd.DataFrame(
-                data=step[:, outidx][inidx, :].toarray(),
+                data=data,
                 index=[inidx_map[key] for key in inidx],
             )
             # average of all columns
@@ -1280,7 +1253,7 @@ def contribution_by_path_lengths(
             rows.append(df)
         elif outidx_map is not None:
             df = pd.DataFrame(
-                data=step[:, outidx][inidx, :].toarray(),
+                data=data,
                 columns=[outidx_map[key] for key in outidx],
             )
             # sum all rows
@@ -1310,8 +1283,13 @@ def contribution_by_path_lengths(
         width=width,
         height=height,
     )
-    fig.update_layout(xaxis=dict(tickmode="linear", tick0=1, dtick=1))
-    fig.show()
+    fig.update_layout(
+        xaxis=dict(tickmode="linear", tick0=1, dtick=1),
+        yaxis=dict(tickmode="linear", tick0=0, dtick=contri.value.max() / 5),
+    )
+    # fig.show()
+
+    return fig
 
 
 def contribution_by_path_lengths_heatmap(
@@ -1621,7 +1599,7 @@ def signed_effective_conn_from_paths(paths, group_dict=None, wide=True, idx_to_n
 
 
 def read_precomputed(
-    prefix: str, file_path: str = None, first_n: int | None = None
+    prefix: str, file_path: str | None = None, first_n: int | None = None
 ) -> List:
     """Reads the precomputed compressed paths.
 
@@ -1632,9 +1610,10 @@ def read_precomputed(
             None, checks if running in Google Colab, and sets the path: if
             running in Colab, sets the path to "/content/"; otherwise, sets the
             path to "".
+        first_n (int, optional): Number of files to read. If None, reads all files.
 
     Returns:
-        List: A list of sparse matrices representing the steps.
+        List: A list of matrices (sparse or dense) representing the steps.
     """
     if file_path is None:
         # Check if running in Google Colab
@@ -1646,13 +1625,54 @@ def read_precomputed(
             file_path = ""
 
     steps_cpu = []
-    # get npz files
-    files = os.listdir(f"{file_path}{prefix}")
-    files = [f for f in files if f.endswith(".npz")]
+
+    # Get all files with the prefix pattern
+    folder_path = os.path.join(file_path, prefix)
+    if not os.path.exists(folder_path):
+        raise FileNotFoundError(f"Directory {folder_path} does not exist")
+
+    files = os.listdir(folder_path)
+
+    # Filter files that match the pattern prefix_i.npz or prefix_i.npy
+    step_files = []
+    for f in files:
+        if f.startswith(f"{prefix}_") and (f.endswith(".npz") or f.endswith(".npy")):
+            # Extract the step number from the filename
+            try:
+                step_num = int(f.split("_")[-1].split(".")[0])
+                step_files.append((step_num, f))
+            except ValueError:
+                # Skip files that don't match the expected pattern
+                continue
+
+    # Sort by step number to ensure correct order
+    step_files.sort(key=lambda x: x[0])
 
     if first_n is None:
-        first_n = len(files)
+        first_n = len(step_files)
+    else:
+        first_n = min(first_n, len(step_files))
 
+    # Load the first_n files
     for i in range(first_n):
-        steps_cpu.append(sp.sparse.load_npz(f"{file_path}{prefix}/{prefix}_{i}.npz"))
+        step_num, filename = step_files[i]
+        file_full_path = os.path.join(folder_path, filename)
+
+        if filename.endswith(".npz"):
+            # Load sparse matrix
+            matrix = sp.sparse.load_npz(file_full_path)
+        elif filename.endswith(".npy"):
+            # Load dense matrix
+            matrix = np.load(file_full_path)
+        else:
+            # This shouldn't happen given our filtering, but just in case
+            continue
+
+        steps_cpu.append(matrix)
+
+    if len(steps_cpu) == 0:
+        raise FileNotFoundError(
+            f"No files found with pattern {prefix}_*.np[yz] in {folder_path}"
+        )
+
     return steps_cpu
