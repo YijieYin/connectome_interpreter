@@ -835,7 +835,7 @@ def get_activations(
 
 
 def plot_layered_paths(
-    path_df: pd.DataFrame,
+    paths: pd.DataFrame,
     figsize: tuple = (10, 8),
     priority_indices=None,
     sort_by_activation: bool = False,
@@ -849,7 +849,7 @@ def plot_layered_paths(
     node_activation_max: float | None = None,
     edge_text: bool = True,
     highlight_nodes: list[str] = [],
-    interactive: bool = True,
+    interactive: bool = False,
     file_name: str = "layered_paths",
 ):
     """
@@ -863,7 +863,7 @@ def plot_layered_paths(
     represent the weight values.
 
     Args:
-        path_df (pandas.DataFrame): A dataframe containing the columns 'pre', 'post',
+        paths (pandas.DataFrame): A dataframe containing the columns 'pre', 'post',
             'layer', 'weight', and optionally 'pre_activation', 'post_activation',
             'pre_layer', 'post_layer'. Each row represents an edge in the graph. The
             'pre' and 'post' columns refer to the source and target nodes, respectively.
@@ -930,8 +930,10 @@ def plot_layered_paths(
             matplotlib for plotting. For interactive plots, it requires
             the pyvis library.
     """
-    if path_df.shape[0] == 0:
+    if paths.shape[0] == 0:
         raise ValueError("The provided DataFrame is empty.")
+
+    path_df = paths.copy()
 
     # Create a 'post_layer' column to use as unique identifiers
     if "post_layer" not in path_df.columns:
@@ -1077,7 +1079,7 @@ def plot_layered_paths(
                 G,
                 pos=positions,
                 with_labels=False,
-                node_size=100,
+                node_size=1300,
                 node_color=node_colors,
                 arrows=True,
                 arrowstyle="-|>",
@@ -1098,14 +1100,14 @@ def plot_layered_paths(
                 G,
                 pos=positions,
                 with_labels=False,
-                node_size=1300, #100,
+                node_size=1300,
                 node_color=node_colors,
                 arrows=True,
                 arrowstyle="-|>",
                 arrowsize=10,
                 width=[G[u][v]["weight"] for u, v in G.edges()],
-                ax=ax,
                 edge_color=edge_colors,
+                ax=ax,
             )
         nx.draw_networkx_labels(
             G,
@@ -1120,8 +1122,8 @@ def plot_layered_paths(
 
         if edge_text:
             edge_labels = {
-                (u, v): f"{(weight_min+(weight_max - weight_min)*(data['weight']-1)/9):.{weight_decimals}f}"
-                for u, v, data in G.edges(data=True)
+                (u, v): f"{(weight_min+(weight_max - weight_min)*(G[u][v]['weight']-1)/9):.{weight_decimals}f}"
+                for u, v in G.edges()
             }
             nx.draw_networkx_edge_labels(
                 G,
