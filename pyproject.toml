@@ -31,6 +31,7 @@ dependencies = [
 get_ngl_link = ["nglscenes"]
 wandb = ["wandb"]
 compute_flow_hitting_time = ["navis"]
+plot_layered_paths = ["pyvis"]
 
 [tool.setuptools.dynamic]
 version = {attr = "connectome_interpreter._version.__version__"}

@@ -844,8 +844,13 @@ def plot_layered_paths(
     weight_decimals: int = 2,
     neuron_to_sign: dict | None = None,
     sign_color_map: dict = {1: "red", -1: "blue"},
+    neuron_to_color: dict | None = None,
     node_activation_min: float | None = None,
     node_activation_max: float | None = None,
+    edge_text: bool = True,
+    highlight_nodes: list[str] = [],
+    interactive: bool = True,
+    file_name: str = "layered_paths",
 ):
     """
     Plots a directed graph of layered paths with optional node coloring based on
@@ -880,16 +885,32 @@ def plot_layered_paths(
             edge weights. Defaults to 2.
         neuron_to_sign (dict, optional): A dictionary mapping neuron names (as they
             appear in path_df) to their signs (e.g. {'KCg-m': 1, 'Delta7': -1}).
+            Can also use a dictionary to map neuron names to their neurotransmitter name.
             Defaults to None.
-        sign_color_map (dict, optional): A dictionary mapping neuron signs to colors.
-            Defaults to red for excitatory, and blue for inhibitory. Edges are in
-            lightgrey by default.
+        sign_color_map (dict, optional): A dictionary used to color edges. Defaults is
+            lightgrey but if `neuron_to_sign` is provided, the default is to color edges
+            red if the pre-neuron is excitatory, and blue if inhibitory. 
+            If the `neuron_to_sign` values are neurotransmitter names, then provide
+            a dictionary that maps neurotransmitter names to colors. 
+            If the keys of `sign_color_map` do not match the values of `neuron_to_sign`,
+            a warning is printed and the default color is used for all edges.
+        neuron_to_color (dict, optional): A dictionary mapping neuron names to colors.
+            If not provided, a default color is used for all nodes. The keys should match
         node_activation_min (float, optional): The minimum value for node activation. If
             not provided, the minimum value of node activations is used. Defaults to
             None.
         node_activation_max (float, optional): The maximum value for node activation. If
             not provided, the maximum value of node activations is used. Defaults to
             None.
+        edge_text (bool, optional): Whether to display edge weights as text on the plot.
+            Defaults to True.
+        highlight_nodes (list[str], optional): A list of node names to highlight bold in the
+            plot. Defaults to an empty list.
+        interactive (bool, optional): Whether to create an interactive plot using pyvis.
+            Defaults to True. If False, a static matplotlib plot is created.
+        file_name (str, optional): The name of the file to save the plot. 
+            Defaults to "layered_paths" in the local directory 
+            (.html if interactive and .pdf if static).
 
     Returns:
         None: This function does not return a value. It generates a plot using
@@ -906,7 +927,8 @@ def plot_layered_paths(
             function (`connectome_interpreter.path_finding.
             create_layered_positions`).
         This function requires the networkx library for graph operations and
-            matplotlib for plotting.
+            matplotlib for plotting. For interactive plots, it requires
+            the pyvis library.
     """
     if path_df.shape[0] == 0:
         raise ValueError("The provided DataFrame is empty.")
@@ -921,6 +943,11 @@ def plot_layered_paths(
             path_df["pre"].astype(str) + "_" + (path_df.layer - 1).astype(str)
         )
 
+    # Rescale weights to be between 1 and 10
+    weight_min = path_df.weight.min()
+    weight_max = path_df.weight.max()
+    path_df['weight'] = 1 + 9 * (path_df['weight'].values-weight_min) / (weight_max - weight_min)
+
     # Create the graph using the new 'post_layer' identifiers
     G = nx.from_pandas_edgelist(
         path_df,
@@ -934,13 +961,9 @@ def plot_layered_paths(
     labels = dict(zip(path_df.post_layer, path_df.post))
     labels.update(dict(zip(path_df.pre_layer, path_df.pre)))
 
-    # Determine the width of the edges
-    weights = [G[u][v]["weight"] for u, v in G.edges()]
-    widths = [max(0.1, w * 5) for w in weights]  # Scale weights for visibility
 
     # Generate positions
     from .path_finding import create_layered_positions
-
     if sort_by_activation:
         node_activation_dict = dict(zip(path_df.post_layer, path_df.post_activation))
         node_activation_dict.update(
@@ -952,7 +975,17 @@ def plot_layered_paths(
     else:
         positions = create_layered_positions(path_df, priority_indices)
 
-    # Node colors based on activation values
+    # Default color for nodes and edges if not provided otherwise
+    default_color = "lightgrey"
+    if neuron_to_color is None:
+        neuron_to_color = {label: default_color for label in labels.values()}
+    if neuron_to_sign is not None and set(neuron_to_sign.values()) != set(sign_color_map.keys()):
+        print("Warning: The neuron_to_sign values are not the same type as the sign_color_map keys. "
+              "Using default color for all edges.")
+        sign_color_map = dict(zip(neuron_to_sign.keys(), 
+                                  [default_color] * len(neuron_to_sign)))
+
+    # Node colors based on activation values or neuron_to_color
     if ("pre_activation" in path_df.columns) & ("post_activation" in path_df.columns):
         activations = np.concatenate(
             [
@@ -977,15 +1010,15 @@ def plot_layered_paths(
             dict(zip(path_df.post_layer, path_df.post_activation)),
             "activation",
         )
-
         node_colors = [
             color_map(norm(G.nodes[node]["activation"])) for node in G.nodes()
         ]
+    else:
+        node_colors = []
+        for v in G.nodes():
+            node_colors.append(neuron_to_color[labels[v]])
 
-    # Edge colors based on neuron signs
-    default_color = "lightgrey"  # Default edge color
-
-    # specify edge colour based on pre-neuron sign, if available
+    # Specify edge colour based on pre-neuron sign, if available
     edge_colors = []
     for u, _ in G.edges():
         pre_neuron = labels[u]
@@ -996,61 +1029,113 @@ def plot_layered_paths(
         else:
             edge_colors.append(default_color)
 
-    # Plot the graph
-    _, ax = plt.subplots(figsize=figsize)
-    if ("pre_activation" in path_df.columns) & ("post_activation" in path_df.columns):
-        nx.draw(
+    if interactive:
+        try:
+            from pyvis.network import Network
+        except ImportError as e:
+            raise ImportError("Please install pyvis got interactive plots: pip install pyvis") from e
+
+        net2 = Network(directed=True, layout=False)
+        net2.height = 1200
+        net2.width = 1000
+        net2.from_nx(G)
+
+        node_colors_dict = dict(zip(G.nodes(), node_colors))
+        edge_colors_dict = dict(zip(G.edges(), edge_colors))
+        for v in net2.nodes:
+            v['x'], v['y'] = positions.get(v['id'])        
+            v['x'] = v['x'] * net2.width
+            v['y'] = v['y'] * net2.height    
+            v['label'] = labels[v['id']]
+            v['color'] = node_colors_dict[v['id']]
+            v['size'] = 30
+            v['font'] = {'size': 24}
+            if labels[v['id']] in highlight_nodes:
+                v['font'] = {'face': 'arial black'}
+            else:
+                v['font'] = {'face': 'arial'}
+
+        for edge in net2.edges:
+            u, v = edge['from'], edge['to']
+            edge['color'] = edge_colors_dict[(u, v)]
+            if edge_text:
+                edge['label'] = f"{(weight_min+(weight_max - weight_min)*(edge['width']-1)/9):.{weight_decimals}f}"
+                edge['font'] = {'size': 18, 'face': 'arial'}                
+
+        net2.toggle_physics(False)
+        net2.show_buttons(filter_=['node', 'edge', 'physics'])
+        net2.write_html(str(file_name)+'.html')
+        print(f"Interactive graph saved as {file_name}.html")
+        frame = IFrame(str(file_name)+'.html', width='100%', height='100%')
+        display(frame)
+
+    else:        
+
+        fig, ax = plt.subplots(figsize=figsize)
+        if ("pre_activation" in path_df.columns) & ("post_activation" in path_df.columns):
+            nx.draw(
+                G,
+                pos=positions,
+                with_labels=False,
+                node_size=100,
+                node_color=node_colors,
+                arrows=True,
+                arrowstyle="-|>",
+                arrowsize=10,
+                width=[G[u][v]["weight"] for u, v in G.edges()],
+                edge_color=edge_colors,
+                ax=ax,
+            )
+            plt.colorbar(
+                plt.cm.ScalarMappable(norm=norm, cmap=color_map),
+                ax=ax,
+                label="Activation",
+                fraction=fraction,
+                pad=pad,
+            )
+        else:
+            nx.draw(
+                G,
+                pos=positions,
+                with_labels=False,
+                node_size=1300, #100,
+                node_color=node_colors,
+                arrows=True,
+                arrowstyle="-|>",
+                arrowsize=10,
+                width=[G[u][v]["weight"] for u, v in G.edges()],
+                ax=ax,
+                edge_color=edge_colors,
+            )
+        nx.draw_networkx_labels(
             G,
             pos=positions,
             labels=labels,
-            with_labels=True,
-            node_size=100,
-            node_color=node_colors,
-            arrows=True,
-            arrowstyle="-|>",
-            arrowsize=10,
-            font_size=8,
-            width=widths,
-            edge_color=edge_colors,
-            ax=ax,
-        )
-        plt.colorbar(
-            plt.cm.ScalarMappable(norm=norm, cmap=color_map),
-            ax=ax,
-            label="Activation",
-            fraction=fraction,
-            pad=pad,
-        )
-    else:
-        nx.draw(
-            G,
-            pos=positions,
-            labels=labels,
-            with_labels=True,
-            node_size=100,
-            node_color="lightblue",
-            arrows=True,
-            arrowstyle="-|>",
-            arrowsize=10,
-            font_size=8,
-            width=widths,
-            ax=ax,
-            edge_color=edge_colors,
+            font_family='arial',
+            font_weight={node: 'bold' if labels[node] in highlight_nodes 
+                                      else 'normal' for node in G.nodes()},
+            font_size=14,
+            ax=ax
         )
 
-    edge_labels = {
-        (u, v): f'{data["weight"]:.{weight_decimals}f}'
-        for u, v, data in G.edges(data=True)
-    }
-    nx.draw_networkx_edge_labels(
-        G,
-        pos=positions,
-        edge_labels=edge_labels,
-        #  font_color='red'
-        ax=ax,
-    )
-    ax.set_ylim(0, 1)
-    plt.show()
+        if edge_text:
+            edge_labels = {
+                (u, v): f"{(weight_min+(weight_max - weight_min)*(data['weight']-1)/9):.{weight_decimals}f}"
+                for u, v, data in G.edges(data=True)
+            }
+            nx.draw_networkx_edge_labels(
+                G,
+                pos=positions,
+                edge_labels=edge_labels,
+                font_size=14,
+                rotate=False,
+                ax=ax,
+            )
+
+        ax.set_ylim(0, 1)
+        fig.savefig(file_name+'.pdf')
+        print(f"Graph saved as {file_name}.pdf")
+        plt.show()
 
 
 # def change_model_weights(model, df, mode, coefficient=0.1):
