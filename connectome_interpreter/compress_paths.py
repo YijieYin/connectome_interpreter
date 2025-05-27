@@ -97,9 +97,9 @@ def compress_paths(
     # Prepare temporary storage method
     if high_cpu_ram:
         # Initialize dictionaries to collect COO data
-        rows: dict[int, list[npt.NDArray]]  = {idx: [] for idx in range(step_number)}
-        cols: dict[int, list[npt.NDArray]]  = {idx: [] for idx in range(step_number)}
-        data: dict[int, list[npt.NDArray]]  = {idx: [] for idx in range(step_number)}
+        rows: dict[int, list[npt.NDArray]] = {idx: [] for idx in range(step_number)}
+        cols: dict[int, list[npt.NDArray]] = {idx: [] for idx in range(step_number)}
+        data: dict[int, list[npt.NDArray]] = {idx: [] for idx in range(step_number)}
     else:
         # Create temporary directory for chunks
         temp_dir = os.path.join(os.getcwd(), "temp_chunks")

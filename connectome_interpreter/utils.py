@@ -915,7 +915,7 @@ def plot_layered_paths(
         highlight_nodes (list[str], optional): A list of node names to highlight bold in
             the plot. Defaults to an empty list.
         interactive (bool, optional): Whether to create an interactive plot using pyvis.
-            Defaults to True. If False, a static matplotlib plot is created.
+            Defaults to False. If False, a static matplotlib plot is created.
         save_plot (bool, optional): Whether to save the plot to a file. Defaults to False.
         file_name (str, optional): The name of the file to save the plot. Defaults to
             "layered_paths" in the local directory (.html if interactive and .pdf if
@@ -933,18 +933,17 @@ def plot_layered_paths(
             matplotlib.
 
     Note:
-        If 'pre_layer' and 'post_layer' columns are not in the dataframe, they
-            will be created within the function to uniquely identify the nodes
-            based on their 'pre'/'post' values and 'layer'.
-        The function automatically checks for the presence of 'pre_activation'
-            and 'post_activation' columns to determine whether to color the
-            nodes based on activation values.
-        The positions of the nodes are determined by a custom positioning
-            function (`connectome_interpreter.path_finding.
-            create_layered_positions`).
-        This function requires the networkx library for graph operations and
-            matplotlib for plotting. For interactive plots, it requires
-            the pyvis library.
+        If 'pre_layer' and 'post_layer' columns are not in the dataframe, they will be
+            created within the function to uniquely identify the nodes based on their
+            'pre'/'post' values and 'layer'.
+        The function automatically checks for the presence of 'pre_activation' and
+            'post_activation' columns to determine whether to color the nodes based on
+            activation values.
+        The positions of the nodes are determined by a custom positioning function
+            (`create_layered_positions`).
+        This function requires the networkx library for graph operations and matplotlib
+            for plotting. For interactive plots, it requires the pyvis library (where
+            the node label has to be underneath the node).
     """
     if paths.shape[0] == 0:
         raise ValueError("The provided DataFrame is empty.")
