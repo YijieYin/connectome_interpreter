@@ -266,6 +266,12 @@ def hex_heatmap(
         markersize = 18
     elif dataset == "fafb_right":
         markersize = 20
+    else:
+        # raise error
+        raise ValueError(
+            "Dataset not recognized. Currently available datasets are 'mcns_right', "
+            "'fafb_right'."
+        )
 
     default_sizing = {
         "fig_width": 260,  # units = mm
@@ -520,3 +526,23 @@ def looming_stimulus(start_coords, all_coords, n_time=4):
             stim_atime.append(f"{x_str},{y_str}")
         stim_str.append(stim_atime)
     return stim_str
+
+
+def make_sign_stim(phase=0, amplitude=1, n=8):
+    """
+    Generate a dictionary of values representing a sine wave stimulus with a given phase
+    and amplitude. The sine wave is defined over n points, starting from the given phase.
+
+    Args:
+        phase (int): Phase of the sine wave in degrees. Default is 0.
+        amplitude (float): Amplitude of the sine wave. Default is 1.
+        n (int): Number of points in the sine wave. Default is 8.
+
+    Returns:
+        dict: A dictionary where keys are indices from 1 to n, and values are the
+        corresponding sine wave values.
+    """
+    x = (phase % 180) / 180 * np.pi
+    x = np.linspace(x, x + np.pi, n)
+    y = amplitude * abs(np.sin(x))
+    return dict(zip(range(1, n + 1), y))
