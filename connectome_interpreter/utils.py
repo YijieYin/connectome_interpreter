@@ -851,10 +851,12 @@ def plot_layered_paths(
     edge_text: bool = True,
     highlight_nodes: list[str] = [],
     interactive: bool = False,
+    save_plot: bool = False,
     file_name: str = "layered_paths",
     label_pos: float = 0.7,
     default_neuron_color: str = "lightblue",
     default_edge_color: str = "lightgrey",
+    node_size: int = 500,
 ):
     """
     Plots a directed graph of layered paths with optional node coloring based on
@@ -910,19 +912,21 @@ def plot_layered_paths(
             None.
         edge_text (bool, optional): Whether to display edge weights as text on the plot.
             Defaults to True.
-        highlight_nodes (list[str], optional): A list of node names to highlight bold in the
-            plot. Defaults to an empty list.
+        highlight_nodes (list[str], optional): A list of node names to highlight bold in
+            the plot. Defaults to an empty list.
         interactive (bool, optional): Whether to create an interactive plot using pyvis.
             Defaults to True. If False, a static matplotlib plot is created.
-        file_name (str, optional): The name of the file to save the plot.
-            Defaults to "layered_paths" in the local directory
-            (.html if interactive and .pdf if static).
+        save_plot (bool, optional): Whether to save the plot to a file. Defaults to False.
+        file_name (str, optional): The name of the file to save the plot. Defaults to
+            "layered_paths" in the local directory (.html if interactive and .pdf if
+            static).
         label_pos (float, optional): The position of the edge labels. Defaults to 0.7.
             Bigger values move the labels closer to the left of the edge.
         default_neuron_color (str, optional): The default color for nodes if no
             specific color is provided in `neuron_to_color`. Defaults to "lightblue".
         default_edge_color (str, optional): The default color for edges if no specific
             color is provided. Defaults to "lightgrey".
+        node_size (int, optional): The size of the nodes in the plot. Defaults to 500.
 
     Returns:
         None: This function does not return a value. It generates a plot using
@@ -1033,12 +1037,13 @@ def plot_layered_paths(
         for v in G.nodes():
             node_colors.append(neuron_to_color[labels[v]])
 
-    signdiff = set(neuron_to_sign.values()) - set(sign_color_map.keys())
-    if neuron_to_sign is not None and (len(signdiff) > 0):
-        print(
-            "Warning: Some values in neuron_to_sign are not in the keys of sign_color_map. Using default color for those edges."
-        )
-        # this is taken care of below with sign_color_map.get(pre_neuron, default_edge_color)
+    if neuron_to_sign is not None:
+        signdiff = set(neuron_to_sign.values()) - set(sign_color_map.keys())
+        if len(signdiff) > 0:
+            print(
+                "Warning: Some values in neuron_to_sign are not in the keys of sign_color_map. Using default color for those edges."
+            )
+            # this is taken care of below with sign_color_map.get(pre_neuron, default_edge_color)
 
     # Specify edge colour based on pre-neuron sign, if available
     edge_colors = []
@@ -1059,9 +1064,11 @@ def plot_layered_paths(
                 "Please install pyvis got interactive plots: pip install pyvis"
             ) from e
 
-        net2 = Network(directed=True, layout=False)
-        net2.height = 1200
-        net2.width = 1000
+        net2 = Network(
+            directed=True, layout=False, notebook=True, cdn_resources="in_line"
+        )
+        net2.height = figsize[1] * 100
+        net2.width = figsize[0] * 100
         net2.from_nx(G)
 
         node_colors_dict = dict(zip(G.nodes(), node_colors))
@@ -1072,7 +1079,7 @@ def plot_layered_paths(
             v["y"] = v["y"] * net2.height
             v["label"] = labels[v["id"]]
             v["color"] = node_colors_dict[v["id"]]
-            v["size"] = 30
+            v["size"] = node_size / 20
             v["font"] = {"size": 24}
             if labels[v["id"]] in highlight_nodes:
                 v["font"] = {"face": "arial black"}
@@ -1090,10 +1097,11 @@ def plot_layered_paths(
 
         net2.toggle_physics(False)
         net2.show_buttons(filter_=["node", "edge", "physics"])
-        net2.write_html(str(file_name) + ".html")
-        print(f"Interactive graph saved as {file_name}.html")
-        frame = IFrame(str(file_name) + ".html", width="100%", height="100%")
-        display(frame)
+        if save_plot:
+            net2.write_html(str(file_name) + ".html")
+            print(f"Interactive graph saved as {file_name}.html")
+
+        net2.show(str(file_name) + ".html", notebook=False)
 
     else:
 
@@ -1102,7 +1110,7 @@ def plot_layered_paths(
             G,
             pos=positions,
             with_labels=False,
-            node_size=1300,
+            node_size=node_size,
             node_color=node_colors,
             arrows=True,
             arrowstyle="-|>",
@@ -1122,15 +1130,25 @@ def plot_layered_paths(
                 pad=pad,
             )
 
+        # label highlighted and normal nodes separately
+        bold_nodes = [n for n in G.nodes() if labels[n] in highlight_nodes]
+        normal_nodes = [n for n in G.nodes() if labels[n] not in highlight_nodes]
+
         nx.draw_networkx_labels(
             G,
             pos=positions,
-            labels=labels,
+            labels={n: labels[n] for n in normal_nodes},
             font_family="arial",
-            font_weight={
-                node: "bold" if labels[node] in highlight_nodes else "normal"
-                for node in G.nodes()
-            },
+            font_weight="normal",
+            font_size=14,
+            ax=ax,
+        )
+        nx.draw_networkx_labels(
+            G,
+            pos=positions,
+            labels={n: labels[n] for n in bold_nodes},
+            font_family="arial",
+            font_weight="bold",
             font_size=14,
             ax=ax,
         )
@@ -1155,8 +1173,9 @@ def plot_layered_paths(
             )
 
         ax.set_ylim(0, 1)
-        fig.savefig(file_name + ".pdf")
-        print(f"Graph saved as {file_name}.pdf")
+        if save_plot:
+            fig.savefig(file_name + ".pdf")
+            print(f"Graph saved as {file_name}.pdf")
         plt.show()
 
 
