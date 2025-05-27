@@ -613,7 +613,7 @@ def filter_paths(
                 df = df[df["pre"].isin(indices) | (df["layer"] != layer)]
             elif layer == (df["layer"].max() + 1):
                 # filter for targets
-                df = df[df["post"].isin(indices) | (df["layer"] != layer)]
+                df = df[df["post"].isin(indices) | ((df["layer"] + 1) != layer)]
             else:
                 # error: layer number too big
                 raise ValueError("Layer number too big")
