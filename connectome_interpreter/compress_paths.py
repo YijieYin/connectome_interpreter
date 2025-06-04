@@ -1054,8 +1054,10 @@ def result_summary(
             groups as columns. Defaults to False (pre in rows, post: columns).
         include_undefined_groups (bool, optional): Whether to include
             undefined groups in the output. Defaults to False.
-        outprop (bool, optional): If True, calculates the sum over outputs
-            and averages over inputs. Defaults to False.
+        outprop (bool, optional): If True, get the summed output proportion (across
+            recipient single cells in the same cell type) for each average sender. If
+            False (default), get the summed input proportion across all senders for
+            each average recipient.
         combining_method (str, optional): Method to combine inputs (outprop=False)
             or outputs (outprop=True). Can be 'sum', 'mean', or 'median'. 
             Defaults to 'mean'.
@@ -1070,7 +1072,10 @@ def result_summary(
         If display_output is True, the function will display a styled version
         of the resulting dataframe.
     """
-    assert( combining_method in ["sum", "mean", "median"] ), "combining_method must be either 'sum', 'mean' or 'median'."
+    assert( combining_method in ["mean", "median", "sum"]), (
+        "The combining_method should be either 'mean', 'median', or 'sum'. "
+        f"Currently it is {combining_method}."
+    )
 
     if inidx_map is None:
         inidx_map = {idx: idx for idx in range(stepsn.shape[0])}

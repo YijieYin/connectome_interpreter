@@ -22,7 +22,7 @@ from .compress_paths import effective_conn_from_paths
 
 
 def find_path_once(
-    inprop_csc,
+    inprop,
     steps_cpu,
     inidx: arrayable,
     outidx: arrayable,
@@ -38,7 +38,7 @@ def find_path_once(
     neurons 'effectively' connected (through steps_cpu) to the inidx neurons.
 
     Args:
-      inprop_csc (scipy.sparse.csc_matrix): The connectivity matrix in
+      inprop (scipy.sparse.csc_matrix): The connectivity matrix in
         Compressed Sparse Column format.
       steps_cpu (list): A list of compressed connectivity matrices: one matrix
         for each compressed path length.
@@ -59,6 +59,9 @@ def find_path_once(
       np.ndarray: An array of neuron indices in the previous layer that have
         significant connectivity, connecting between the `inidx` and `outidx`.
     """
+
+    inprop_csc = inprop.copy()
+    inprop_csc.data = np.abs(inprop.data)
 
     # make sure they are integers
     inidx = [int(i) for i in inidx]
@@ -184,6 +187,7 @@ def find_path_iteratively(
             between pre and post.
     """
 
+    inprop_csc.data = np.abs(inprop_csc.data)
     inidx = to_nparray(inidx)
     outidx = to_nparray(outidx)
 
@@ -233,7 +237,9 @@ def find_path_iteratively(
 
 
 def create_layered_positions(
-    df: pd.DataFrame, priority_indices=None, sort_dict: dict | None = None
+    df: pd.DataFrame, 
+    priority_indices=None, 
+    sort_dict: dict | None = None
 ) -> dict:
     """
     Creates a dictionary of positions for each neuron in the paths, so that
@@ -629,37 +635,44 @@ def group_paths(
     intermediate_group: dict | None = None,
     avg_within_connected: bool = False,
     outprop: bool = False,
+    combining_method: str = "mean",
 ) -> pd.DataFrame:
     """
-    Group the paths by user-specified variable (e.g. cell type, cell class etc.).
-    Weights are summed across presynaptic neurons of the same group and averaged across
-    all postsynaptic neurons of the same group (even if some postsynaptic neurons are
-    not in `paths`).
+    Group the paths by user-specified variable (e.g. cell type, cell class
+    etc.). Weights are summed across presynaptic neurons of the same group and
+    averaged across all postsynaptic neurons of the same group (even if some
+    postsynaptic neurons are not in `paths`).
 
     Args:
-        paths (pd.DataFrame): The DataFrame containing the path data, looking like the
-            output from `find_path_iteratively()`.
-        pre_group (dict): A dictionary that maps pre-synaptic neuron indices to their
-            respective group.
-        post_group (dict): A dictionary that maps post-synaptic neuron indices to their
-            respective group.
-        intermediate_group (dict, optional): A dictionary that maps intermediate neuron
-            indices to their respective group. Defaults to None. If None, it will be
-            set to pre_group.
-        avg_within_connected (bool, optional): If True, the average weight is calculated
-            only within neurons in the paths, instead of all neurons in the same cell
-            type. This can be useful for e.g. optic lobe where we sometimes want to only
-            take into account neurons locally connected. Defaults to False.
+        paths (pd.DataFrame): The DataFrame containing the path data, looking
+            like the output from `find_path_iteratively()`.
+        pre_group (dict): A dictionary that maps pre-synaptic neuron indices
+            to their respective group.
+        post_group (dict): A dictionary that maps post-synaptic neuron indices
+            to their respective group.
+        intermediate_group (dict, optional): A dictionary that maps
+            intermediate neuron indices to their respective group. Defaults to
+            None. If None, it will be set to pre_group.
+        avg_within_connected (bool, optional): If True, the average weight is
+            calculated within the connected neurons of the same group. If
+            False, the average weight is calculated across all neurons of the
+            same group. Defaults to False.
         outprop (bool, optional): If True, get the summed output proportion (across
             recipient single cells in the same cell type) for each average sender. If
             False (default), get the summed input proportion across all senders for
             each average recipient.
-
+        combining_method (str, optional): Method to combine inputs (outprop=False)
+            or outputs (outprop=True). Can be 'sum', or 'mean'. 
+            Defaults to 'mean'.
     Returns:
         pd.DataFrame: The grouped DataFrame containing the path data,
             including the layer number, pre-synaptic index, post-synaptic
             index, and weight.
     """
+    assert( combining_method in ["mean", "sum"]), (
+        "The combining_method should be either 'mean' or 'sum'. "
+        f"Currently it is {combining_method}."
+    )
 
     if intermediate_group is None:
         intermediate_group = pre_group
@@ -719,11 +732,14 @@ def group_paths(
                 .weight.sum()
                 .reset_index()
             )
-        # divide by number of postsynaptic neurons of the same type
-        paths["nneuron_post"] = paths.post_type.map(nneuron_per_type)
-        paths["weight"] = paths.weight / paths.nneuron_post
+        if combining_method == "mean":
+            # divide by number of postsynaptic neurons of the same type
+            paths["nneuron_post"] = paths.post_type.map(nneuron_per_type)
+            paths["weight"] = paths.weight / paths.nneuron_post
+            paths.drop(columns="nneuron_post", inplace=True)
+        else:
+            paths["weight"] = paths.weight
         paths.rename(columns={"pre_type": "pre", "post_type": "post"}, inplace=True)
-        paths.drop(columns="nneuron_post", inplace=True)
 
         return paths
 
@@ -759,11 +775,14 @@ def group_paths(
                 .weight.sum()
                 .reset_index()
             )
-        # divide by number of presynaptic neurons of the same type
-        paths["nneuron_pre"] = paths.pre_type.map(nneuron_per_type)
-        paths["weight"] = paths.weight / paths.nneuron_pre
+        if combining_method == "mean":
+            # divide by number of presynaptic neurons of the same type
+            paths["nneuron_pre"] = paths.pre_type.map(nneuron_per_type)
+            paths["weight"] = paths.weight / paths.nneuron_pre
+            paths.drop(columns="nneuron_pre", inplace=True)
+        else:
+            paths["weight"] = paths.weight
         paths.rename(columns={"pre_type": "pre", "post_type": "post"}, inplace=True)
-        paths.drop(columns="nneuron_pre", inplace=True)
 
         return paths
 
