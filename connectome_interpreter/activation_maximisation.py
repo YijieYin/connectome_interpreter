@@ -117,8 +117,25 @@ class MultilayeredNetwork(nn.Module):
         threshold (float): The activation threshold for neurons in the network.
         activations (numpy.ndarray): An array storing the activations of all (batches of)
             neurons (rows) across time steps (columns).
-        slope (torch.nn.Parameter): Trainable slope parameters grouped by neuron type.
-        biases (torch.nn.Parameter): Trainable bias parameters grouped by neuron type.
+        custom_activation_function (Callable): A custom activation function to use
+            instead of the default.
+        default_bias (float): Default bias value for all neurons.
+        slope (torch.nn.Parameter): Trainable parameter for the steepness of the tanh
+            activation function, grouped by neuron type.
+        raw_biases (torch.nn.Parameter): Trainable parameter for the biases of neurons,
+            grouped by neuron type.
+        indices (torch.Tensor): Indices mapping each neuron to its group for parameter
+            sharing.
+
+    Methods:
+        activation_function(x: torch.Tensor) -> torch.Tensor:
+            Applies the activation function to the input tensor.
+        forward(inputs: torch.Tensor) -> torch.Tensor:
+            Processes inputs through the network and returns the activations.
+    Context Managers:
+        training_mode(model: MultilayeredNetwork, train_slopes=True, train_biases=True):
+            Context manager to set the model in training mode, enabling gradients for
+            slopes and biases.
 
     Args:
         all_weights (Union[torch.Tensor, scipy.sparse.spmatrix]): The connectome. Input
@@ -242,6 +259,14 @@ class MultilayeredNetwork(nn.Module):
 
     @property
     def biases(self):
+        """
+        Get the biases of the neurons, applying softplus activation if raw_biases
+        are provided. If raw_biases is None, returns None.
+
+        Returns:
+            torch.Tensor or None: The biases of the neurons, or None if raw_biases
+            is not set.
+        """
         if self.raw_biases is None:
             return None
         return torch.nn.functional.softplus(self.raw_biases)
@@ -382,16 +407,6 @@ def training_mode(model: MultilayeredNetwork, train_slopes=True, train_biases=Tr
         yield model
     finally:
         model.set_param_grads(slopes=False, raw_biases=False)
-
-
-@contextlib.contextmanager
-def activation_max_mode(model: MultilayeredNetwork):
-    """Context manager for activation maximization - enables gradients for inputs."""
-    # Note: input gradients are handled in the activation_maximisation function itself
-    try:
-        yield model
-    finally:
-        pass
 
 
 def train_model(
