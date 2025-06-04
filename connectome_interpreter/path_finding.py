@@ -237,9 +237,7 @@ def find_path_iteratively(
 
 
 def create_layered_positions(
-    df: pd.DataFrame, 
-    priority_indices=None, 
-    sort_dict: dict | None = None
+    df: pd.DataFrame, priority_indices=None, sort_dict: dict | None = None
 ) -> dict:
     """
     Creates a dictionary of positions for each neuron in the paths, so that
@@ -662,15 +660,15 @@ def group_paths(
             False (default), get the summed input proportion across all senders for
             each average recipient.
         combining_method (str, optional): Method to combine inputs (outprop=False)
-            or outputs (outprop=True). Can be 'sum', or 'mean'. 
-            Defaults to 'mean'.
+            or outputs (outprop=True). Can be 'sum', 'mean', or 'median'. Defaults to
+            'mean'.
     Returns:
         pd.DataFrame: The grouped DataFrame containing the path data,
             including the layer number, pre-synaptic index, post-synaptic
             index, and weight.
     """
-    assert( combining_method in ["mean", "sum"]), (
-        "The combining_method should be either 'mean' or 'sum'. "
+    assert combining_method in ["mean", "sum", "median"], (
+        "The combining_method should be either 'mean', 'sum' or 'median'. "
         f"Currently it is {combining_method}."
     )
 
@@ -715,30 +713,48 @@ def group_paths(
             # count number of unique neurons in each type
             nneuron_per_type = paths.groupby("post_type")["post"].nunique().to_dict()
 
+        if combining_method == "median":
+            paths_weights = (
+                paths.groupby(["layer", "pre_type", "post_type"])["weight"]
+                .median()
+                .reset_index()
+            )
+        elif combining_method == "sum":
+            # sum across presynaptic neurons of the same type
+            paths_weights = (
+                paths.groupby(["layer", "pre_type", "post_type"])
+                .weight.sum()
+                .reset_index()
+            )
+        elif combining_method == "mean":
+            # sum across presynaptic neurons of the same type
+            paths_weights = (
+                paths.groupby(["layer", "pre_type", "post_type"])
+                .weight.sum()
+                .reset_index()
+            )
+            # divide by number of postsynaptic neurons of the same type
+            paths_weights["nneuron_post"] = paths_weights.post_type.map(
+                nneuron_per_type
+            )
+            paths_weights["weight"] = paths_weights.weight / paths_weights.nneuron_post
+            paths_weights.drop(columns="nneuron_post", inplace=True)
+
         if "pre_activation" in paths.columns:
             paths = (
                 paths.groupby(["layer", "pre_type", "post_type"])
                 .agg(
-                    weight=("weight", "sum"),
                     pre_activation=("pre_activation", "mean"),
                     post_activation=("post_activation", "mean"),
                 )
                 .reset_index()
             )
-        else:
-            # sum across presynaptic neurons of the same type
-            paths = (
-                paths.groupby(["layer", "pre_type", "post_type"])
-                .weight.sum()
-                .reset_index()
+            # then merge the weights
+            paths = pd.merge(
+                paths, paths_weights, on=["layer", "pre_type", "post_type"]
             )
-        if combining_method == "mean":
-            # divide by number of postsynaptic neurons of the same type
-            paths["nneuron_post"] = paths.post_type.map(nneuron_per_type)
-            paths["weight"] = paths.weight / paths.nneuron_post
-            paths.drop(columns="nneuron_post", inplace=True)
         else:
-            paths["weight"] = paths.weight
+            paths = paths_weights.copy()
         paths.rename(columns={"pre_type": "pre", "post_type": "post"}, inplace=True)
 
         return paths
@@ -758,30 +774,47 @@ def group_paths(
             # count number of unique neurons in each type
             nneuron_per_type = paths.groupby("pre_type")["pre"].nunique().to_dict()
 
+        # weights
+        if combining_method == "median":
+            paths_weights = (
+                paths.groupby(["layer", "pre_type", "post_type"])["weight"]
+                .median()
+                .reset_index()
+            )
+        elif combining_method == "sum":
+            # sum across presynaptic neurons of the same type
+            paths_weights = (
+                paths.groupby(["layer", "pre_type", "post_type"])
+                .weight.sum()
+                .reset_index()
+            )
+        elif combining_method == "mean":
+            # sum across presynaptic neurons of the same type
+            paths_weights = (
+                paths.groupby(["layer", "pre_type", "post_type"])
+                .weight.sum()
+                .reset_index()
+            )
+            # divide by number of presynaptic neurons of the same type
+            paths_weights["nneuron_pre"] = paths_weights.pre_type.map(nneuron_per_type)
+            paths_weights["weight"] = paths_weights.weight / paths_weights.nneuron_pre
+            paths_weights.drop(columns="nneuron_pre", inplace=True)
+
         if "pre_activation" in paths.columns:
             paths = (
                 paths.groupby(["layer", "pre_type", "post_type"])
                 .agg(
-                    weight=("weight", "sum"),
                     pre_activation=("pre_activation", "mean"),
                     post_activation=("post_activation", "mean"),
                 )
                 .reset_index()
             )
-        else:
-            # sum across presynaptic neurons of the same type
-            paths = (
-                paths.groupby(["layer", "pre_type", "post_type"])
-                .weight.sum()
-                .reset_index()
+            # then merge the weights
+            paths = pd.merge(
+                paths, paths_weights, on=["layer", "pre_type", "post_type"]
             )
-        if combining_method == "mean":
-            # divide by number of presynaptic neurons of the same type
-            paths["nneuron_pre"] = paths.pre_type.map(nneuron_per_type)
-            paths["weight"] = paths.weight / paths.nneuron_pre
-            paths.drop(columns="nneuron_pre", inplace=True)
         else:
-            paths["weight"] = paths.weight
+            paths = paths_weights.copy()
         paths.rename(columns={"pre_type": "pre", "post_type": "post"}, inplace=True)
 
         return paths
