@@ -1018,6 +1018,7 @@ def result_summary(
     pre_in_column: bool = False,
     include_undefined_groups: bool = False,
     outprop: bool = False,
+    combining_method: str = "mean",
 ):
     """Generates a summary of connections between different types of neurons,
     represented by their input and output indexes. The function calculates the
@@ -1053,6 +1054,11 @@ def result_summary(
             groups as columns. Defaults to False (pre in rows, post: columns).
         include_undefined_groups (bool, optional): Whether to include
             undefined groups in the output. Defaults to False.
+        outprop (bool, optional): If True, calculates the sum over outputs
+            and averages over inputs. Defaults to False.
+        combining_method (str, optional): Method to combine inputs (outprop=False)
+            or outputs (outprop=True). Can be 'sum', 'mean', or 'median'. 
+            Defaults to 'mean'.
 
     Returns:
         pd.DataFrame: A dataframe representing the summed synaptic input from
@@ -1064,6 +1070,8 @@ def result_summary(
         If display_output is True, the function will display a styled version
         of the resulting dataframe.
     """
+    assert( combining_method in ["sum", "mean", "median"] ), "combining_method must be either 'sum', 'mean' or 'median'."
+
     if inidx_map is None:
         inidx_map = {idx: idx for idx in range(stepsn.shape[0])}
     if outidx_map is None:
@@ -1108,13 +1116,23 @@ def result_summary(
         # Average across columns and transpose back
         # averaging across columns of the same type:
         # on average, a neuron of that type receives x% input from a presynaptic type
-        result_df = summed_df.T.groupby(level=0).mean().T
+        if combining_method=="sum":
+            result_df = summed_df.T.groupby(level=0).sum().T
+        elif combining_method=="mean":
+            result_df = summed_df.T.groupby(level=0).mean().T
+        elif combining_method == "median":
+            result_df = summed_df.T.groupby(level=0).median().T
     else:
         # calculate the output proportion from an average source neuron to a target type
         # so first sum across columns
         summed_df = df.T.groupby(level=0).sum().T
         # then average across rows
-        result_df = summed_df.groupby(summed_df.index).mean()
+        if combining_method=="sum":
+            result_df = summed_df.groupby(summed_df.index).sum()
+        elif combining_method=="mean":
+            result_df = summed_df.groupby(summed_df.index).mean()
+        elif combining_method == "median":
+            result_df = summed_df.groupby(summed_df.index).median()
 
     if pre_in_column:
         result_df = result_df.T
@@ -1122,10 +1140,10 @@ def result_summary(
     if display_threshold > 0:
         if threshold_axis == "row":
             # only display rows where any value >= display_threshold
-            result_df = result_df[(result_df >= display_threshold).any(axis=1)]
+            result_df = result_df[(np.abs(result_df) >= display_threshold).any(axis=1)]
         elif threshold_axis == "column":
             # only display columns where any value >= display_threshold
-            result_df = result_df.loc[:, (result_df >= display_threshold).any(axis=0)]
+            result_df = result_df.loc[:, (np.abs(result_df) >= display_threshold).any(axis=0)]
         else:
             raise ValueError("threshold_axis must be either 'column' or 'row'.")
 
@@ -1133,7 +1151,7 @@ def result_summary(
         if sort_names is None:
             # sort result_df by the values in the first column, in descending
             # order
-            result_df = result_df.sort_values(by=result_df.columns[0], ascending=False)
+            result_df = result_df.sort_values(by=np.abs(result_df).columns[0], ascending=False)
         elif isinstance(sort_names, str):
             sort_names = [sort_names]
 
@@ -1147,7 +1165,7 @@ def result_summary(
     elif sort_within == "row":
         # first sort rows by average row value in descending order
         result_df = result_df.loc[
-            result_df.mean(axis=1).sort_values(ascending=False).index
+            np.abs(result_df).mean(axis=1).sort_values(ascending=False).index
         ]
 
         if sort_names is None:
@@ -1174,8 +1192,8 @@ def result_summary(
     if display_output:
         result_dp = result_df.style.background_gradient(
             cmap="Blues",
-            vmin=result_df.min().min(),
-            vmax=result_df.max().max(),
+            vmin=np.abs(result_df).min().min(),
+            vmax=np.abs(result_df).max().max(),
         )
         display(result_dp)
     return result_df
