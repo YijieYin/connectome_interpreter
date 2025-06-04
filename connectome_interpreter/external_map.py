@@ -528,7 +528,7 @@ def looming_stimulus(start_coords, all_coords, n_time=4):
     return stim_str
 
 
-def make_sign_stim(phase=0, amplitude=1, n=8):
+def make_sine_stim(phase=0, amplitude=1, n=8):
     """
     Generate a dictionary of values representing a sine wave stimulus with a given phase
     and amplitude. The sine wave is defined over n points, starting from the given phase.
