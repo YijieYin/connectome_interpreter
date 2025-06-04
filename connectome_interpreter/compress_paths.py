@@ -1059,7 +1059,7 @@ def result_summary(
             False (default), get the summed input proportion across all senders for
             each average recipient.
         combining_method (str, optional): Method to combine inputs (outprop=False)
-            or outputs (outprop=True). Can be 'sum', 'mean', or 'median'. 
+            or outputs (outprop=True). Can be 'sum', 'mean', or 'median'.
             Defaults to 'mean'.
 
     Returns:
@@ -1072,7 +1072,7 @@ def result_summary(
         If display_output is True, the function will display a styled version
         of the resulting dataframe.
     """
-    assert( combining_method in ["mean", "median", "sum"]), (
+    assert combining_method in ["mean", "median", "sum"], (
         "The combining_method should be either 'mean', 'median', or 'sum'. "
         f"Currently it is {combining_method}."
     )
@@ -1085,6 +1085,10 @@ def result_summary(
     # remove nan values in inidx and outidx
     inidx = to_nparray(inidx)
     outidx = to_nparray(outidx)
+
+    # make sure inidx and outidx only contain integers
+    inidx = np.array([int(x) for x in inidx])
+    outidx = np.array([int(x) for x in outidx])
 
     if issparse(stepsn):
         # if stepsn is coo, turn into csc
@@ -1121,9 +1125,9 @@ def result_summary(
         # Average across columns and transpose back
         # averaging across columns of the same type:
         # on average, a neuron of that type receives x% input from a presynaptic type
-        if combining_method=="sum":
+        if combining_method == "sum":
             result_df = summed_df.T.groupby(level=0).sum().T
-        elif combining_method=="mean":
+        elif combining_method == "mean":
             result_df = summed_df.T.groupby(level=0).mean().T
         elif combining_method == "median":
             result_df = summed_df.T.groupby(level=0).median().T
@@ -1132,9 +1136,9 @@ def result_summary(
         # so first sum across columns
         summed_df = df.T.groupby(level=0).sum().T
         # then average across rows
-        if combining_method=="sum":
+        if combining_method == "sum":
             result_df = summed_df.groupby(summed_df.index).sum()
-        elif combining_method=="mean":
+        elif combining_method == "mean":
             result_df = summed_df.groupby(summed_df.index).mean()
         elif combining_method == "median":
             result_df = summed_df.groupby(summed_df.index).median()
@@ -1148,15 +1152,26 @@ def result_summary(
             result_df = result_df[(np.abs(result_df) >= display_threshold).any(axis=1)]
         elif threshold_axis == "column":
             # only display columns where any value >= display_threshold
-            result_df = result_df.loc[:, (np.abs(result_df) >= display_threshold).any(axis=0)]
+            result_df = result_df.loc[
+                :, (np.abs(result_df) >= display_threshold).any(axis=0)
+            ]
         else:
             raise ValueError("threshold_axis must be either 'column' or 'row'.")
+
+    # if there is nothing left
+    if result_df.empty:
+        raise ValueError(
+            "No values left after applying the display_threshold. "
+            "Try setting display_threshold to 0."
+        )
 
     if sort_within == "column":
         if sort_names is None:
             # sort result_df by the values in the first column, in descending
             # order
-            result_df = result_df.sort_values(by=np.abs(result_df).columns[0], ascending=False)
+            result_df = result_df.sort_values(
+                by=np.abs(result_df).columns[0], ascending=False
+            )
         elif isinstance(sort_names, str):
             sort_names = [sort_names]
 
