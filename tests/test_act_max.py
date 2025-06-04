@@ -305,3 +305,310 @@ class TestGetNeuronActivation(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             get_neuron_activation(output, neuron_indices, batch_names=batch_names)
+
+
+# Add these test classes to your existing test file
+
+
+class TestMultilayeredNetworkEnhanced(unittest.TestCase):
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.num_neurons = 10
+        self.num_sensory = 4
+        self.num_layers = 3
+
+        # Create weights and mappings
+        dense_weights = np.random.rand(self.num_neurons, self.num_neurons)
+        dense_weights = dense_weights / dense_weights.sum(axis=1, keepdims=True)
+        self.all_weights = csr_matrix(dense_weights)
+        self.sensory_indices = list(range(self.num_sensory))
+
+        # Create idx_to_group mapping
+        self.idx_to_group = {i: f"type_{i//3}" for i in range(self.num_neurons)}
+
+    def test_trainable_parameters_initialization(self):
+        """Test initialization with trainable parameters"""
+        model = MultilayeredNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            idx_to_group=self.idx_to_group,
+            default_bias=0.2,
+            tanh_steepness=3.0,
+        ).to(self.device)
+
+        # Check that parameters exist
+        self.assertIsNotNone(model.slope)
+        self.assertIsNotNone(model.biases)
+        self.assertIsNotNone(model.indices)
+
+        # Check parameter shapes
+        num_types = len(set(self.idx_to_group.values()))
+        self.assertEqual(model.slope.shape[0], num_types)
+        self.assertEqual(model.biases.shape[0], num_types)
+
+    def test_dict_parameter_values(self):
+        """Test initialization with dictionary parameter values"""
+        bias_dict = {"type_0": 0.1, "type_1": 0.2, "type_2": 0.3}
+        slope_dict = {"type_0": 2.0, "type_1": 4.0, "type_2": 6.0}
+
+        model = MultilayeredNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            idx_to_group=self.idx_to_group,
+            bias_dict=bias_dict,
+            slope_dict=slope_dict,
+        ).to(self.device)
+
+        # Check that parameters were set correctly
+        # The order depends on set() ordering, so check individual values
+        unique_types = sorted(set(self.idx_to_group.values()))
+        for i, type_name in enumerate(unique_types):
+            if type_name in bias_dict:
+                expected_bias = bias_dict[type_name]
+            else:
+                expected_bias = 0  # default
+            self.assertAlmostEqual(model.raw_biases[i].item(), expected_bias, places=6)
+
+    def test_custom_activation_function(self):
+        """Test custom activation function"""
+
+        def custom_activation(x):
+            return torch.sigmoid(x)
+
+        model = MultilayeredNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            activation_function=custom_activation,
+        ).to(self.device)
+
+        input_tensor = torch.rand(self.num_sensory, self.num_layers).to(self.device)
+        output = model(input_tensor)
+
+        # Check that output is in sigmoid range [0, 1]
+        self.assertTrue(torch.all(output >= 0) and torch.all(output <= 1))
+
+    def test_backward_compatibility(self):
+        """Test that model works without new parameters (backward compatibility)"""
+        model = MultilayeredNetwork(
+            self.all_weights, self.sensory_indices, num_layers=self.num_layers
+        ).to(self.device)
+
+        # Check that trainable parameters are None
+        self.assertIsNone(model.slope)
+        self.assertIsNone(model.biases)
+        self.assertIsNone(model.indices)
+
+        # Check that forward pass still works
+        input_tensor = torch.rand(self.num_sensory, self.num_layers).to(self.device)
+        output = model(input_tensor)
+        self.assertEqual(output.shape, (self.num_neurons, self.num_layers))
+
+    def test_parameter_gradient_control(self):
+        """Test set_param_grads method"""
+        model = MultilayeredNetwork(
+            self.all_weights, self.sensory_indices, idx_to_group=self.idx_to_group
+        ).to(self.device)
+
+        # Initially parameters shouldn't require grad
+        self.assertFalse(model.slope.requires_grad)
+        self.assertFalse(model.raw_biases.requires_grad)
+
+        # Enable gradients
+        model.set_param_grads(slopes=True, raw_biases=True)
+        self.assertTrue(model.slope.requires_grad)
+        self.assertTrue(model.raw_biases.requires_grad)
+
+        # Disable gradients
+        model.set_param_grads(slopes=False, raw_biases=False)
+        self.assertFalse(model.slope.requires_grad)
+        self.assertFalse(model.raw_biases.requires_grad)
+
+
+class TestContextManagers(unittest.TestCase):
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        dense_weights = np.random.rand(5, 5)
+        self.all_weights = csr_matrix(dense_weights)
+        self.sensory_indices = [0, 1]
+        self.idx_to_group = {i: f"type_{i}" for i in range(5)}
+
+    def test_training_mode_context(self):
+        """Test training_mode context manager"""
+        from connectome_interpreter.activation_maximisation import training_mode
+
+        model = MultilayeredNetwork(
+            self.all_weights, self.sensory_indices, idx_to_group=self.idx_to_group
+        ).to(self.device)
+
+        # Initially no gradients
+        self.assertFalse(model.slope.requires_grad)
+        self.assertFalse(model.raw_biases.requires_grad)
+
+        # Inside context, gradients should be enabled
+        with training_mode(model):
+            self.assertTrue(model.slope.requires_grad)
+            self.assertTrue(model.raw_biases.requires_grad)
+
+        # After context, gradients should be disabled
+        self.assertFalse(model.slope.requires_grad)
+        self.assertFalse(model.raw_biases.requires_grad)
+
+
+class TestTrainModelEnhanced(unittest.TestCase):
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        dense_weights = np.random.rand(6, 6) * 0.1
+        self.all_weights = csr_matrix(dense_weights)
+        self.sensory_indices = [0, 1]
+        self.idx_to_group = {i: f"type_{i//2}" for i in range(6)}
+
+        self.model = MultilayeredNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+        ).to(self.device)
+
+    def test_time_series_targets(self):
+        """Test training with time series targets (layer column)"""
+        from connectome_interpreter.activation_maximisation import train_model
+
+        # Create inputs and time series targets
+        inputs = torch.rand(4, 2, 2).to(self.device)
+        targets = pd.DataFrame(
+            [
+                {"batch": 0, "neuron_idx": 2, "layer": 0, "value": 0.5},
+                {"batch": 0, "neuron_idx": 2, "layer": 1, "value": 0.8},
+                {"batch": 1, "neuron_idx": 3, "layer": 0, "value": 0.3},
+                {"batch": 2, "neuron_idx": 4, "layer": 1, "value": 0.7},
+                {"batch": 3, "neuron_idx": 5, "layer": 0, "value": 0.4},
+            ]
+        )
+
+        # Train model
+        result = train_model(self.model, inputs, targets, num_epochs=5, wandb=False)
+
+        model, history, *_ = result
+
+        # Check that training occurred
+        self.assertTrue(len(history["loss"]) > 0)
+        self.assertIsInstance(history["loss"][0], float)
+
+    def test_backward_compatible_targets(self):
+        """Test training with old format targets (no layer column)"""
+        from connectome_interpreter.activation_maximisation import train_model
+
+        inputs = torch.rand(4, 2, 2).to(self.device)
+        targets = pd.DataFrame(
+            [
+                {"batch": 0, "neuron_idx": 2, "value": 0.5},
+                {"batch": 1, "neuron_idx": 3, "value": 0.3},
+                {"batch": 2, "neuron_idx": 4, "value": 0.7},
+                {"batch": 3, "neuron_idx": 5, "value": 0.4},
+            ]
+        )
+
+        # Should work without error
+        result = train_model(self.model, inputs, targets, num_epochs=3, wandb=False)
+
+        model, history, *_ = result
+        self.assertTrue(len(history["loss"]) > 0)
+
+
+class TestSaliencyEnhanced(unittest.TestCase):
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        dense_weights = np.random.rand(8, 8) * 0.1
+        self.all_weights = csr_matrix(dense_weights)
+        self.sensory_indices = [0, 1, 2]
+        self.idx_to_group = {i: f"type_{i//2}" for i in range(8)}
+
+    def test_saliency_with_trainable_model(self):
+        """Test saliency computation with trainable parameters"""
+        from connectome_interpreter.activation_maximisation import saliency
+
+        model = MultilayeredNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+        ).to(self.device)
+
+        input_tensor = torch.rand(3, 2).to(self.device)
+        neurons_of_interest = {0: [4, 5], 1: [6, 7]}
+
+        saliency_maps = saliency(
+            model, input_tensor, neurons_of_interest, device=self.device
+        )
+
+        # Check output shape and that gradients were computed
+        self.assertEqual(saliency_maps.shape, input_tensor.shape)
+        self.assertFalse(torch.allclose(saliency_maps, torch.zeros_like(saliency_maps)))
+
+    def test_saliency_methods(self):
+        """Test different saliency methods"""
+        from connectome_interpreter.activation_maximisation import saliency
+
+        model = MultilayeredNetwork(
+            self.all_weights, self.sensory_indices, num_layers=2
+        ).to(self.device)
+
+        input_tensor = torch.rand(3, 2).to(self.device)
+        neurons_of_interest = {0: [4], 1: [5]}
+
+        # Test vanilla saliency
+        vanilla_sal = saliency(
+            model,
+            input_tensor,
+            neurons_of_interest,
+            method="vanilla",
+            device=self.device,
+        )
+
+        # Test input_x_gradient saliency
+        ixg_sal = saliency(
+            model,
+            input_tensor,
+            neurons_of_interest,
+            method="input_x_gradient",
+            device=self.device,
+        )
+
+        # Should produce different results
+        self.assertFalse(torch.allclose(vanilla_sal, ixg_sal))
+
+    def test_saliency_invalid_method(self):
+        """Test saliency with invalid method"""
+        from connectome_interpreter.activation_maximisation import saliency
+
+        model = MultilayeredNetwork(
+            self.all_weights, self.sensory_indices, num_layers=2
+        ).to(self.device)
+
+        input_tensor = torch.rand(3, 2).to(self.device)
+        neurons_of_interest = {0: [4]}
+
+        with self.assertRaises(ValueError):
+            saliency(
+                model,
+                input_tensor,
+                neurons_of_interest,
+                method="invalid_method",
+                device=self.device,
+            )
+
+
+class TestTargetActivationEnhanced(unittest.TestCase):
+    def test_time_series_targets_dict(self):
+        """Test TargetActivation with time series targets from dict"""
+        targets_dict = {0: {1: 0.5, 2: 0.8}, 1: {0: 0.3, 3: 0.7}}  # layer 0  # layer 1
+        target = TargetActivation(targets=targets_dict, batch_size=3)
+
+        # Check that all batches have the same targets
+        batch_0_targets = target.get_batch_targets(0)
+        batch_2_targets = target.get_batch_targets(2)
+        self.assertEqual(batch_0_targets, batch_2_targets)
+
+        # Check layer structure
+        self.assertIn(0, batch_0_targets)  # layer 0
+        self.assertIn(1, batch_0_targets)  # layer 1
