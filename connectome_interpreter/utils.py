@@ -963,9 +963,12 @@ def plot_layered_paths(
     # Rescale weights to be between 1 and 10
     weight_min = path_df.weight.min()
     weight_max = path_df.weight.max()
-    path_df["weight"] = 1 + 9 * (path_df["weight"].values - weight_min) / (
-        weight_max - weight_min
-    )
+    if weight_max == weight_min:
+        path_df["weight"] = 1
+    else:
+        path_df["weight"] = 1 + 9 * (path_df["weight"].values - weight_min) / (
+            weight_max - weight_min
+        )
 
     # Create the graph using the new 'post_layer' identifiers
     G = nx.from_pandas_edgelist(
@@ -1060,7 +1063,7 @@ def plot_layered_paths(
             from pyvis.network import Network
         except ImportError as e:
             raise ImportError(
-                "Please install pyvis got interactive plots: pip install pyvis"
+                "Please install pyvis for interactive plots: pip install pyvis"
             ) from e
 
         net2 = Network(
