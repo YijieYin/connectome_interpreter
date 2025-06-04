@@ -1,9 +1,11 @@
 import io
 import pkgutil
+import os 
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import matplotlib.pyplot as plt
 
 DATA_SOURCES: dict[str, str] = {
     "DoOR_adult": "data/DoOR/processed_door_adult.csv",
@@ -15,6 +17,7 @@ DATA_SOURCES: dict[str, str] = {
     "Nern2024": "data/Nern2024/ME-columnar-cells-hex-location.csv",
     "Matsliah2024": "data/Matsliah2024/fafb_right_vis_cols.csv",
     "Badel2016_PN": "data/Badel2016/Badel2016.csv",
+    "Zhao2024": "data/Zhao2024/ucl_hex_right_20240701_tomale.csv",
 }
 
 
@@ -36,6 +39,7 @@ def load_dataset(dataset: str) -> pd.DataFrame:
             - 'Nern2024': columnar coordinates of individual cells from a collection of columnar cell types within the medulla of the right optic lobe, from Nern et al. 2024 (https://www.biorxiv.org/content/10.1101/2024.04.16.589741v2).
             - 'Matsliah2024': columnar coordinates of individual cells from a collection of columnar cell types in the right optic lobe from FAFB, from Matsliah et al. 2024 (https://www.nature.com/articles/s41586-024-07981-1).
             - 'Badel2016_PN': mapping from olfactory projection neurons to odours, from Badel et al. 2016 (https://www.cell.com/neuron/fulltext/S0896-6273(16)30201-X).
+            - 'Zhao2024': mapping from hexagonal coordinates to 3D coordinates, update from Zhao et al. 2022 (https://www.biorxiv.org/content/10.1101/2022.12.14.520178v1).
 
     Returns:
         pd.DataFrame: The dataset as a pandas DataFrame. For the adult, the glomeruli
@@ -546,3 +550,143 @@ def make_sine_stim(phase=0, amplitude=1, n=8):
     x = np.linspace(x, x + np.pi, n)
     y = amplitude * abs(np.sin(x))
     return dict(zip(range(1, n + 1), y))
+
+
+def plot_mollweide_projection(
+    data: pd.DataFrame,
+    fig_size: tuple=(16, 8),
+    custom_colorscale: list | None = None,
+    global_min: float | None = None,
+    global_max: float | None = None,
+    dataset: str = "Zhao2024", 
+) -> go.Figure:
+    """
+    Generates a heatmap to visualize the value of column features per column using the 
+    mollweide projection.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        data frame containing the values of column features per column with (at least) columns
+        `hex1_id` : int
+            hex1 coordinates of column
+        `hex2_id` : int
+            hex2 coordinates of column
+    feature_col : str
+        column of 'data' under investigation
+
+    Returns
+    -------
+    fig : go.Figure
+        Heatmap
+    """
+
+    def cart2sph(xyz:np.array) -> np.array:
+        """
+        Convert Cartesian to spherical coordinates. 
+        Theta is polar angle (from +z), phi is angle from +x to +y.
+        """
+        r = np.sqrt((xyz**2).sum(1))
+        theta = np.arccos(xyz[:,2])
+        phi = np.arctan2(xyz[:,1], xyz[:,0])
+        phi[phi < 0] = phi[phi < 0] + 2*np.pi
+
+        return(np.stack((r,theta,phi), axis=1))
+
+    def sph2Mollweide(thetaphi: np.array) -> np.array:
+        """ 
+        Spherical (viewed from outside) to Mollweide,
+            cf. https://mathworld.wolfram.com/MollweideProjection.html
+        """
+        azim = thetaphi[:,1]
+        azim[azim > np.pi] = azim[azim > np.pi] - 2*np.pi #longitude/azimuth
+        elev = np.pi/2 - thetaphi[:,0] #lattitude/elevation in radian
+
+        N = len(azim) #number of points
+        xy = np.zeros((N,2)) #output
+        for i in range(N):
+            theta = np.arcsin(2*elev[i]/np.pi)
+            if np.abs(np.abs(theta) - np.pi/2) < 0.001:
+                xy[i,] = [2*np.sqrt(2)/np.pi*azim[i]*np.cos(theta), np.sqrt(2)*np.sin(theta)]
+            else:
+                # to calculate theta 
+                dtheta = 1 
+                while dtheta > 1e-3:
+                    theta_new = theta -(2*theta +np.sin(2*theta) -np.pi*np.sin(elev[i]))/(2+2*np.cos(2*theta))
+                    dtheta = np.abs(theta_new - theta)
+                    theta = theta_new
+                xy[i,] = [2*np.sqrt(2)/np.pi*azim[i]*np.cos(theta), np.sqrt(2)*np.sin(theta)]
+        return xy
+    
+    def bg_mollweide() -> tuple:
+        """
+        Plot Mollweide guidelines
+        """
+        # define guidelines
+        ww = np.stack((np.linspace(0,180,19), np.repeat(-180,19)), axis=1)
+        w = np.stack((np.linspace(180,0,19), np.repeat(-90,19)), axis=1)
+        m = np.stack((np.linspace(0,180,19), np.repeat(0,19)), axis=1)
+        e = np.stack((np.linspace(180,0,19), np.repeat(90,19)), axis=1)
+        ee = np.stack((np.linspace(0,180,19), np.repeat(180,19)), axis=1)
+        pts = np.vstack((ww,w,m,e,ee))
+        rtp = np.insert(pts/180*np.pi, 0, np.repeat(1, pts.shape[0]), axis=1)
+        meridians_xy = sph2Mollweide(rtp[:,1:3])
+
+        pts = np.stack((np.repeat(45,37), np.linspace(-180,180,37)), axis=1)
+        rtp = np.insert(pts/180*np.pi, 0, np.repeat(1, pts.shape[0]), axis=1)
+        n45_xy = sph2Mollweide(rtp[:,1:3])
+        pts = np.stack((np.repeat(90,37), np.linspace(-180,180,37)), axis=1)
+        rtp = np.insert(pts/180*np.pi, 0, np.repeat(1, pts.shape[0]), axis=1)
+        eq_xy = sph2Mollweide(rtp[:,1:3])
+        pts = np.stack((np.repeat(135,37), np.linspace(-180,180,37)), axis=1)
+        rtp = np.insert(pts/180*np.pi, 0, np.repeat(1, pts.shape[0]), axis=1)
+        s45_xy = sph2Mollweide(rtp[:,1:3])
+
+        # plot guidelines
+        plt.rcParams["figure.figsize"] = [10.5, 4.5]
+        fig, ax = plt.subplots(nrows=1, ncols=1)
+        ax.plot(meridians_xy[:,0], meridians_xy[:,1], '-', color='lightgrey', linewidth=.5)
+        ax.plot(n45_xy[:,0], n45_xy[:,1], '-', color='lightgrey', linewidth=.5)
+        ax.plot(eq_xy[:,0], eq_xy[:,1], '-', color='lightgrey', linewidth=.5)
+        ax.plot(s45_xy[:,0], s45_xy[:,1], '-', color='lightgrey', linewidth=.5)
+        ax.set_xlim(-np.pi, np.pi)
+        ax.set_ylim(-np.pi/2, np.pi/2)
+        ax.set_aspect('equal')
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xlabel("azimuth")
+        ax.set_ylabel("elevation")
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_visible(False)
+        ax.spines['left'].set_visible(False)
+
+        return fig, ax
+
+    # load eyemap data
+    ucl_hex = load_dataset(dataset)
+
+    # convert eyemap into Mollweide coordinates
+    rtp2 = cart2sph(ucl_hex[['x','y','z']].values)
+    xy = sph2Mollweide(rtp2[:,1:3])
+    xy[:,0] = -xy[:,0] # flip x axis
+    xypq_moll = np.concatenate((xy, ucl_hex[['p','q']].values), axis=1)
+    xypq_moll = pd.DataFrame(xypq_moll, columns=['x','y','p','q'])
+    xypq_moll[['p','q']] = xypq_moll[['p','q']].astype(int)
+
+    # convert data into Mollweide coordinates
+    xy_data = data.reset_index(names='coords')['coords'].str.split(',', expand=True).astype(int).values
+    data['hex1_id'] = (xy_data[:,1]-xy_data[:,0])/2
+    data['hex2_id'] = (xy_data[:,1]+xy_data[:,0])/2
+    data = data.merge(xypq_moll, left_on=['hex1_id','hex2_id'], right_on=['q','p'], how='left')
+
+    # plot Mollweide projection
+    fig, ax = bg_mollweide()
+    ax.scatter(data['x'].values, data['y'].values, c=data.values[:,0], 
+                cmap=custom_colorscale, vmin=global_min, vmax=global_max, )
+    cbar = fig.colorbar(plt.cm.ScalarMappable(cmap=custom_colorscale), ax=ax)
+    cbar.mappable.set_clim(global_min, global_max)    
+    fig.set_size_inches(fig_size[0],fig_size[1])
+    plt.rcParams.update({'font.size': 14, 'font.family': 'Arial'})
+
+    return fig
