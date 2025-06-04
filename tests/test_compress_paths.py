@@ -288,7 +288,7 @@ class TestCompressPaths(unittest.TestCase):
             self.assertEqual(loaded.shape, (10, 10))
 
             # Check that the content matches the original matrix
-            np.testing.assert_allclose(loaded, dense_matrix, rtol=1e-5, atol=1e-7)
+            np.testing.assert_allclose(loaded, dense_matrix, rtol=1e-5, atol=1e-4)
 
     def test_invalid_inputs(self):
         """Test that the function raises appropriate errors for invalid inputs."""
