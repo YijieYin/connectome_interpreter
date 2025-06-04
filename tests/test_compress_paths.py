@@ -1,11 +1,13 @@
 import unittest
+from unittest.mock import patch
 import numpy as np
 import torch
 import os
 import tempfile
-import pytest
+import pandas as pd
 import scipy as sp
 from scipy.sparse import csr_matrix, csc_matrix
+
 
 # Import the functions to test
 # Adjust this import to match your actual module structure
@@ -15,6 +17,7 @@ from connectome_interpreter.compress_paths import (
     compress_paths_not_chunked,
     compress_paths_signed,
     compress_paths_signed_no_chunking,
+    result_summary,
 )
 
 
@@ -858,5 +861,706 @@ class TestCompressPathsSignedNoChunking(unittest.TestCase):
             self.skipTest("Not enough GPU memory for this test")
 
 
+class TestResultSummary(unittest.TestCase):
+    """Tests for the result_summary function."""
+
+    def setUp(self):
+        """Set up test data for use in multiple tests."""
+        # Create a 9x9 test matrix with 3 neurons per group (so mean != median)
+        # Neurons 0,1,2 = type A, neurons 3,4,5 = type B, neurons 6,7,8 = type C
+        self.test_matrix = np.array(
+            [
+                [0.0, 0.1, 0.9, 0.2, 0.3, 0.8, 0.4, 0.05, 0.7],  # neuron 0 (type A)
+                [0.15, 0.0, 0.6, 0.35, 0.25, 0.4, 0.15, 0.55, 0.3],  # neuron 1 (type A)
+                [0.8, 0.2, 0.0, 0.1, 0.9, 0.2, 0.7, 0.1, 0.5],  # neuron 2 (type A)
+                [0.22, 0.12, 0.3, 0.0, 0.42, 0.6, 0.22, 0.12, 0.8],  # neuron 3 (type B)
+                [0.33, 0.23, 0.7, 0.13, 0.0, 0.1, 0.33, 0.23, 0.4],  # neuron 4 (type B)
+                [0.1, 0.8, 0.2, 0.9, 0.3, 0.0, 0.6, 0.4, 0.2],  # neuron 5 (type B)
+                [0.11, 0.31, 0.5, 0.21, 0.11, 0.7, 0.0, 0.41, 0.9],  # neuron 6 (type C)
+                [0.24, 0.14, 0.2, 0.34, 0.24, 0.3, 0.14, 0.0, 0.1],  # neuron 7 (type C)
+                [0.9, 0.6, 0.1, 0.4, 0.8, 0.2, 0.7, 0.3, 0.0],  # neuron 8 (type C)
+            ]
+        )
+
+        # Sparse version
+        self.sparse_matrix = csr_matrix(self.test_matrix)
+
+        # Index mappings (3 neurons per group)
+        self.inidx_map = {
+            0: "A",
+            1: "A",
+            2: "A",
+            3: "B",
+            4: "B",
+            5: "B",
+            6: "C",
+            7: "C",
+            8: "C",
+        }
+        self.outidx_map = {
+            0: "A",
+            1: "A",
+            2: "A",
+            3: "B",
+            4: "B",
+            5: "B",
+            6: "C",
+            7: "C",
+            8: "C",
+        }
+
+        # Test indices
+        self.all_indices = [0, 1, 2, 3, 4, 5, 6, 7, 8]
+        self.subset_indices = [1, 3, 7]
+
+    def test_basic_functionality_dense(self):
+        """Test basic functionality with dense matrix."""
+        with patch("connectome_interpreter.compress_paths.display") as mock_display:
+            result = result_summary(
+                self.test_matrix,
+                self.all_indices,
+                self.all_indices,
+                self.inidx_map,
+                self.outidx_map,
+                display_output=False,
+            )
+
+            # Check basic properties
+            self.assertIsInstance(result, pd.DataFrame)
+            self.assertEqual(result.shape, (3, 3))  # 3 neuron types
+            self.assertCountEqual(result.index, ["A", "B", "C"])
+            self.assertCountEqual(result.columns, ["A", "B", "C"])
+
+            # Verify display wasn't called
+            mock_display.assert_not_called()
+
+    def test_basic_functionality_sparse(self):
+        """Test basic functionality with sparse matrix."""
+        result = result_summary(
+            self.sparse_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            display_output=False,
+        )
+
+        # Should give same result as dense version
+        dense_result = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            display_output=False,
+        )
+
+        pd.testing.assert_frame_equal(result, dense_result)
+
+    def test_sparse_coo_conversion(self):
+        """Test that COO sparse matrices are converted to CSC."""
+        coo_matrix = self.sparse_matrix.tocoo()
+
+        result = result_summary(
+            coo_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            display_output=False,
+        )
+
+        # Should work without errors and give correct result
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertEqual(result.shape, (3, 3))
+
+    def test_subset_indices(self):
+        """Test functionality with subset of indices."""
+        result = result_summary(
+            self.test_matrix,
+            self.subset_indices,  # [1, 2, 4] -> types A, B, C
+            self.subset_indices,
+            self.inidx_map,
+            self.outidx_map,
+            display_output=False,
+        )
+
+        # Should still have all types represented
+        self.assertEqual(result.shape, (3, 3))
+        self.assertCountEqual(result.index, ["A", "B", "C"])
+
+    def test_nan_removal(self):
+        """Test that NaN values in indices are properly handled."""
+        indices_with_nan = [0, 1, np.nan, 2, 3]
+
+        result = result_summary(
+            self.test_matrix,
+            indices_with_nan,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            display_output=False,
+        )
+
+        # Should work without errors
+        self.assertIsInstance(result, pd.DataFrame)
+
+    def test_no_mapping(self):
+        """Test behavior when no index mappings are provided."""
+        result = result_summary(
+            self.test_matrix, self.all_indices, self.all_indices, display_output=False
+        )
+
+        # Should create identity mapping
+        self.assertEqual(result.shape, (9, 9))  # One group per neuron
+        expected_labels = ["0", "1", "2", "3", "4", "5", "6", "7", "8"]
+        self.assertCountEqual(result.index, expected_labels)
+        self.assertCountEqual(result.columns, expected_labels)
+
+    def test_different_in_out_mappings(self):
+        """Test with different input and output mappings."""
+        out_map_different = {
+            0: "X",
+            1: "X",
+            2: "X",
+            3: "Y",
+            4: "Y",
+            5: "Y",
+            6: "Z",
+            7: "Z",
+            8: "Z",
+        }
+
+        result = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            out_map_different,
+            display_output=False,
+        )
+
+        # Rows should use inidx_map, columns should use outidx_map
+        self.assertCountEqual(result.index, ["A", "B", "C"])
+        self.assertCountEqual(result.columns, ["X", "Y", "Z"])
+
+    def test_combining_methods(self):
+        """Test different combining methods: mean, sum, median."""
+        mean_result = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            combining_method="mean",
+            display_output=False,
+        )
+
+        sum_result = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            combining_method="sum",
+            display_output=False,
+        )
+
+        median_result = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            combining_method="median",
+            display_output=False,
+        )
+
+        # Sum values should be exactly 3x mean values (since we have 3 neurons per type)
+        expected_sum = mean_result * 3
+        pd.testing.assert_frame_equal(sum_result, expected_sum)
+
+        # With 3 values per group and asymmetric data, median should differ from mean
+        self.assertFalse(mean_result.equals(median_result))
+
+        # Check specific values - with our asymmetric data, mean and median should be different
+        # For example, A->A should have different mean vs median due to the [0.1, 0.6, 0.2] pattern
+        self.assertNotAlmostEqual(
+            mean_result.loc["A", "A"], median_result.loc["A", "A"], places=3
+        )
+
+    def test_invalid_combining_method(self):
+        """Test that invalid combining method raises assertion error."""
+        with self.assertRaises(AssertionError):
+            result_summary(
+                self.test_matrix,
+                self.all_indices,
+                self.all_indices,
+                self.inidx_map,
+                self.outidx_map,
+                combining_method="invalid_method",
+                display_output=False,
+            )
+
+    def test_outprop_parameter(self):
+        """Test outprop parameter (output proportion calculation)."""
+        input_prop = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            outprop=False,
+            display_output=False,
+        )
+
+        output_prop = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            outprop=True,
+            display_output=False,
+        )
+
+        # Results should be different due to different calculation order
+        self.assertFalse(input_prop.equals(output_prop))
+
+        # Both should have same shape
+        self.assertEqual(input_prop.shape, output_prop.shape)
+
+        # Values should generally be different (not just transposes)
+        self.assertFalse(np.allclose(input_prop.values, output_prop.values.T))
+
+    def test_pre_in_column(self):
+        """Test pre_in_column parameter (transpose result)."""
+        pre_in_rows = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            pre_in_column=False,
+            display_output=False,
+        )
+
+        pre_in_columns = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            pre_in_column=True,
+            display_output=False,
+        )
+
+        # Should be transposes of each other
+        pd.testing.assert_frame_equal(
+            pre_in_rows.sort_index().sort_index(axis=1),
+            pre_in_columns.T.sort_index().sort_index(axis=1),
+        )
+
+    def test_display_threshold_row(self):
+        """Test display_threshold with row filtering."""
+        # Set a high threshold to filter out some rows
+        result = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            display_threshold=0.5,
+            threshold_axis="row",
+            display_output=False,
+        )
+
+        # Check that remaining rows have at least one value >= threshold
+        for idx in result.index:
+            self.assertTrue(np.any(np.abs(result.loc[idx]) >= 0.5))
+
+        # Test that very high threshold raises ValueError
+        with self.assertRaises(ValueError) as context:
+            result_summary(
+                self.test_matrix,
+                self.all_indices,
+                self.all_indices,
+                self.inidx_map,
+                self.outidx_map,
+                display_threshold=2.0,  # Higher than any value in our matrix
+                threshold_axis="row",
+                display_output=False,
+            )
+
+        self.assertIn(
+            "No values left after applying the display_threshold",
+            str(context.exception),
+        )
+
+    def test_display_threshold_column(self):
+        """Test display_threshold with column filtering."""
+        result = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            display_threshold=0.5,
+            threshold_axis="column",
+            display_output=False,
+        )
+
+        # All remaining columns should have at least one value >= threshold
+        for col in result.columns:
+            self.assertTrue(np.any(np.abs(result[col]) >= 0.5))
+
+        # Test that very high threshold raises ValueError
+        with self.assertRaises(ValueError) as context:
+            result_summary(
+                self.test_matrix,
+                self.all_indices,
+                self.all_indices,
+                self.inidx_map,
+                self.outidx_map,
+                display_threshold=2.0,  # Higher than any value in our matrix
+                threshold_axis="column",
+                display_output=False,
+            )
+
+        self.assertIn(
+            "No values left after applying the display_threshold",
+            str(context.exception),
+        )
+
+    def test_invalid_threshold_axis(self):
+        """Test that invalid threshold_axis raises ValueError."""
+        with self.assertRaises(ValueError):
+            result_summary(
+                self.test_matrix,
+                self.all_indices,
+                self.all_indices,
+                self.inidx_map,
+                self.outidx_map,
+                threshold_axis="invalid",
+                display_output=False,
+            )
+
+    def test_sort_within_column(self):
+        """Test sorting within columns."""
+        result = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            sort_within="column",
+            display_output=False,
+        )
+
+        # Check that first column is sorted in descending order (by absolute value)
+        first_col_values = np.abs(result.iloc[:, 0]).values
+        self.assertTrue(np.all(first_col_values[:-1] >= first_col_values[1:]))
+
+    def test_sort_within_row(self):
+        """Test sorting within rows."""
+        result = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            sort_within="row",
+            display_output=False,
+        )
+
+        # Check that first row is sorted in descending order
+        first_row_values = result.iloc[0, :].values
+        self.assertTrue(np.all(first_row_values[:-1] >= first_row_values[1:]))
+
+    def test_sort_names_column(self):
+        """Test sorting by specific column names."""
+        result = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            sort_within="column",
+            sort_names="B",
+            display_output=False,
+        )
+
+        # Should be sorted by column B values
+        col_b_values = result["B"].values
+        self.assertTrue(np.all(col_b_values[:-1] >= col_b_values[1:]))
+
+    def test_sort_names_row(self):
+        """Test sorting by specific row names."""
+        result = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            sort_within="row",
+            sort_names="B",
+            display_output=False,
+        )
+
+        # Should be sorted by row B values
+        row_b_values = result.loc["B", :].values
+        self.assertTrue(np.all(row_b_values[:-1] >= row_b_values[1:]))
+
+    def test_sort_names_list(self):
+        """Test sorting by multiple names."""
+        result = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            sort_within="column",
+            sort_names=["A", "B"],
+            display_output=False,
+        )
+
+        # Should work without errors
+        self.assertIsInstance(result, pd.DataFrame)
+
+    def test_invalid_sort_names_column(self):
+        """Test error when sort_names not in columns."""
+        with self.assertRaises(ValueError):
+            result_summary(
+                self.test_matrix,
+                self.all_indices,
+                self.all_indices,
+                self.inidx_map,
+                self.outidx_map,
+                sort_within="column",
+                sort_names="NonExistent",
+                display_output=False,
+            )
+
+    def test_invalid_sort_names_row(self):
+        """Test error when sort_names not in rows."""
+        with self.assertRaises(ValueError):
+            result_summary(
+                self.test_matrix,
+                self.all_indices,
+                self.all_indices,
+                self.inidx_map,
+                self.outidx_map,
+                sort_within="row",
+                sort_names="NonExistent",
+                display_output=False,
+            )
+
+    def test_invalid_sort_within(self):
+        """Test that invalid sort_within raises ValueError."""
+        with self.assertRaises(ValueError):
+            result_summary(
+                self.test_matrix,
+                self.all_indices,
+                self.all_indices,
+                self.inidx_map,
+                self.outidx_map,
+                sort_within="invalid",
+                display_output=False,
+            )
+
+    def test_include_undefined_groups(self):
+        """Test include_undefined_groups parameter."""
+        # Create mappings with NaN values
+        inidx_map_with_nan = {0: "A", 1: "A", 2: np.nan, 3: "B", 4: "B", 5: np.nan}
+
+        result_without_undefined = result_summary(
+            self.test_matrix,
+            set(inidx_map_with_nan.keys()),
+            set(inidx_map_with_nan.keys()),
+            inidx_map_with_nan,
+            inidx_map_with_nan,
+            include_undefined_groups=False,
+            display_output=False,
+        )
+
+        result_with_undefined = result_summary(
+            self.test_matrix,
+            set(inidx_map_with_nan.keys()),
+            set(inidx_map_with_nan.keys()),
+            inidx_map_with_nan,
+            inidx_map_with_nan,
+            include_undefined_groups=True,
+            display_output=False,
+        )
+
+        # With undefined groups, should have 'undefined' in index/columns
+        self.assertIn("undefined", result_with_undefined.index)
+        self.assertIn("undefined", result_with_undefined.columns)
+
+        # Without undefined groups, should not have 'undefined'
+        self.assertNotIn("undefined", result_without_undefined.index)
+        self.assertNotIn("undefined", result_without_undefined.columns)
+
+    def test_display_output_true(self):
+        """Test that display is called when display_output=True."""
+        with patch("connectome_interpreter.compress_paths.display") as mock_display:
+            result = result_summary(
+                self.test_matrix,
+                self.all_indices,
+                self.all_indices,
+                self.inidx_map,
+                self.outidx_map,
+                display_output=True,
+            )
+
+            # Check that display was called once
+            mock_display.assert_called_once()
+
+            # Check that the displayed object is a styled DataFrame
+            displayed_obj = mock_display.call_args[0][0]
+            self.assertTrue(hasattr(displayed_obj, "background_gradient"))
+
+    def test_single_neuron_type(self):
+        """Test with all neurons of same type."""
+        single_type_map = {i: "A" for i in range(9)}
+
+        result = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            single_type_map,
+            single_type_map,
+            display_output=False,
+        )
+
+        # Should have shape (1, 1)
+        self.assertEqual(result.shape, (1, 1))
+        self.assertEqual(result.index[0], "A")
+        self.assertEqual(result.columns[0], "A")
+
+    def test_different_index_types(self):
+        """Test with different types of indices (list, array, etc.)."""
+        # Test with numpy array
+        np_indices = np.array(self.all_indices)
+        result1 = result_summary(
+            self.test_matrix,
+            np_indices,
+            np_indices,
+            self.inidx_map,
+            self.outidx_map,
+            display_output=False,
+        )
+
+        # Test with pandas Series
+        pd_indices = pd.Series(self.all_indices)
+        result2 = result_summary(
+            self.test_matrix,
+            pd_indices,
+            pd_indices,
+            self.inidx_map,
+            self.outidx_map,
+            display_output=False,
+        )
+
+        # Test with set
+        set_indices = set(self.all_indices)
+        result3 = result_summary(
+            self.test_matrix,
+            set_indices,
+            set_indices,
+            self.inidx_map,
+            self.outidx_map,
+            display_output=False,
+        )
+
+        # All should give same results (order might differ for set)
+        # Check that shapes are the same
+        self.assertEqual(result1.shape, result2.shape)
+        self.assertEqual(result1.shape, result3.shape)
+
+    def test_mathematical_correctness(self):
+        """Test that the mathematical operations are correct."""
+        # Create a simple case where we can verify the math manually
+        simple_matrix = np.array(
+            [
+                [0.0, 0.2, 0.4],  # neuron 0 (type A)
+                [0.1, 0.0, 0.3],  # neuron 1 (type A)
+                [0.5, 0.1, 0.0],  # neuron 2 (type B)
+            ]
+        )
+
+        simple_map = {0: "A", 1: "A", 2: "B"}
+        indices = [0, 1, 2]
+
+        # Test with sum combining method for easier verification
+        result = result_summary(
+            simple_matrix,
+            indices,
+            indices,
+            simple_map,
+            simple_map,
+            combining_method="sum",
+            display_output=False,
+        )
+
+        # Manual calculation (outprop=False, sum method):
+        # 1. Group by presynaptic type and sum
+        # 2. Group by postsynaptic type and sum
+
+        # For A->A: neurons 0,1 -> neurons 0,1
+        # Connections from A neurons: [0.0+0.1, 0.2+0.0] = [0.1, 0.2]
+        # Sum across postsynaptic A neurons: 0.1 + 0.2 = 0.3
+        expected_a_to_a = 0.3
+
+        # For A->B: neurons 0,1 -> neuron 2
+        # Connections from A neurons to B: [0.4+0.3] = 0.7
+        expected_a_to_b = 0.7
+
+        # For B->A: neuron 2 -> neurons 0,1
+        # Connections from B to A: [0.5+0.1] = 0.6
+        expected_b_to_a = 0.6
+
+        # For B->B: neuron 2 -> neuron 2
+        # Connection from B to B: 0.0
+        expected_b_to_b = 0.0
+
+        self.assertAlmostEqual(result.loc["A", "A"], expected_a_to_a, places=5)
+        self.assertAlmostEqual(result.loc["A", "B"], expected_a_to_b, places=5)
+        self.assertAlmostEqual(result.loc["B", "A"], expected_b_to_a, places=5)
+        self.assertAlmostEqual(result.loc["B", "B"], expected_b_to_b, places=5)
+
+        # Test with mean combining method
+        result_mean = result_summary(
+            simple_matrix,
+            indices,
+            indices,
+            simple_map,
+            simple_map,
+            combining_method="mean",
+            display_output=False,
+        )
+
+        # Mean should be sum divided by number of postsynaptic neurons in each group
+        # A group has 2 neurons, B group has 1 neuron
+        expected_mean_a_to_a = expected_a_to_a / 2  # 0.15
+        expected_mean_a_to_b = expected_a_to_b / 1  # 0.7
+        expected_mean_b_to_a = expected_b_to_a / 2  # 0.3
+        expected_mean_b_to_b = expected_b_to_b / 1  # 0.0
+
+        self.assertAlmostEqual(
+            result_mean.loc["A", "A"], expected_mean_a_to_a, places=5
+        )
+        self.assertAlmostEqual(
+            result_mean.loc["A", "B"], expected_mean_a_to_b, places=5
+        )
+        self.assertAlmostEqual(
+            result_mean.loc["B", "A"], expected_mean_b_to_a, places=5
+        )
+        self.assertAlmostEqual(
+            result_mean.loc["B", "B"], expected_mean_b_to_b, places=5
+        )
+
+
 if __name__ == "__main__":
+    # Add the new test class to the existing test suite
     unittest.main()
