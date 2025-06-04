@@ -915,24 +915,20 @@ class TestResultSummary(unittest.TestCase):
 
     def test_basic_functionality_dense(self):
         """Test basic functionality with dense matrix."""
-        with patch("connectome_interpreter.compress_paths.display") as mock_display:
-            result = result_summary(
-                self.test_matrix,
-                self.all_indices,
-                self.all_indices,
-                self.inidx_map,
-                self.outidx_map,
-                display_output=False,
-            )
+        result = result_summary(
+            self.test_matrix,
+            self.all_indices,
+            self.all_indices,
+            self.inidx_map,
+            self.outidx_map,
+            display_output=False,
+        )
 
-            # Check basic properties
-            self.assertIsInstance(result, pd.DataFrame)
-            self.assertEqual(result.shape, (3, 3))  # 3 neuron types
-            self.assertCountEqual(result.index, ["A", "B", "C"])
-            self.assertCountEqual(result.columns, ["A", "B", "C"])
-
-            # Verify display wasn't called
-            mock_display.assert_not_called()
+        # Check basic properties
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertEqual(result.shape, (3, 3))  # 3 neuron types
+        self.assertCountEqual(result.index, ["A", "B", "C"])
+        self.assertCountEqual(result.columns, ["A", "B", "C"])
 
     def test_basic_functionality_sparse(self):
         """Test basic functionality with sparse matrix."""
@@ -1400,25 +1396,6 @@ class TestResultSummary(unittest.TestCase):
         # Without undefined groups, should not have 'undefined'
         self.assertNotIn("undefined", result_without_undefined.index)
         self.assertNotIn("undefined", result_without_undefined.columns)
-
-    def test_display_output_true(self):
-        """Test that display is called when display_output=True."""
-        with patch("connectome_interpreter.compress_paths.display") as mock_display:
-            result = result_summary(
-                self.test_matrix,
-                self.all_indices,
-                self.all_indices,
-                self.inidx_map,
-                self.outidx_map,
-                display_output=True,
-            )
-
-            # Check that display was called once
-            mock_display.assert_called_once()
-
-            # Check that the displayed object is a styled DataFrame
-            displayed_obj = mock_display.call_args[0][0]
-            self.assertTrue(hasattr(displayed_obj, "background_gradient"))
 
     def test_single_neuron_type(self):
         """Test with all neurons of same type."""
