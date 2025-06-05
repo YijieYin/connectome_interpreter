@@ -1,6 +1,6 @@
 import io
 import pkgutil
-import os 
+import os
 
 import numpy as np
 import pandas as pd
@@ -155,8 +155,7 @@ def hex_heatmap(
                 - 'fig_margin': int, default=0 (mm)
                 - 'fsize_ticks_pt': int, default=20 (points)
                 - 'fsize_title_pt': int, default=20 (points)
-                - 'markersize': int, default=18 if dataset='mcns_right', 20 if
-                    dataset='fafb_right'
+                - 'markersize': int, default=18 if dataset='mcns_right', 20 if dataset='fafb_right'
                 - 'ticklen': int, default=15
                 - 'tickwidth': int, default=5
                 - 'axislinewidth': int, default=3
@@ -553,140 +552,287 @@ def make_sine_stim(phase=0, amplitude=1, n=8):
 
 
 def plot_mollweide_projection(
-    data: pd.DataFrame,
-    fig_size: tuple=(16, 8),
-    custom_colorscale: list | None = None,
+    data: pd.Series | pd.DataFrame,
+    fig_size: tuple = (900, 700),
+    custom_colorscale: str = "Viridis",
     global_min: float | None = None,
     global_max: float | None = None,
-    dataset: str = "Zhao2024", 
+    dataset: str = "Zhao2024",
+    marker_size: int = 8,
 ) -> go.Figure:
     """
-    Generates a heatmap to visualize the value of column features per column using the 
+    Generates a heatmap to visualize the value of column features per column using the
     mollweide projection.
 
-    Parameters
-    ----------
-    data : pd.DataFrame
-        data frame containing the values of column features per column with (at least) columns
-        `hex1_id` : int
-            hex1 coordinates of column
-        `hex2_id` : int
-            hex2 coordinates of column
-    feature_col : str
-        column of 'data' under investigation
+    Args:
+        data (pd.Series | pd.DataFrame): Data with index formatted as strings of the
+            form '-12,34', where the first number is the x-coordinate and the second
+            number is the y-coordinate. The data to plot. Each column will generate a
+            separate frame in the plot.
+        fig_size (tuple): Size of the figure in pixels (width, height).
+        custom_colorscale (str): Name of the Plotly colorscale to use.
+        global_min (float | None): Global minimum value for the color scale. If this
+            minumum is >0, 0 is used.
+        global_max (float | None): Global maximum value for the color scale. If None,
+            the maximum value of the data is used.
+        dataset (str): The dataset to use for the hexagon locations. Options are:
 
-    Returns
-    -------
-    fig : go.Figure
-        Heatmap
+            - 'Zhao2024': mapping from hexagonal coordinates to 3D coordinates, update from Zhao et al. 2022 (https://www.biorxiv.org/content/10.1101/2022.12.14.520178v1).
+
+        marker_size (int): Size of markers in the plot.
+
+    Returns:
+        go.Figure: A Plotly figure object containing the mollweide projection heatmap.
     """
 
-    def cart2sph(xyz:np.array) -> np.array:
+    def cart2sph(xyz: np.array) -> np.array:
         """
-        Convert Cartesian to spherical coordinates. 
+        Convert Cartesian to spherical coordinates.
         Theta is polar angle (from +z), phi is angle from +x to +y.
         """
         r = np.sqrt((xyz**2).sum(1))
-        theta = np.arccos(xyz[:,2])
-        phi = np.arctan2(xyz[:,1], xyz[:,0])
-        phi[phi < 0] = phi[phi < 0] + 2*np.pi
-
-        return(np.stack((r,theta,phi), axis=1))
+        theta = np.arccos(xyz[:, 2])
+        phi = np.arctan2(xyz[:, 1], xyz[:, 0])
+        phi[phi < 0] = phi[phi < 0] + 2 * np.pi
+        return np.stack((r, theta, phi), axis=1)
 
     def sph2Mollweide(thetaphi: np.array) -> np.array:
-        """ 
+        """
         Spherical (viewed from outside) to Mollweide,
             cf. https://mathworld.wolfram.com/MollweideProjection.html
         """
-        azim = thetaphi[:,1]
-        azim[azim > np.pi] = azim[azim > np.pi] - 2*np.pi #longitude/azimuth
-        elev = np.pi/2 - thetaphi[:,0] #lattitude/elevation in radian
+        azim = thetaphi[:, 1]
+        azim[azim > np.pi] = azim[azim > np.pi] - 2 * np.pi  # longitude/azimuth
+        elev = np.pi / 2 - thetaphi[:, 0]  # lattitude/elevation in radian
 
-        N = len(azim) #number of points
-        xy = np.zeros((N,2)) #output
+        N = len(azim)  # number of points
+        xy = np.zeros((N, 2))  # output
         for i in range(N):
-            theta = np.arcsin(2*elev[i]/np.pi)
-            if np.abs(np.abs(theta) - np.pi/2) < 0.001:
-                xy[i,] = [2*np.sqrt(2)/np.pi*azim[i]*np.cos(theta), np.sqrt(2)*np.sin(theta)]
+            theta = np.arcsin(2 * elev[i] / np.pi)
+            if np.abs(np.abs(theta) - np.pi / 2) < 0.001:
+                xy[i,] = [
+                    2 * np.sqrt(2) / np.pi * azim[i] * np.cos(theta),
+                    np.sqrt(2) * np.sin(theta),
+                ]
             else:
-                # to calculate theta 
-                dtheta = 1 
+                # to calculate theta
+                dtheta = 1
                 while dtheta > 1e-3:
-                    theta_new = theta -(2*theta +np.sin(2*theta) -np.pi*np.sin(elev[i]))/(2+2*np.cos(2*theta))
+                    theta_new = theta - (
+                        2 * theta + np.sin(2 * theta) - np.pi * np.sin(elev[i])
+                    ) / (2 + 2 * np.cos(2 * theta))
                     dtheta = np.abs(theta_new - theta)
                     theta = theta_new
-                xy[i,] = [2*np.sqrt(2)/np.pi*azim[i]*np.cos(theta), np.sqrt(2)*np.sin(theta)]
+                xy[i,] = [
+                    2 * np.sqrt(2) / np.pi * azim[i] * np.cos(theta),
+                    np.sqrt(2) * np.sin(theta),
+                ]
         return xy
-    
-    def bg_mollweide() -> tuple:
+
+    def create_mollweide_guidelines():
         """
-        Plot Mollweide guidelines
+        Create Mollweide projection guidelines as plotly traces
         """
-        # define guidelines
-        ww = np.stack((np.linspace(0,180,19), np.repeat(-180,19)), axis=1)
-        w = np.stack((np.linspace(180,0,19), np.repeat(-90,19)), axis=1)
-        m = np.stack((np.linspace(0,180,19), np.repeat(0,19)), axis=1)
-        e = np.stack((np.linspace(180,0,19), np.repeat(90,19)), axis=1)
-        ee = np.stack((np.linspace(0,180,19), np.repeat(180,19)), axis=1)
-        pts = np.vstack((ww,w,m,e,ee))
-        rtp = np.insert(pts/180*np.pi, 0, np.repeat(1, pts.shape[0]), axis=1)
-        meridians_xy = sph2Mollweide(rtp[:,1:3])
+        traces = []
 
-        pts = np.stack((np.repeat(45,37), np.linspace(-180,180,37)), axis=1)
-        rtp = np.insert(pts/180*np.pi, 0, np.repeat(1, pts.shape[0]), axis=1)
-        n45_xy = sph2Mollweide(rtp[:,1:3])
-        pts = np.stack((np.repeat(90,37), np.linspace(-180,180,37)), axis=1)
-        rtp = np.insert(pts/180*np.pi, 0, np.repeat(1, pts.shape[0]), axis=1)
-        eq_xy = sph2Mollweide(rtp[:,1:3])
-        pts = np.stack((np.repeat(135,37), np.linspace(-180,180,37)), axis=1)
-        rtp = np.insert(pts/180*np.pi, 0, np.repeat(1, pts.shape[0]), axis=1)
-        s45_xy = sph2Mollweide(rtp[:,1:3])
+        # Create meridians
+        ww = np.stack((np.linspace(0, 180, 19), np.repeat(-180, 19)), axis=1)
+        w = np.stack((np.linspace(180, 0, 19), np.repeat(-90, 19)), axis=1)
+        m = np.stack((np.linspace(0, 180, 19), np.repeat(0, 19)), axis=1)
+        e = np.stack((np.linspace(180, 0, 19), np.repeat(90, 19)), axis=1)
+        ee = np.stack((np.linspace(0, 180, 19), np.repeat(180, 19)), axis=1)
+        pts = np.vstack((ww, w, m, e, ee))
+        rtp = np.insert(pts / 180 * np.pi, 0, np.repeat(1, pts.shape[0]), axis=1)
+        meridians_xy = sph2Mollweide(rtp[:, 1:3])
 
-        # plot guidelines
-        plt.rcParams["figure.figsize"] = [10.5, 4.5]
-        fig, ax = plt.subplots(nrows=1, ncols=1)
-        ax.plot(meridians_xy[:,0], meridians_xy[:,1], '-', color='lightgrey', linewidth=.5)
-        ax.plot(n45_xy[:,0], n45_xy[:,1], '-', color='lightgrey', linewidth=.5)
-        ax.plot(eq_xy[:,0], eq_xy[:,1], '-', color='lightgrey', linewidth=.5)
-        ax.plot(s45_xy[:,0], s45_xy[:,1], '-', color='lightgrey', linewidth=.5)
-        ax.set_xlim(-np.pi, np.pi)
-        ax.set_ylim(-np.pi/2, np.pi/2)
-        ax.set_aspect('equal')
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_xlabel("azimuth")
-        ax.set_ylabel("elevation")
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        ax.spines['bottom'].set_visible(False)
-        ax.spines['left'].set_visible(False)
+        traces.append(
+            go.Scatter(
+                x=meridians_xy[:, 0],
+                y=meridians_xy[:, 1],
+                mode="lines",
+                line=dict(color="lightgrey", width=0.5),
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
 
-        return fig, ax
+        # Create parallels
+        for lat in [45, 90, 135]:
+            pts = np.stack((np.repeat(lat, 37), np.linspace(-180, 180, 37)), axis=1)
+            rtp = np.insert(pts / 180 * np.pi, 0, np.repeat(1, pts.shape[0]), axis=1)
+            parallel_xy = sph2Mollweide(rtp[:, 1:3])
 
-    # load eyemap data
+            traces.append(
+                go.Scatter(
+                    x=parallel_xy[:, 0],
+                    y=parallel_xy[:, 1],
+                    mode="lines",
+                    line=dict(color="lightgrey", width=0.5),
+                    showlegend=False,
+                    hoverinfo="skip",
+                )
+            )
+
+        return traces
+
+    def create_data_scatter(series_data, x_coords, y_coords, column_name=None):
+        """Create scatter plot for data points"""
+        return go.Scatter(
+            x=x_coords,
+            y=y_coords,
+            mode="markers",
+            marker=dict(
+                color=series_data.values,
+                colorscale=custom_colorscale,
+                cmin=global_min,
+                cmax=global_max,
+                size=marker_size,
+                colorbar=dict(
+                    title=column_name if column_name else "Value", titleside="right"
+                ),
+            ),
+            customdata=np.stack([x_coords, y_coords, series_data.values], axis=-1),
+            hovertemplate="x: %{customdata[0]}<br>y: %{customdata[1]}<br>value: %{customdata[2]}<extra></extra>",
+            showlegend=False,
+        )
+
+    # Clean data - remove NaN indices
+    data = data[(data.index != "nan") & (~data.index.isnull())]
+
+    # Convert string indices to coordinate arrays
+    coords = [tuple(map(float, idx.split(","))) for idx in data.index]
+    coord_array = np.array(coords)
+
+    # Get global min and max for consistent color scale
+    vals = data.to_numpy() if isinstance(data, pd.DataFrame) else data.values
+    if global_min is None:
+        global_min = min(0, vals.min())
+    if global_max is None:
+        global_max = vals.max()
+
+    # Load eyemap data and convert coordinates
     ucl_hex = load_dataset(dataset)
+    rtp2 = cart2sph(ucl_hex[["x", "y", "z"]].values)
+    xy = sph2Mollweide(rtp2[:, 1:3])
+    xy[:, 0] = -xy[:, 0]  # flip x axis
+    xypq_moll = np.concatenate((xy, ucl_hex[["p", "q"]].values), axis=1)
+    xypq_moll = pd.DataFrame(xypq_moll, columns=["x", "y", "p", "q"])
+    xypq_moll[["p", "q"]] = xypq_moll[["p", "q"]].astype(int)
 
-    # convert eyemap into Mollweide coordinates
-    rtp2 = cart2sph(ucl_hex[['x','y','z']].values)
-    xy = sph2Mollweide(rtp2[:,1:3])
-    xy[:,0] = -xy[:,0] # flip x axis
-    xypq_moll = np.concatenate((xy, ucl_hex[['p','q']].values), axis=1)
-    xypq_moll = pd.DataFrame(xypq_moll, columns=['x','y','p','q'])
-    xypq_moll[['p','q']] = xypq_moll[['p','q']].astype(int)
+    # Convert data coordinates to Mollweide
+    hex1_id = (coord_array[:, 1] - coord_array[:, 0]) / 2
+    hex2_id = (coord_array[:, 1] + coord_array[:, 0]) / 2
 
-    # convert data into Mollweide coordinates
-    xy_data = data.reset_index(names='coords')['coords'].str.split(',', expand=True).astype(int).values
-    data['hex1_id'] = (xy_data[:,1]-xy_data[:,0])/2
-    data['hex2_id'] = (xy_data[:,1]+xy_data[:,0])/2
-    data = data.merge(xypq_moll, left_on=['hex1_id','hex2_id'], right_on=['q','p'], how='left')
+    coord_df = pd.DataFrame({"hex1_id": hex1_id, "hex2_id": hex2_id}, index=data.index)
 
-    # plot Mollweide projection
-    fig, ax = bg_mollweide()
-    ax.scatter(data['x'].values, data['y'].values, c=data.values[:,0], 
-                cmap=custom_colorscale, vmin=global_min, vmax=global_max, )
-    cbar = fig.colorbar(plt.cm.ScalarMappable(cmap=custom_colorscale), ax=ax)
-    cbar.mappable.set_clim(global_min, global_max)    
-    fig.set_size_inches(fig_size[0],fig_size[1])
-    plt.rcParams.update({'font.size': 14, 'font.family': 'Arial'})
+    merged_coords = coord_df.merge(
+        xypq_moll, left_on=["hex1_id", "hex2_id"], right_on=["q", "p"], how="left"
+    )
+
+    x_mollweide = merged_coords["x"].values
+    y_mollweide = merged_coords["y"].values
+
+    # Create figure
+    fig = go.Figure()
+
+    # Add guidelines
+    guidelines = create_mollweide_guidelines()
+    for trace in guidelines:
+        fig.add_trace(trace)
+
+    # Handle single series vs DataFrame
+    if isinstance(data, pd.Series) or (
+        isinstance(data, pd.DataFrame) and len(data.columns) == 1
+    ):
+        if isinstance(data, pd.DataFrame):
+            data = data.iloc[:, 0]
+
+        # Single plot
+        fig.add_trace(create_data_scatter(data, x_mollweide, y_mollweide))
+
+    elif isinstance(data, pd.DataFrame):
+        # Multiple columns - create frames for slider
+        frames = []
+        slider_steps = []
+
+        # Create frames for each column
+        for i, col_name in enumerate(data.columns):
+            series = data[col_name]
+
+            # Create frame data (guidelines + data scatter)
+            frame_traces = guidelines + [
+                create_data_scatter(series, x_mollweide, y_mollweide, col_name)
+            ]
+            frames.append(go.Frame(data=frame_traces, name=str(i)))
+
+            # Add slider step
+            slider_steps.append(
+                {
+                    "args": [
+                        [str(i)],
+                        {"frame": {"duration": 0, "redraw": True}, "mode": "immediate"},
+                    ],
+                    "label": col_name,
+                    "method": "animate",
+                }
+            )
+
+            # Set initial display to first column
+            if i == 0:
+                fig.add_trace(
+                    create_data_scatter(series, x_mollweide, y_mollweide, col_name)
+                )
+
+        # Add frames to figure
+        fig.frames = frames
+
+        # Add slider
+        fig.update_layout(
+            sliders=[
+                {
+                    "active": 0,
+                    "currentvalue": {
+                        "font": {"size": 16},
+                        "visible": True,
+                        "xanchor": "right",
+                    },
+                    "pad": {"b": 10, "t": 50},
+                    "len": 0.9,
+                    "x": 0.1,
+                    "y": 0,
+                    "steps": slider_steps,
+                }
+            ]
+        )
+
+    # Update layout
+    fig.update_layout(
+        width=fig_size[0],
+        height=fig_size[1],
+        xaxis=dict(
+            range=[-np.pi, np.pi],
+            scaleanchor="y",
+            scaleratio=1,
+            showgrid=False,
+            showticklabels=False,
+            showline=False,
+            visible=False,
+        ),
+        yaxis=dict(
+            range=[-np.pi / 2, np.pi / 2],
+            showgrid=False,
+            showticklabels=False,
+            showline=False,
+            visible=False,
+        ),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin=dict(
+            l=0,
+            r=0,
+            t=50,
+            b=50 if isinstance(data, pd.DataFrame) and len(data.columns) > 1 else 0,
+        ),
+    )
 
     return fig
