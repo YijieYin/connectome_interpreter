@@ -1643,3 +1643,115 @@ def add_sign(inprop: sparse.spmatrix, idx_to_sign: dict):
         (data, (inpropcoo.row, inpropcoo.col)), shape=inpropcoo.shape
     ).transpose()
     return inprop_signed
+
+
+def activity_by_column(
+    activity,
+    idx_to_group: dict,
+    idx_to_column: dict,
+    selected_group: arrayable,
+    model_input: Optional[Union[np.ndarray, torch.Tensor]] = None,
+    sensory_indices: Optional[arrayable] = None,
+):
+    """
+    Given the input arguments, return a dataframe with columns 'normalised_column',
+    'cell_group', 'time_point', 'activation', and 'time_step'. This gives the raw data
+    for `plot_activity_by_column()`. Note, if both model_input and sensory_indices are
+    provided, the first timepoint of model_input is also included (time_step = 0). Other
+    timesteps are already included in `activity`.
+
+    Args:
+        activity (torch.Tensor | numpy.ndarray): The activity of the model. Shape should
+            be (num_neurons, num_timepoints).
+        idx_to_group (dict): A dictionary mapping indices from the model to the groups
+            of interest (e.g. cell type). max(idx_to_group.keys()) should be equal to
+            number of units in the model.
+        idx_to_column (dict): A dictionary mapping indices from the model to the columns
+            of interest (e.g. column in the central complex).
+        selected_group (arrayable): The groups to select from the activity. This should
+            be a list of groups that are present in `idx_to_group.values()`.
+        model_input (numpy.ndarray | torch.Tensor, optional): The input to the model.
+            Shape should be (num_neurons, num_timepoints). If provided, the first
+            timepoint of model_input is also included in the output dataframe
+            (time_step = 0). Defaults to None.
+        sensory_indices (arrayable, optional): The indices of sensory neurons.
+            If provided, it should be a list of indices that are present in
+            `idx_to_group`. If provided, it must also be provided with `model_input`.
+            Defaults to None.
+
+    Returns:
+        pd.DataFrame: A dataframe with columns 'normalised_column', 'cell_group',
+            'time_point', 'activation', and 'time_step'. The first timepoint of
+            `model_input` is also included if `model_input` is provided.
+    """
+
+    # if one of model_input or sensory_indices is provided, the other must also be provided
+    if (model_input is None) != (sensory_indices is None):
+        raise ValueError(
+            "If one of model_input or sensory_indices is provided, the other must also be provided."
+        )
+
+    column_acts = []
+    input_acts = []  # only the first timestep is used. The rest are in `activity`
+
+    for group in selected_group:
+        indices = [idx for idx, g in idx_to_group.items() if g == group]
+        column_act = get_neuron_activation(
+            activity, indices, idx_to_group=idx_to_column
+        )
+
+        # Normalize group
+        column_act["group"] = column_act["group"] / column_act["group"].max()
+        column_act["cell_group"] = group
+
+        # Melt the time columns into long format
+        time_columns = [col for col in column_act.columns if col.startswith("time_")]
+
+        melted = pd.melt(
+            column_act,
+            id_vars=["group", "cell_group"],
+            value_vars=time_columns,
+            var_name="time_point",
+            value_name="activation",
+        )
+
+        column_acts.append(melted)
+
+        if sensory_indices is not None:
+            if len(set(indices) & set(sensory_indices)) > 0:
+                input_act = get_input_activation(
+                    model_input,
+                    sensory_indices,
+                    idx_to_column,
+                    selected_indices=set(indices) & set(sensory_indices),
+                )[["time_0"]].reset_index()
+                input_act["group"] = input_act["group"] / input_act["group"].max()
+                input_act["cell_group"] = group
+                input_act = input_act.melt(
+                    id_vars=["group", "cell_group"],
+                    var_name="time_point",
+                    value_name="activation",
+                )
+                input_acts.append(input_act)
+
+    # Concatenate all melted data
+    column_acts = pd.concat(column_acts, ignore_index=True)
+    column_acts.rename(columns={"group": "normalised_column"}, inplace=True)
+
+    # Extract time step number and sort
+    column_acts["time_step"] = (
+        column_acts["time_point"].str.extract(r"time_(\d+)").astype(int)
+    )
+    column_acts.time_step = column_acts.time_step + 1
+
+    if len(input_acts) > 0:
+        input_acts = pd.concat(input_acts, ignore_index=True)
+        input_acts.rename(columns={"group": "normalised_column"}, inplace=True)
+        input_acts["time_step"] = 0
+        column_acts = pd.concat([column_acts, input_acts], ignore_index=True)
+
+    column_acts = column_acts.sort_values(
+        ["time_step", "cell_group", "normalised_column"]
+    )
+
+    return column_acts
