@@ -886,8 +886,8 @@ def plot_layered_paths(
             the layered positions. Nodes with these indices will be placed at the top of
             their respective layers. Defaults to None.
         sort_dict (dict, optional): A dictionary mapping node names to their priority
-            values (smaller values are higher). Nodes will be sorted based on these
-            values before plotting. Defaults to None.
+            values (bigger values are higher in the plot). Nodes will be sorted based on
+            these values before plotting. Defaults to None.
         sort_by_activation (bool, optional): A flag to sort the nodes based on their
             activation values (after grouping by priority). Defaults to False.
         fraction (float, optional): The fraction of the figure width to use for the
@@ -1002,6 +1002,13 @@ def plot_layered_paths(
             path_df, priority_indices, sort_dict=node_activation_dict
         )
     else:
+        if sort_dict is not None:
+            node_to_nodelayer = dict(zip(path_df.pre, path_df.pre_layer))
+            node_to_nodelayer.update(dict(zip(path_df.post, path_df.post_layer)))
+            sort_dict = {
+                node_to_nodelayer[node]: value for node, value in sort_dict.items()
+            }
+
         positions = create_layered_positions(
             path_df, priority_indices, sort_dict=sort_dict
         )
