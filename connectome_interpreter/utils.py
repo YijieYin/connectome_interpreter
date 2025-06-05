@@ -842,6 +842,7 @@ def plot_layered_paths(
     paths: pd.DataFrame,
     figsize: tuple = (10, 8),
     priority_indices=None,
+    sort_dict: Optional[dict] = None,
     sort_by_activation: bool = False,
     fraction: float = 0.03,
     pad: float = 0.02,
@@ -884,6 +885,9 @@ def plot_layered_paths(
         priority_indices (list, optional): A list of indices to prioritize when creating
             the layered positions. Nodes with these indices will be placed at the top of
             their respective layers. Defaults to None.
+        sort_dict (dict, optional): A dictionary mapping node names to their priority
+            values (smaller values are higher). Nodes will be sorted based on these
+            values before plotting. Defaults to None.
         sort_by_activation (bool, optional): A flag to sort the nodes based on their
             activation values (after grouping by priority). Defaults to False.
         fraction (float, optional): The fraction of the figure width to use for the
@@ -998,7 +1002,9 @@ def plot_layered_paths(
             path_df, priority_indices, sort_dict=node_activation_dict
         )
     else:
-        positions = create_layered_positions(path_df, priority_indices)
+        positions = create_layered_positions(
+            path_df, priority_indices, sort_dict=sort_dict
+        )
 
     # Default color for nodes if not provided otherwise
     if neuron_to_color is None:

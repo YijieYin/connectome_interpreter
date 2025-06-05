@@ -296,7 +296,9 @@ def create_layered_positions(
             layer_name = list(set(df.post_layer[df.local_layer == layer - 1]))
 
         if sort_dict is not None:
-            layer_name = sorted(layer_name, key=lambda x: sort_dict[x])
+            layer_name = sorted(
+                layer_name, key=lambda x: sort_dict.get(x, float("inf"))
+            )
 
         if priority_indices is not None:
             layer_name_priority = [
