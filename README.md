@@ -4,6 +4,10 @@ To install:
 ```
 pip install connectome-interpreter
 ```
+Or to install the bleeding edge development version: 
+```
+pip install git+https://github.com/YijieYin/connectome_interpreter.git
+```
 
 Documentation [here](https://connectome-interpreter.readthedocs.io/en/latest/) (with some text snippets explaining various things). 
 
