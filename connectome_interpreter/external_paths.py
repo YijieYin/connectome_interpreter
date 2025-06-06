@@ -479,7 +479,7 @@ def plot_flow_layered_paths(
                 edge["font"] = {"size": 18, "face": "arial"}
 
         # Set physics options for the network with high spring constant
-        # to keep the nodes close together when moved around
+        # to keep straighter arrows when nodes are moved around
         net2.set_options("""
         var options = {
         "physics": {
