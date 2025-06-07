@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import os
 from matplotlib import pyplot as plt
+from typing import Optional
 
 # Third-party package imports
 from scipy.sparse import csc_matrix, csr_matrix
@@ -19,7 +20,7 @@ def compute_flow_hitting_time(
     """
     Compute hitting time for all cells in conn_df.
     Hitting time is the average number of hops required to reach a cell from a set of seed cells.
-    The main algorithm is implemented in the 'navis' library.
+    The main algorithm is implemented in the 'navis' library (https://github.com/navis-org/navis).
 
     Args:
         conn_df (pd.DataFrame): DataFrame containing the connections with columns 'idx_pre', 'idx_post', and 'rel_in_weight'.
@@ -71,69 +72,9 @@ def compute_flow_hitting_time(
 
 
 def find_instance_flow(
-        inprop: csc_matrix, 
-        meta: pd.DataFrame, 
-        file_path: str = None, 
-        save_prefix: str = 'flow_', 
-        flow_seed_types: list[str] = ['L1','L2','L3','R7p','R8p','R7y','R8y','R7d','R8d','HBeyelet'], 
-        flow_steps: int = 20, 
-        flow_thre: float = 0.1, 
-) -> pd.DataFrame:
-    """
-    Get the hitting time for all cell types.
-    The hitting time is computed using the information flow algorithm (navis) for each neuron,
-    and then taking the median across neurons of each cell type.
-
-    Args:
-        inprop (csc_matrix): Input sparse matrix representing connections.
-        meta (pd.DataFrame): DataFrame containing metadata with 'bodyId' and 'cell_type'.
-        file_path (str): Path to the directory containing the hitting time data.
-        save_prefix (str): Prefix for the saved file names.
-        flow_seed_types (list): List of cell types to be used as seeds for flow calculation.
-        flow_steps (int): Number of steps for flow calculation.
-        flow_thre (float): Threshold for flow calculation.
-
-    Returns:
-        pd.DataFrame: DataFrame with columns 'idx' and 'hitting_time',
-        where 'idx' is the cell index and 'hitting_time' is the computed hitting time.
-    """
-        
-    if file_path is None:
-        # Check if running in Google Colab
-        if "COLAB_GPU" in os.environ:
-            # Running in Colab
-            file_path = "/content/"
-        else:
-            # Running locally
-            file_path = ""
-
-    # load hitting time or compute
-    flow_file_name = os.path.join(file_path, f'{save_prefix}{flow_steps}step_{flow_thre}thre_hit.csv')
-    if os.path.exists(flow_file_name):
-        flow_df = pd.read_csv(flow_file_name)
-    else:
-        print(f'Computing hitting time for {len(meta)} cells... May take a while.')
-        coo = inprop.tocoo()
-        conn_df = pd.DataFrame({'idx_pre': coo.row, 'idx_post': coo.col, 'rel_in_weight': coo.data})
-        flow_seed_idx = meta[np.isin(meta['cell_type'],flow_seed_types)]['idx'].values
-        flow_df = compute_flow_hitting_time(conn_df, flow_seed_idx, flow_steps, flow_thre)
-        flow_df = flow_df.merge(meta, how='inner', on='idx')
-        flow_df.to_csv(flow_file_name, index=False)   
-
-    flow_type_df = flow_df.groupby('cell_type')['hitting_time'].median().to_frame().reset_index().sort_values('hitting_time')
-    flow_type_file_name = os.path.join(file_path, f'{save_prefix}{flow_steps}step_{flow_thre}thre_hit_per_type.csv')
-    if not os.path.exists(flow_type_file_name):
-        flow_type_df.to_csv(flow_type_file_name, index=False)   
-
-    return flow_type_df
-
-
-def trim_inprop_by_flow(
     inprop: csc_matrix,
-    meta: pd.DataFrame,
-    file_path: str = None,
-    save_prefix: str = "flow_",
-    flow_seed_types: list[str] = [
+    idx_to_group: dict,
+    flow_seed_groups: list[str] = [
         "L1",
         "L2",
         "L3",
@@ -145,18 +86,142 @@ def trim_inprop_by_flow(
         "R8d",
         "HBeyelet",
     ],
+    file_path: str = None,
+    save_flow: Optional[bool] = True,
+    save_prefix: Optional[str] = "flow_",
+    flow_steps: int = 20,
+    flow_thre: float = 0.1,
+) -> pd.DataFrame:
+    """
+    Get the hitting time for all cell groups.
+    The hitting time is computed using the information flow algorithm (navis:https://github.com/navis-org/navis) for each neuron,
+    and then taking the median across neurons of each cell group.
+
+    Args:
+        inprop (csc_matrix): Input sparse matrix representing connections.
+        idx_to_group (dict): Dictionary mapping cell indices to their respective cell groups.
+        flow_seed_groups (list): List of cell groups to be used as seeds for flow calculation.
+        file_path (str): Path to the directory containing the hitting time data.
+        save_flow (bool): Whether to save the computed hitting time to a CSV file.
+            Defaults to True.
+        save_prefix (str): Prefix for the saved file names.
+        flow_seed_groups (list): List of cell group to be used as seeds for flow calculation.
+        flow_steps (int): Number of steps for flow calculation.
+        flow_thre (float): Threshold for flow calculation.
+
+    Returns:
+        pd.DataFrame: DataFrame with columns 'cell_group' and 'hitting_time', where
+        'cell_group' is the name of the cell group and 'hitting_time' is the median
+        hitting time for that group.
+    """
+
+    if file_path is None:
+        # Check if running in Google Colab
+        if "COLAB_GPU" in os.environ:
+            # Running in Colab
+            file_path = "/content/"
+        else:
+            # Running locally
+            file_path = ""
+
+    # load hitting time or compute
+    flow_file_name = os.path.join(
+        file_path, f"{save_prefix}{flow_steps}step_{flow_thre}thre_hit.csv"
+    )
+    if os.path.exists(flow_file_name):
+        flow_df = pd.read_csv(flow_file_name)
+        # map idx to cell group
+        flow_df["cell_group"] = flow_df["idx"].map(idx_to_group)
+    else:
+        print(
+            f"Computing hitting time for {len(idx_to_group)} cells... May take a while."
+        )
+        # if file_path doesn't exist, create it
+        if not os.path.exists(file_path):
+            os.makedirs(file_path)
+        coo = inprop.tocoo()
+        conn_df = pd.DataFrame(
+            {"idx_pre": coo.row, "idx_post": coo.col, "rel_in_weight": coo.data}
+        )
+        # get indices whose value is in flow_seed_groups
+        flow_seed_idx = np.array(
+            [
+                idx
+                for idx, cell_type in idx_to_group.items()
+                if cell_type in flow_seed_groups
+            ]
+        )
+        if len(flow_seed_idx) == 0:
+            raise ValueError(
+                f"No flow seed groups found in the provided idx_to_group mapping. "
+                f"Please check the flow_seed_groups: {flow_seed_groups}."
+            )
+        flow_df = compute_flow_hitting_time(
+            conn_df, flow_seed_idx, flow_steps, flow_thre
+        )
+        # add cell group to flow_df
+        # note: this only includes indices in flow_seed_idx, which could in theory be a
+        # subset of cells in a cell type
+        flow_df["cell_group"] = flow_df["idx"].map(idx_to_group)
+        print(flow_df)
+        if save_flow:
+            print(f"Saving hitting time to {flow_file_name}")
+            flow_df.to_csv(flow_file_name, index=False)
+
+    flow_type_df = (
+        flow_df.groupby("cell_group")["hitting_time"]
+        .median()
+        .to_frame()
+        .reset_index()
+        .sort_values("hitting_time")
+    )
+    flow_type_file_name = os.path.join(
+        file_path, f"{save_prefix}{flow_steps}step_{flow_thre}thre_hit_per_group.csv"
+    )
+    if not os.path.exists(flow_type_file_name):
+        if save_flow:
+            print(f"Saving flow group hitting time to {flow_type_file_name}")
+            flow_type_df.to_csv(flow_type_file_name, index=False)
+
+    return flow_type_df
+
+
+def trim_inprop_by_flow(
+    inprop: csc_matrix,
+    idx_to_group: dict,
+    flow_seed_groups: list[str] = [
+        "L1",
+        "L2",
+        "L3",
+        "R7p",
+        "R8p",
+        "R7y",
+        "R8y",
+        "R7d",
+        "R8d",
+        "HBeyelet",
+    ],
+    file_path: str = None,
+    save_flow: Optional[bool] = True,
+    save_prefix: Optional[str] = "flow_",
     flow_steps: int = 20,
     flow_thre: float = 0.1,
     flow_diff_min: float = 0.5,
     flow_diff_max: float = 20,
 ) -> csc_matrix:
     """
-    Trim connections based on hitting time assigned by information flow algorithm (navis).
+    Trim connections based on hitting time assigned by information flow algorithm
+    (navis: https://github.com/navis-org/navis). A small difference in hitting time
+    suggests that the pre and post are in similar layers; a big difference suggests
+    that the pre and post are generally reached via different pathways. Users can
+    threshold either using `flow_diff_min` and `flow_diff_max`.
 
     Args:
         inprop (csc_matrix): Input sparse matrix representing connections.
-        meta (pd.DataFrame): DataFrame containing metadata with 'bodyId' and 'cell_type'.
+        idx_to_group (dict): Dictionary mapping cell indices to their respective cell groups.
+        flow_seed_groups (list): List of cell groups to be used as seeds for flow calculation.
         file_path (str): Path to the directory containing the hitting time data.
+        save_flow (bool): Whether to save the computed hitting time to a CSV file.
         flow_steps (int): Number of steps for flow calculation.
         flow_thre (float): Threshold for flow calculation.
         flow_diff_min (float): Minimum difference in hitting time for connection retention.
@@ -178,33 +243,71 @@ def trim_inprop_by_flow(
 
     # convert inprop to dataframe
     coo = inprop.tocoo()
+    # edgelist
     conn_df = pd.DataFrame(
         {"idx_pre": coo.row, "idx_post": coo.col, "rel_in_weight": coo.data}
     )
 
-    flow_type_df = find_instance_flow(inprop, meta, file_path, save_prefix,
-                                         flow_seed_types, flow_steps, flow_thre)
-    meta = meta.merge(flow_type_df, how='inner', on='cell_type')
+    flow_type_df = find_instance_flow(
+        inprop,
+        idx_to_group,
+        flow_seed_groups,
+        file_path,
+        save_flow,
+        save_prefix,
+        flow_steps,
+        flow_thre,
+    )  # has columns 'cell_group' and 'hitting_time'
+    # note: this includes all neurons of e.g. a cell type
+    meta = pd.DataFrame(idx_to_group.items(), columns=["idx", "cell_group"])
+    meta = meta.merge(flow_type_df, how="inner", on="cell_group")
 
     # add hitting time to conn_df
-    conn_flow_df = conn_df.merge(meta[['idx', 'hitting_time']], how='inner', left_on='idx_post', right_on='idx').drop(\
-                            columns=['idx']).rename(columns={'hitting_time': 'hitting_time_post'})
-    conn_flow_df = conn_flow_df.merge(meta[['idx', 'hitting_time']], how='inner', left_on='idx_pre', right_on='idx').drop(\
-                            columns=['idx']).rename(columns={'hitting_time': 'hitting_time_pre'})
+    conn_flow_df = (
+        conn_df.merge(
+            meta[["idx", "hitting_time"]],
+            how="inner",
+            left_on="idx_post",
+            right_on="idx",
+        )
+        .drop(columns=["idx"])
+        .rename(columns={"hitting_time": "hitting_time_post"})
+    )
+    conn_flow_df = (
+        conn_flow_df.merge(
+            meta[["idx", "hitting_time"]],
+            how="inner",
+            left_on="idx_pre",
+            right_on="idx",
+        )
+        .drop(columns=["idx"])
+        .rename(columns={"hitting_time": "hitting_time_pre"})
+    )
 
     # remove connections for which difference in hitting time is too small or too large
-    conn_flow_df = conn_flow_df[(conn_flow_df['hitting_time_post']-conn_flow_df['hitting_time_pre'] >= flow_diff_min) &\
-                             (conn_flow_df['hitting_time_post']-conn_flow_df['hitting_time_pre'] <= flow_diff_max)]
-    inprop_flow = csc_matrix((conn_flow_df['rel_in_weight'], (conn_flow_df['idx_pre'], conn_flow_df['idx_post'])), \
-                             shape=inprop.shape)
+    conn_flow_df = conn_flow_df[
+        (
+            conn_flow_df["hitting_time_post"] - conn_flow_df["hitting_time_pre"]
+            >= flow_diff_min
+        )
+        & (
+            conn_flow_df["hitting_time_post"] - conn_flow_df["hitting_time_pre"]
+            <= flow_diff_max
+        )
+    ]
+    inprop_flow = csc_matrix(
+        (
+            conn_flow_df["rel_in_weight"],
+            (conn_flow_df["idx_pre"], conn_flow_df["idx_post"]),
+        ),
+        shape=inprop.shape,
+    )
 
     return inprop_flow
 
 
 def find_shortest_paths(
-        paths: pd.DataFrame, 
-        start_nodes: list[str], 
-        end_nodes: list[str]
+    paths: pd.DataFrame, start_nodes: list[str], end_nodes: list[str]
 ) -> list[list[str]]:
     """
     Find the shortest paths between groups in start_nodes and end_nodes
@@ -221,18 +324,24 @@ def find_shortest_paths(
             that connect the start and end nodes (ordered from start to end).
     """
 
-    paths_unique = paths[['weight','pre','post']].drop_duplicates()
-    nodes_unique = np.unique(np.concatenate([paths_unique.pre.unique(),paths_unique.post.unique()]))
+    paths_unique = paths[["weight", "pre", "post"]].drop_duplicates()
+    nodes_unique = np.unique(
+        np.concatenate([paths_unique.pre.unique(), paths_unique.post.unique()])
+    )
     idx_pre = np.searchsorted(nodes_unique, paths_unique.pre.values)
     idx_post = np.searchsorted(nodes_unique, paths_unique.post.values)
-    graph_matrix = csr_matrix((1/paths_unique['weight'].values, (idx_pre, idx_post)), 
-                            shape = (len(nodes_unique), len(nodes_unique)))
+    graph_matrix = csr_matrix(
+        (1 / paths_unique["weight"].values, (idx_pre, idx_post)),
+        shape=(len(nodes_unique), len(nodes_unique)),
+    )
 
-    _, predecessors = shortest_path(csgraph=graph_matrix, directed=True, return_predecessors=True)
+    _, predecessors = shortest_path(
+        csgraph=graph_matrix, directed=True, return_predecessors=True
+    )
 
     def reconstruct_single_path(predecessors, start, end, node_names):
         """
-        Helper function that reconstructs the path from start to end 
+        Helper function that reconstructs the path from start to end
         using the predecessors array.
         """
         idx_start = np.where(nodes_unique == start)[0]
@@ -243,16 +352,18 @@ def find_shortest_paths(
         i = idx_end[0]
         while i != idx_start[0]:
             i = predecessors[idx_start[0], i]
-            if i == -9999: # not reached
-                return None 
+            if i == -9999:  # not reached
+                return None
             path.append(node_names[i])
         return path[::-1]  # reverse
-    
+
     shortest_paths = []
     for start_node in start_nodes:
-        for end_node in end_nodes:            
+        for end_node in end_nodes:
             if start_node != end_node:
-                path = reconstruct_single_path(predecessors, start_node, end_node, nodes_unique)
+                path = reconstruct_single_path(
+                    predecessors, start_node, end_node, nodes_unique
+                )
                 if path is not None:
                     shortest_paths.append(path)
 
@@ -284,10 +395,10 @@ def plot_flow_layered_paths(
 
     Args:
         paths (pandas.DataFrame): A dataframe containing the columns 'pre', 'post',
-            'weight', 'pre_layer', and 'post_layer'. Each row represents an 
-            edge in the graph. The 'pre' and 'post' columns refer to the source and 
+            'weight', 'pre_layer', and 'post_layer'. Each row represents an
+            edge in the graph. The 'pre' and 'post' columns refer to the source and
             target nodes, respectively, and 'weight' indicates
-            the edge weight. 'pre_layer' and 'post_layer' are the flow layers of the 
+            the edge weight. 'pre_layer' and 'post_layer' are the flow layers of the
             corresponding nodes.
         figsize (tuple, optional): A tuple indicating the size of the matplotlib figure.
             Defaults to (10, 8).
@@ -341,31 +452,32 @@ def plot_flow_layered_paths(
             the node label has to be underneath the node).
     """
 
-    def find_flow_positions(vertices: np.array, layers: np.array, height: float, width: float
+    def find_flow_positions(
+        vertices: np.array, layers: np.array, height: float, width: float
     ) -> dict:
         """
         Find positions for the nodes depending on the layer flow.
         """
-        layer_bins = np.arange(-0.5/2, np.ceil(max(layers))+0.5/2, 1/2)
-        layer_labels = layer_bins[1:]+layer_bins[0]
+        layer_bins = np.arange(-0.5 / 2, np.ceil(max(layers)) + 0.5 / 2, 1 / 2)
+        layer_labels = layer_bins[1:] + layer_bins[0]
         layer_binned = pd.cut(layers, bins=layer_bins, labels=layer_labels)
 
         layer_w = width / max(layers)
         xy_pos = np.zeros((len(vertices), 2))
         for layer_b in np.unique(layer_binned):
-            layer = layers[layer_binned==layer_b]
-            layer_vertices = vertices[layer_binned==layer_b]
-            if len(layer_vertices)>0:
+            layer = layers[layer_binned == layer_b]
+            layer_vertices = vertices[layer_binned == layer_b]
+            if len(layer_vertices) > 0:
                 layer_h = height / len(layer_vertices)
                 for index, v in enumerate(layer_vertices):
                     idx = np.where(vertices == v)[0][0]
-                    xy_pos[idx,1] = index * layer_h + .05
-                    xy_pos[idx,0] = layer[index] * layer_w - width/2
+                    xy_pos[idx, 1] = index * layer_h + 0.05
+                    xy_pos[idx, 0] = layer[index] * layer_w - width / 2
 
         positions = dict(zip(vertices, xy_pos))
 
         return positions
-    
+
     if paths.shape[0] == 0:
         raise ValueError("The provided DataFrame is empty.")
 
@@ -397,9 +509,9 @@ def plot_flow_layered_paths(
     layers = np.zeros(len(labels))
     for index, v in enumerate(labels):
         if v in path_df.pre.values:
-            layers[index] = path_df[path_df.pre==v].pre_layer.values[0]
+            layers[index] = path_df[path_df.pre == v].pre_layer.values[0]
         elif v in path_df.post.values:
-            layers[index] = path_df[path_df.post==v].post_layer.values[0]
+            layers[index] = path_df[path_df.post == v].post_layer.values[0]
     positions = find_flow_positions(np.array(list(labels.values())), layers, 1, 1)
 
     # Default color for nodes if not provided otherwise
@@ -441,9 +553,9 @@ def plot_flow_layered_paths(
             raise ImportError(
                 "Please install pyvis for interactive plots: pip install pyvis"
             ) from e
-        
+
         # create pyvis graph
-        print(f'Store interactive graph as {file_name}'+'.pdf')
+        print(f"Store interactive graph as {file_name}" + ".pdf")
         net2 = Network(
             directed=True, layout=False, notebook=True, cdn_resources="in_line"
         )
@@ -480,7 +592,8 @@ def plot_flow_layered_paths(
 
         # Set physics options for the network with high spring constant
         # to keep straighter arrows when nodes are moved around
-        net2.set_options("""
+        net2.set_options(
+            """
         var options = {
         "physics": {
             "enabled": true,
@@ -494,13 +607,14 @@ def plot_flow_layered_paths(
             "physics": false
         }
         }
-        """)
+        """
+        )
         net2.show(str(file_name) + ".html", notebook=False)
         print(f"Interactive graph saved as {file_name}.html")
 
     else:
 
-        fig, ax = plt.subplots(figsize=(9,12))
+        fig, ax = plt.subplots(figsize=(9, 12))
         nx.draw(
             G,
             pos=positions,
@@ -558,7 +672,7 @@ def plot_flow_layered_paths(
                 ax=ax,
             )
 
-        ax.set_ylim(0, 1)        
+        ax.set_ylim(0, 1)
         if save_plot:
             fig.savefig(file_name + ".pdf")
             print(f"Graph saved as {file_name}.pdf")
