@@ -253,7 +253,7 @@ def create_layered_positions(
             list of neuron indices that should be plotted on top of each layer.
             Defaults to None.
         sort_dict (dict, optional): A dictionary of neuron indices as keys and their
-            sorting order as values (higher value is higher in the plot). Defaults to
+            sorting order as values (smaller value is higher in the plot). Defaults to
             None.
     Returns:
         dict: A dictionary of positions for each neuron in the paths, with the
@@ -298,7 +298,7 @@ def create_layered_positions(
 
         if sort_dict is not None:
             layer_name = sorted(
-                layer_name, key=lambda x: sort_dict.get(x, float("-inf"))
+                layer_name, key=lambda x: sort_dict.get(x, float("inf"))
             )
 
         if priority_indices is not None:
