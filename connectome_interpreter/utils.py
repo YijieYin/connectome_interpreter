@@ -4,16 +4,18 @@ import warnings
 from collections import defaultdict
 from numbers import Real
 from typing import Collection, List, Tuple, Optional, Union
+import os
 
 import ipywidgets as widgets
 import matplotlib.colors as mcl
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 import networkx as nx
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
 import torch
-from IPython.display import display, IFrame
+from IPython.display import display, IFrame, HTML
 from scipy.sparse import coo_matrix, issparse
 import seaborn as sns
 
@@ -886,7 +888,7 @@ def plot_layered_paths(
             the layered positions. Nodes with these indices will be placed at the top of
             their respective layers. Defaults to None.
         sort_dict (dict, optional): A dictionary mapping node names to their priority
-            values (bigger values are higher in the plot). Nodes will be sorted based on
+            values (smaller values are higher in the plot). Nodes will be sorted based on
             these values before plotting. Defaults to None.
         sort_by_activation (bool, optional): A flag to sort the nodes based on their
             activation values (after grouping by priority). Defaults to False.
@@ -1085,24 +1087,28 @@ def plot_layered_paths(
         net2 = Network(
             directed=True, layout=False, notebook=True, cdn_resources="in_line"
         )
-        net2.height = figsize[1] * 100
-        net2.width = figsize[0] * 100
+        canvas_h_px = int(figsize[1] * 80)  # tweak the multiplier if needed
+        net2.height = f"{canvas_h_px}px"  # explicit px keeps Colab happy
+        net2.width = "100%"  # stretch side-to-side
         net2.from_nx(G)
 
         node_colors_dict = dict(zip(G.nodes(), node_colors))
         edge_colors_dict = dict(zip(G.edges(), edge_colors))
         for v in net2.nodes:
+            # coordinates in px
             v["x"], v["y"] = positions.get(v["id"])
-            v["x"] = v["x"] * net2.width
-            v["y"] = v["y"] * net2.height
+            v["x"] = v["x"] * int(figsize[0] * 80)
+            v["y"] = v["y"] * canvas_h_px
             v["label"] = labels[v["id"]]
-            v["color"] = node_colors_dict[v["id"]]
-            v["size"] = node_size / 20
-            v["font"] = {"size": 24}
-            if labels[v["id"]] in highlight_nodes:
-                v["font"] = {"face": "arial black"}
-            else:
-                v["font"] = {"face": "arial"}
+            v["color"] = mpl.colors.rgb2hex(node_colors_dict[v["id"]], keep_alpha=True)
+            v["size"] = node_size / 20  # bigger nodes
+
+            v["font"] = {
+                "face": (
+                    "arial black" if labels[v["id"]] in highlight_nodes else "arial"
+                ),
+                "size": 26,
+            }
 
         for edge in net2.edges:
             u, v = edge["from"], edge["to"]
@@ -1114,12 +1120,23 @@ def plot_layered_paths(
                 edge["font"] = {"size": 18, "face": "arial"}
 
         net2.toggle_physics(False)
-        net2.show_buttons(filter_=["node", "edge", "physics"])
-        if save_plot:
-            net2.write_html(str(file_name) + ".html")
-            print(f"Interactive graph saved as {file_name}.html")
+        # net2.show_buttons(filter_=["node", "edge", "physics"])
 
-        net2.show(str(file_name) + ".html", notebook=False)
+        if "COLAB_GPU" in os.environ:
+            # display of plot in ipynb only works in colab
+            html = net2.generate_html(notebook=True)
+            if save_plot:
+                with open(f"{file_name}.html", "w") as f:
+                    f.write(html)
+
+            display(HTML(html))
+        else:
+            # if running locally, will just open in browser
+            if save_plot:
+                net2.write_html(str(file_name) + ".html")
+                print(f"Interactive graph saved as {file_name}.html")
+
+            net2.show(str(file_name) + ".html", notebook=False)
 
     else:
 
