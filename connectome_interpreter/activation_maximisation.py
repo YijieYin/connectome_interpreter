@@ -260,7 +260,7 @@ class MultilayeredNetwork(nn.Module):
     @property
     def biases(self):
         """
-        Get the biases of the neurons, applying softplus activation if raw_biases
+        Get the biases of the neurons, applying absolute value if raw_biases
         are provided. If raw_biases is None, returns None.
 
         Returns:
@@ -269,7 +269,7 @@ class MultilayeredNetwork(nn.Module):
         """
         if self.raw_biases is None:
             return None
-        return torch.nn.functional.softplus(self.raw_biases)
+        return torch.abs(self.raw_biases)
 
     def activation_function(self, x: torch.Tensor) -> torch.Tensor:
         """
