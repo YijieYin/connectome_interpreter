@@ -211,10 +211,15 @@ def trim_inprop_by_flow(
 ) -> csc_matrix:
     """
     Trim connections based on hitting time assigned by information flow algorithm
-    (navis: https://github.com/navis-org/navis). A small difference in hitting time
-    suggests that the pre and post are in similar layers; a big difference suggests
-    that the pre and post are generally reached via different pathways. Users can
-    threshold either using `flow_diff_min` and `flow_diff_max`.
+    (navis: https://github.com/navis-org/navis). The hitting time is the mean
+    number of hops required to reach a neuron from a neuron in flow_seed_groups.
+    If the hitting time of the post neuron is larger than that of the pre neuron
+    (i.e., the difference is between flow_diff_min and flow_diff_max), then the 
+    connection is interpreted as a feedforward connection and kept. For similar 
+    hitting times, the connection is interpreted as a lateral connection.
+    If the hitting time of the pre neuron is larger than that of the post neuron,
+    the connection is interpreted as a feedback connection.
+    Lateral and feedback connections are removed.
 
     Args:
         inprop (csc_matrix): Input sparse matrix representing connections.
