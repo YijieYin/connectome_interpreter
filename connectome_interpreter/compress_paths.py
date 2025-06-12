@@ -165,7 +165,7 @@ def compress_paths(
                 )
 
             # Apply output threshold and collect non-zero entries
-            mask = torch.abs(result) >= output_threshold
+            mask = torch.abs(result) > output_threshold
             chunk_rows, chunk_cols = torch.nonzero(mask, as_tuple=True)
 
             # Get values based on whether root was applied
@@ -539,6 +539,7 @@ def compress_paths_signed(
     output_threshold: float = 1e-4,
     root: bool = False,
     chunkSize: int = 2000,
+    save_to_disk: bool = False,
     save_path: str = "./",
     return_results: bool = True,
 ):
@@ -569,6 +570,7 @@ def compress_paths_signed(
             * float32 / 8 bytes / 1e9 = 1.28 GB. We need two copies (one excitation, one
             inhibition), plus the sparse representations of the (n_neurons, n_neurons)
             matrix.
+        save_to_disk (bool, optional): Whether to save the output matrices to disk.
         save_path (str, optional): Path to save the results. Defaults to "./".
         return_results (bool, optional): Whether to return the results as a list
             of sparse matrices. Defaults to True.
@@ -678,8 +680,8 @@ def compress_paths_signed(
                 torch.cuda.empty_cache()
 
             # Convert to csc for output
-            mask_e = torch.abs(dense_e) >= output_threshold
-            mask_i = torch.abs(dense_i) >= output_threshold
+            mask_e = torch.abs(dense_e) > output_threshold
+            mask_i = torch.abs(dense_i) > output_threshold
             chunk_rows_e, chunk_cols_e = torch.nonzero(mask_e, as_tuple=True)
             chunk_rows_i, chunk_cols_i = torch.nonzero(mask_i, as_tuple=True)
             if root:
@@ -740,7 +742,7 @@ def compress_paths_signed(
     stepse = []
     stepsi = []
     # if save_path isn't already a directory, make it
-    if not os.path.exists(save_path):
+    if save_to_disk and not os.path.exists(save_path):
         os.makedirs(save_path)
 
     for layer in tqdm(range(target_layer_number)):
@@ -773,7 +775,8 @@ def compress_paths_signed(
         ).tocsc()
         sparse_e.eliminate_zeros()
         # save the sparse matrix to disk
-        sp.sparse.save_npz(os.path.join(save_path, f"step_{layer}_e.npz"), sparse_e)
+        if save_to_disk:
+            sp.sparse.save_npz(os.path.join(save_path, f"step_{layer}_e.npz"), sparse_e)
         if return_results:
             stepse.append(sparse_e)
         # delete the sparse matrix to save memory
@@ -810,7 +813,8 @@ def compress_paths_signed(
         if return_results:
             stepsi.append(sparse_i)
         # save the sparse matrix to disk
-        sp.sparse.save_npz(os.path.join(save_path, f"step_{layer}_i.npz"), sparse_i)
+        if save_to_disk:
+            sp.sparse.save_npz(os.path.join(save_path, f"step_{layer}_i.npz"), sparse_i)
         # delete the sparse matrix to save memory
         del sparse_i
         gc.collect()
