@@ -688,7 +688,7 @@ def plot_mollweide_projection(
                 cmax=global_max,
                 size=marker_size,
                 colorbar=dict(
-                    title=column_name if column_name else "Value", titleside="right"
+                    title=dict(text=column_name if column_name else "Value", side="right"),
                 ),
             ),
             customdata=np.stack([x_coords, y_coords, series_data.values], axis=-1),
