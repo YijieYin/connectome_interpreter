@@ -888,7 +888,7 @@ def plot_layered_paths(
             the layered positions. Nodes with these indices will be placed at the top of
             their respective layers. Defaults to None.
         sort_dict (dict, optional): A dictionary mapping node names to their priority
-            values (smaller values are higher in the plot). Nodes will be sorted based on
+            values (bigger values are higher in the plot). Nodes will be sorted based on
             these values before plotting. Defaults to None.
         sort_by_activation (bool, optional): A flag to sort the nodes based on their
             activation values (after grouping by priority). Defaults to False.
@@ -1000,20 +1000,54 @@ def plot_layered_paths(
         node_activation_dict.update(
             dict(zip(path_df.pre_layer, path_df.pre_activation))
         )
-        positions = create_layered_positions(
-            path_df, priority_indices, sort_dict=node_activation_dict
-        )
     else:
-        if sort_dict is not None:
-            node_to_nodelayer = dict(zip(path_df.pre, path_df.pre_layer))
-            node_to_nodelayer.update(dict(zip(path_df.post, path_df.post_layer)))
-            sort_dict = {
-                node_to_nodelayer[node]: value for node, value in sort_dict.items()
+        node_activation_dict = {}
+
+    if sort_dict is not None:
+        if sort_by_activation:
+            max_act = max(node_activation_dict.values())
+        else:
+            max_act = 0
+
+        # iterating through all layers, because the same cell type can be at multiple layers
+        all_sort_dict = {}
+        for l in path_df.layer.unique():
+            this_path_df = path_df[path_df.layer == l]
+            node_to_nodelayer = dict(zip(this_path_df.pre, this_path_df.pre_layer))
+
+            this_sort_dict = {
+                node_to_nodelayer[node]: (value + max_act)
+                for node, value in sort_dict.items()
+                if node in node_to_nodelayer
             }
 
-        positions = create_layered_positions(
-            path_df, priority_indices, sort_dict=sort_dict
-        )
+            # add mapping from post to post_layer
+            # doing this separately so that if the same node is in adjacent layers,
+            # both are taken into account
+            node_to_nodelayer.update(
+                dict(zip(this_path_df.post, this_path_df.post_layer))
+            )
+            this_sort_dict.update(
+                {
+                    node_to_nodelayer[node]: (value + max_act)
+                    for node, value in sort_dict.items()
+                    if node in node_to_nodelayer
+                }
+            )
+            all_sort_dict.update(this_sort_dict)
+        sort_dict = all_sort_dict
+    else:
+        sort_dict = {}
+
+    # put two sorting together
+    # updating node_activation_dict with sort_dict means that sort_dict takes priority
+    node_activation_dict.update(sort_dict)
+    if len(node_activation_dict) == 0:
+        sort_dict = None
+    else:
+        sort_dict = node_activation_dict
+
+    positions = create_layered_positions(path_df, priority_indices, sort_dict=sort_dict)
 
     # Default color for nodes if not provided otherwise
     if neuron_to_color is None:

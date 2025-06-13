@@ -247,13 +247,12 @@ def create_layered_positions(
     times.
 
     Args:
-        df (pd.DataFrame): The DataFrame containing the path data, including
-            the layer number, pre-synaptic index, and post-synaptic index.
-        priority_indices (list, set, pd.Series, numpy.ndarray optional): A
-            list of neuron indices that should be plotted on top of each layer.
-            Defaults to None.
+        df (pd.DataFrame): The DataFrame containing the path data, including the layer
+            number, pre-synaptic index, and post-synaptic index.
+        priority_indices (list, set, pd.Series, numpy.ndarray optional): A list of
+            neuron indices that should be plotted on top of each layer. Defaults to None.
         sort_dict (dict, optional): A dictionary of neuron indices as keys and their
-            sorting order as values (smaller value is higher in the plot). Defaults to
+            sorting order as values (bigger value is higher in the plot). Defaults to
             None.
     Returns:
         dict: A dictionary of positions for each neuron in the paths, with the
@@ -298,7 +297,7 @@ def create_layered_positions(
 
         if sort_dict is not None:
             layer_name = sorted(
-                layer_name, key=lambda x: sort_dict.get(x, float("inf"))
+                layer_name, key=lambda x: sort_dict.get(x, float("-inf"))
             )
 
         if priority_indices is not None:
@@ -313,6 +312,7 @@ def create_layered_positions(
         for index, neuron in enumerate(layer_name, start=1):
             positions[neuron] = (
                 layer * layer_width,
+                # the later in the list, the higher
                 index * 1.0 / (len(layer_name) + 1),
             )
 
@@ -831,14 +831,14 @@ def compare_layered_paths(
     el_colours: List[str] = ["rosybrown", "burlywood"],
     legend_labels: List[str] = ["Path 1", "Path 2"],
     weight_decimals: int = 2,
-    weight_width_scale=5,
     figsize: tuple = (10, 8),
     label_pos: List[float] = [0.7, 0.7],
 ):
     """
-    Compare two layered paths by overlaying them and annotating the weights.
-    The paths should be in the format of the output from
-    `find_path_iteratively()`.
+    Compare two layered paths by overlaying them and annotating the weights. The paths
+    should be in the format of the output from `find_path_iteratively()`. The width of
+    the edges is based on the weight in the first path, when the connection is present
+    in both paths.
 
     Args:
         paths (List[pd.DataFrame]): A list of two DataFrames containing the
@@ -892,9 +892,12 @@ def compare_layered_paths(
 
     # Determine the width of the edges
     weights = [composite_G[u][v]["weight"] for u, v in composite_G.edges()]
-    widths = [
-        max(0.1, w * weight_width_scale) for w in weights
-    ]  # Scale weights for visibility, min 0.1
+    weight_min = min(weights)
+    weight_max = max(weights)
+    if weight_min == weight_max:
+        widths = [1.0] * len(weights)
+    else:
+        widths = [1 + 9 * (w - weight_min) / (weight_max - weight_min) for w in weights]
 
     # Generate positions
     positions = create_layered_positions(composite_paths, priority_indices)
