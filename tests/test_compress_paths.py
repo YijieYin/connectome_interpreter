@@ -558,7 +558,11 @@ class TestCompressPathsSigned(unittest.TestCase):
         """Test that files are properly saved to disk."""
         with tempfile.TemporaryDirectory() as temp_dir:
             compress_paths_signed(
-                self.simple_matrix, self.simple_idx_to_sign, 2, save_path=temp_dir
+                self.simple_matrix,
+                self.simple_idx_to_sign,
+                2,
+                save_to_disk=True,
+                save_path=temp_dir,
             )
 
             # Check that files exist
@@ -575,6 +579,7 @@ class TestCompressPathsSigned(unittest.TestCase):
                 self.simple_idx_to_sign,
                 2,
                 return_results=False,
+                save_to_disk=True,
                 save_path=temp_dir,
             )
 
@@ -664,7 +669,11 @@ class TestCompressPathsSigned(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             _ = compress_paths_signed(
-                self.simple_matrix, self.simple_idx_to_sign, 2, save_path=temp_dir
+                self.simple_matrix,
+                self.simple_idx_to_sign,
+                2,
+                save_path=temp_dir,
+                save_to_disk=True,
             )
 
             # Temporary directory should be gone
@@ -678,7 +687,11 @@ class TestCompressPathsSigned(unittest.TestCase):
         """Test computation of multiple layers (beyond 2)."""
         with tempfile.TemporaryDirectory() as temp_dir:
             e_paths, i_paths = compress_paths_signed(
-                self.simple_matrix, self.simple_idx_to_sign, 3, save_path=temp_dir
+                self.simple_matrix,
+                self.simple_idx_to_sign,
+                3,
+                save_to_disk=True,
+                save_path=temp_dir,
             )
 
             # Check we have the right number of layers
