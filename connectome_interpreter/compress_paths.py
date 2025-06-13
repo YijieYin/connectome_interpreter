@@ -35,7 +35,7 @@ def compress_paths(
     threshold: float = 0,
     output_threshold: float = 1e-4,
     root: bool = False,
-    chunkSize=5000,
+    chunkSize=2000,
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
     save_to_disk: bool = False,
     save_path: str = "./",
@@ -48,7 +48,7 @@ def compress_paths(
     """
     Computes A^0 to A^n by chunking the computation to save memory.
     Results are thresholded and returned as a list of sparse scipy matrices or numpy
-    arrays.
+    arrays (if above density_threshold). If it's too slow, try changing chunkSize.
 
     Args:
         A (scipy.sparse.matrix): The connectivity matrix as a scipy
