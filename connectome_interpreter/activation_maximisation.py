@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple, Union
 import contextlib
 
-
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
@@ -100,13 +99,26 @@ class MultilayeredNetwork(nn.Module):
     A PyTorch module representing a multilayered neural network model with trainable
     parameters and flexible activation functions.
 
-    This network architecture is designed to process temporal sequences
-    of sensory data through multiple layers, with the initial layer
-    handling only external inputs and subsequent layers processing
-    external+internal input.
+    This network architecture is designed to process temporal sequences of input data
+    through multiple synaptic hops, with the initial layer handling only external inputs
+    and subsequent layers processing external+internal input.
 
-    The forward pass of the network unrolls the connectome through time,
-    with each layer receiving its own time-specific sensory input.
+    Excitabililty is implemented as the slope of the tanh activation function. Users can
+    specify default excitability (tanh_steepness) for all neurons, as well as specific
+    excitabilities for neuron groups. In training, the excitabilities are shared per
+    group specified by `idx_to_group`.
+
+    Baseline activity is taken into account through biases. Users can specify default
+    biases for all neurons, as well as specific biases for neuron groups. In training,
+    the biases are shared per group specified by `idx_to_group`.
+
+    In divisive normalisation, the synaptic connections specified in
+    `divisive_normalization` no longer participate in the normal subtractive inhibition.
+    Rather, they are used to change the slope of the post-synaptic neuron: the new slope
+    is: max(0, original_slope * (1 + pre_post_weight * pre_activation *
+    divisive_strength)). `divisive_strength` is a parameter the user can set, to specity
+    how strong the divisive normalization is. `max(0, ...)` is to ensure that the slope
+    does not become negative.
 
     Attributes:
         all_weights (torch.nn.Parameter): The connectome. Input neurons are in
@@ -126,16 +138,15 @@ class MultilayeredNetwork(nn.Module):
             grouped by neuron type.
         indices (torch.Tensor): Indices mapping each neuron to its group for parameter
             sharing.
+        divisive_strength (torch.nn.Parameter): Trainable parameter for the strength of
+            divisive normalization, if applicable. In training, the parameter is shared
+            per group specified by idx_to_group. This parameter only exists for the pres
+            in divisive_normalization.
+        divisive_normalization (Dict[str, List[str]]): A dictionary where keys are
+            pre-synaptic neuron groups and values are lists of post-synaptic neuron
+            groups. These *inhibitory* connections are implemented divisively instead of
+            subtractively.
 
-    Methods:
-        activation_function(x: torch.Tensor) -> torch.Tensor:
-            Applies the activation function to the input tensor.
-        forward(inputs: torch.Tensor) -> torch.Tensor:
-            Processes inputs through the network and returns the activations.
-    Context Managers:
-        training_mode(model: MultilayeredNetwork, train_slopes=True, train_biases=True):
-            Context manager to set the model in training mode, enabling gradients for
-            slopes and biases.
 
     Args:
         all_weights (Union[torch.Tensor, scipy.sparse.spmatrix]): The connectome. Input
@@ -157,6 +168,14 @@ class MultilayeredNetwork(nn.Module):
             None (uses default_bias).
         slope_dict (dict, optional): Dict mapping group names to slope values. Uses
             tanh_steepness if None.
+        divisive_normalization (Dict[str, List[str]], optional): A dictionary where keys
+            are pre-synaptic neuron groups and values are lists of post-synaptic neuron
+            groups. These *inhibitory* connections are implemented divisively instead of
+            subtractively. Defaults to None.
+        divisive_strength (Union[float, int, dict], optional): The strength of the
+            divisive normalization. If a float or int, it applies to all connections.
+            If a dict, it maps pre-synaptic neuron groups to their specific divisive
+            strengths. Defaults to 1.
         activation_function (Callable, optional): Custom activation function. If None,
             uses default implementation.
         device (torch.device, optional): Device for computation.
@@ -173,6 +192,8 @@ class MultilayeredNetwork(nn.Module):
         default_bias: float = 0.0,
         bias_dict: Optional[dict] = None,
         slope_dict: Optional[dict] = None,
+        divisive_normalization: Optional[Dict[str, List[str]]] = None,
+        divisive_strength: Union[float, int, dict] = 1,
         activation_function: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         device: Optional[torch.device] = None,
     ):
@@ -181,41 +202,107 @@ class MultilayeredNetwork(nn.Module):
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+        if isinstance(all_weights, np.ndarray):
+            # convert to sp.sparse matrix
+            all_weights = coo_matrix(all_weights)
+
         # Convert all_weights to a sparse tensor if it is a scipy sparse matrix
         if isinstance(all_weights, sparse.spmatrix):
             all_weights = scipy_sparse_to_pytorch(all_weights)
-        # check if all_weights is sparse
-        assert all_weights.is_sparse, "all_weights must be sparse"
+        elif isinstance(all_weights, torch.Tensor):
+            # if torch tensor, ensure it is sparse
+            if not all_weights.is_sparse:
+                all_weights = all_weights.to_sparse()
+        else:
+            raise TypeError(
+                "all_weights must be a scipy sparse matrix, numpy array, or torch tensor."
+            )
 
-        self.all_weights = all_weights
+        # change the synaptic weight to 0 for the divisive normalization pairs
+        if divisive_normalization is not None:
+            # idx_to_group must also be provided
+            assert (
+                idx_to_group is not None
+            ), "idx_to_group must be provided for divisive normalization."
+
+            pres_indices = []
+            posts_indices = []
+            for pre, posts in divisive_normalization.items():
+                pre_idx = [idx for idx, group in idx_to_group.items() if group == pre]
+                for post in posts:
+                    post_idx = [
+                        idx for idx, group in idx_to_group.items() if group == post
+                    ]
+                    # get all combinations of pre and post indices
+                    these_pre, these_post = zip(
+                        *[(apre, apost) for apre in pre_idx for apost in post_idx]
+                    )
+                    pres_indices.extend(these_pre)
+                    posts_indices.extend(these_post)
+
+            # note that post are in rows in the model
+            remove_set = set(zip(posts_indices, pres_indices))
+
+            xs, ys = all_weights._indices().cpu().numpy()
+
+            keep = []
+            for x, y in zip(xs, ys):
+                if (x, y) not in remove_set:
+                    keep.append(True)
+                else:
+                    keep.append(False)
+
+            keep = np.array(keep)
+            self.divnorm_indices = all_weights._indices()[:, ~keep]
+            self.divnorm_weights = all_weights._values()[~keep]
+            # sanity check: all values should be negative
+            # which index of divnorm_weights is positive?
+            posidx = torch.where(self.divnorm_weights > 0)[0]
+            # posidx = np.where(self.divnorm_weights > 0)[0]
+            if len(posidx) > 0:
+                raise ValueError(
+                    "Divisive normalization weights should be negative, "
+                    f"but found positive weights at indices: {self.divnorm_indices[posidx,:]}."
+                )
+
+            all_weights = torch.sparse_coo_tensor(
+                all_weights._indices()[:, keep],
+                all_weights._values()[keep],
+                size=all_weights.shape,
+            )
+
+        self.all_weights = all_weights.to(device)
         self.sensory_indices = torch.tensor(sensory_indices, device=device)
         self.num_layers = num_layers
         self.threshold = threshold
         self.tanh_steepness = tanh_steepness
+        self.idx_to_group = idx_to_group
         self.activations = []
         self.custom_activation_function = activation_function
         self.default_bias = default_bias
+        self.divisive_normalization = divisive_normalization
 
         # Setup trainable parameters if idx_to_group is provided
         if idx_to_group is not None:
             self._setup_trainable_parameters(
-                idx_to_group, bias_dict, slope_dict, device
+                idx_to_group, bias_dict, slope_dict, divisive_strength, device
             )
         else:
             # For backward compatibility - no trainable parameters
             self.slope = None
             self.raw_biases = None
             self.indices = None
+            self.divisive_strength = None
 
     def _setup_trainable_parameters(
-        self, idx_to_group: dict, bias_dict, slope_dict, device
+        self, idx_to_group: dict, bias_dict, slope_dict, divisive_strength, device
     ):
         """Setup trainable slope and bias parameters grouped by neuron type."""
         all_types = sorted(set(idx_to_group.values()))
         num_types = len(all_types)
         type2idx = {t: i for i, t in enumerate(all_types)}
 
-        # Setup slope values
+        # Setup slope values----
         if slope_dict is None:
             slope_init = torch.full(
                 (num_types,), self.tanh_steepness, dtype=torch.float32
@@ -230,7 +317,7 @@ class MultilayeredNetwork(nn.Module):
                 if group_name not in slope_dict:
                     slope_init[type2idx[group_name]] = self.tanh_steepness
 
-        # Setup bias values
+        # Setup bias values----
         if bias_dict is None:
             bias_init = torch.full((num_types,), self.default_bias, dtype=torch.float32)
         else:  # dict
@@ -243,19 +330,52 @@ class MultilayeredNetwork(nn.Module):
                 if group_name not in bias_dict:
                     bias_init[type2idx[group_name]] = self.default_bias
 
+        # Setup divisive normalization strength----
+        if self.divisive_normalization is not None:
+            # divisive_init has the same length as the number of pres in divisive_normalization
+            # it's not set for all cell types which is the case for slope and bias
+            # because so far we believe that this is relatively rare, so the parameter
+            # will only be set for the pres in divisive_normalization for their connections with the post
+            # So for training, these particular connections are assumed to be only divisive normalising
+            # and their divisive_strength is strained.
+            divnorm_list = []
+            type2div_strength = {}
+            for pre, _ in self.divisive_normalization.items():
+                this_strength = (
+                    divisive_strength
+                    if isinstance(divisive_strength, (int, float))
+                    else divisive_strength[pre]
+                )
+                divnorm_list.extend([this_strength])
+                type2div_strength[pre] = this_strength
+
+            divisive_init = torch.tensor(
+                divnorm_list, dtype=torch.float32, device=device
+            )
+            # a parameter that applies separately to each pre type in divisive_normalization, and no one else
+            self.divisive_strength = nn.Parameter(
+                divisive_init.to(device), requires_grad=False
+            )
+            self.type2div_strength = type2div_strength
+        else:
+            self.divisive_strength = None
+
         self.slope = nn.Parameter(slope_init.to(device), requires_grad=False)
         self.raw_biases = nn.Parameter(bias_init.to(device), requires_grad=False)
+        # note indices only apply to slope and biases, not divisive normalization
         self.indices = torch.tensor(
             [type2idx[idx_to_group[i]] for i in range(self.all_weights.shape[0])],
             device=device,
         )
 
-    def set_param_grads(self, slopes=False, raw_biases=False):
+    def set_param_grads(self, slopes=False, raw_biases=False, divisive_strength=False):
         """Set requires_grad for specific parameters."""
         if self.slope is not None:
             self.slope.requires_grad_(slopes)
         if self.raw_biases is not None:
             self.raw_biases.requires_grad_(raw_biases)
+        if self.divisive_strength is not None:
+            self.divisive_strength.requires_grad_(divisive_strength)
 
     @property
     def biases(self):
@@ -271,7 +391,52 @@ class MultilayeredNetwork(nn.Module):
             return None
         return torch.abs(self.raw_biases)
 
-    def activation_function(self, x: torch.Tensor) -> torch.Tensor:
+    def divnorm(
+        self, slopes: Union[float, torch.Tensor], x_previous: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Change the slopes based on divisive normalization. The new slope bewteen pre and
+        post is: original_slope * (1 - pre_post_weight * pre_activation *
+        divisive_strength).
+
+        Args:
+            slopes (Union[float, torch.Tensor]): The slopes to be normalized.
+                If a float, it is assumed to be the same for all neurons.
+            x_previous (torch.Tensor): The previous activations of the neurons.
+
+        Returns:
+            torch.Tensor: The output tensor after applying divisive normalization.
+        """
+        if self.divisive_normalization is None:
+            return slopes
+
+        if isinstance(slopes, float):
+            # turn to the same shape as x
+            slopes = torch.full(x_previous.shape, slopes, device=x_previous.device)
+
+        for i, (apost, apre) in enumerate(self.divnorm_indices.T):
+            # max between 0, and slopes * (1 - weight * pre_activation * divisive_strength)
+            slopes[apost] = max(
+                0,
+                slopes[apost]
+                * (
+                    1
+                    # used + because the weights are negative
+                    + self.divnorm_weights[
+                        i
+                    ]  # weight between pre (divisive norm) and post
+                    * x_previous[apre]  # activation of pre
+                    * self.type2div_strength[
+                        self.idx_to_group[int(apre.cpu().numpy())]
+                    ]  # divisive strength for this pre
+                ),
+            )
+
+        return slopes
+
+    def activation_function(
+        self, x: torch.Tensor, x_previous=Optional[torch.Tensor]
+    ) -> torch.Tensor:
         """
         Apply the activation function to the input tensor. Currently it is
         tanh(relu(slope * x + bias)). x = weights @ inputs (done outside the activation
@@ -289,8 +454,11 @@ class MultilayeredNetwork(nn.Module):
         if self.slope is None:
             slopes = self.tanh_steepness
         else:
-            slopes = self.slope[self.indices]
+            slopes = self.slope[self.indices]  # shape: (num_neurons,)
+            # shape: (num_neurons, batch_size)
             slopes = slopes.view(-1, 1).expand(-1, x.shape[1]).to(x.device)
+
+        slopes = self.divnorm(slopes, x_previous)
 
         if self.biases is None:
             biases = self.default_bias
@@ -324,6 +492,8 @@ class MultilayeredNetwork(nn.Module):
         # if inputs is numpy, convert to tensor
         if isinstance(inputs, np.ndarray):
             inputs = torch.tensor(inputs, device=self.all_weights.device)
+        elif isinstance(inputs, torch.Tensor):
+            inputs = inputs.to(self.all_weights.device)
 
         # Handle 2D inputs by expanding to 3D
         if inputs.dim() == 2:
@@ -351,7 +521,7 @@ class MultilayeredNetwork(nn.Module):
         # sparse matrix multiplication
         # shape: (all_neurons, batch_size)
         x = torch.sparse.mm(self.all_weights, full_input)
-        x = self.activation_function(x)
+        x = self.activation_function(x, x_previous=full_input)
 
         # add external input to sensory neurons
         # so the output activation includes the external input as well
@@ -367,10 +537,11 @@ class MultilayeredNetwork(nn.Module):
 
         # Process remaining layers
         for alayer in range(1, self.num_layers):
+            x_previous = x.clone()  # save previous activations
             # shape: (all_neurons, batch_size)
             x = torch.sparse.mm(self.all_weights, x)
             # thresholded relu and tanh
-            x = self.activation_function(x)
+            x = self.activation_function(x, x_previous=x_previous)
 
             # add external input to sensory neurons, if not the last layer
             if alayer != self.num_layers - 1:
@@ -400,13 +571,22 @@ class MultilayeredNetwork(nn.Module):
 # Note: input gradients are handled in the activation_maximisation and saliency
 # functions themselves, so no context manager for that here
 @contextlib.contextmanager
-def training_mode(model: MultilayeredNetwork, train_slopes=True, train_biases=True):
+def training_mode(
+    model: MultilayeredNetwork,
+    train_slopes=True,
+    train_biases=True,
+    divisive_strength=True,
+):
     """Context manager for training mode - enables gradients for slopes and biases."""
-    model.set_param_grads(slopes=train_slopes, raw_biases=train_biases)
+    model.set_param_grads(
+        slopes=train_slopes,
+        raw_biases=train_biases,
+        divisive_strength=divisive_strength,
+    )
     try:
         yield model
     finally:
-        model.set_param_grads(slopes=False, raw_biases=False)
+        model.set_param_grads(slopes=False, raw_biases=False, divisive_strength=False)
 
 
 def train_model(
@@ -422,6 +602,7 @@ def train_model(
     seed: int = 42,
     train_slopes: bool = True,
     train_biases: bool = True,
+    train_divisive_strength: bool = True,
 ):
     """
     Train the model to approximate the targets, while keeping the model parameter change
@@ -550,7 +731,7 @@ def train_model(
         inputs = inputs.to(device)
 
     # Use training mode context manager
-    with training_mode(model, train_slopes, train_biases):
+    with training_mode(model, train_slopes, train_biases, train_divisive_strength):
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
         # Training history

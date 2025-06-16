@@ -612,3 +612,119 @@ class TestTargetActivationEnhanced(unittest.TestCase):
         # Check layer structure
         self.assertIn(0, batch_0_targets)  # layer 0
         self.assertIn(1, batch_0_targets)  # layer 1
+
+
+class TestDivisiveNormalization(unittest.TestCase):
+    def setUp(self):
+        # Simple 2x2 weight matrix for tests
+        dense = np.array([[0.0, 0.0], [0.0, 0.0]], dtype=float)
+        self.weights = csr_matrix(dense)
+        self.sensory_indices = [0]
+        self.idx_to_group = {0: "A", 1: "B"}
+
+    def test_missing_idx_to_group_raises(self):
+        dn = {"A": ["B"]}
+        with self.assertRaises(AssertionError):
+            MultilayeredNetwork(
+                self.weights, self.sensory_indices, divisive_normalization=dn
+            )
+
+    def test_positive_divnorm_weight_raises(self):
+        dense = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)  # weight[1,0] positive
+        weights = csr_matrix(dense)
+        dn = {"A": ["B"]}
+        with self.assertRaises(ValueError):
+            MultilayeredNetwork(
+                weights,
+                self.sensory_indices,
+                idx_to_group=self.idx_to_group,
+                divisive_normalization=dn,
+            )
+
+    def test_weight_removal_and_storage(self):
+        dense = np.array([[0.0, -0.5], [0.3, 0.0]], dtype=float)  # from B to A, -0.5
+        weights = csr_matrix(dense)
+        dn = {"B": ["A"]}
+        model = MultilayeredNetwork(
+            weights,
+            self.sensory_indices,
+            idx_to_group=self.idx_to_group,
+            divisive_normalization=dn,
+        )
+        dense_out = model.all_weights.to_dense().cpu().numpy()
+        # entry (post=0, pre=1) should be removed -> zero
+        self.assertEqual(dense_out[0, 1], 0.0)
+        # stored divnorm_weights should contain original -0.5
+        self.assertTrue(
+            torch.allclose(
+                model.divnorm_weights,
+                torch.tensor([-0.5], dtype=torch.float32).to(
+                    model.divnorm_weights.device
+                ),
+                atol=1e-6,
+            )
+        )
+        # stored indices should point to (0, 1) -> pre=1, post=0
+        idx = model.divnorm_indices.cpu().numpy()
+        self.assertTrue(np.array_equal(idx, np.array([[0], [1]])))
+
+    def test_divisive_strength_param(self):
+        dense = np.array([[0.0, -0.2], [0.0, 0.0]], dtype=float)
+        weights = csr_matrix(dense)
+        dn = {"B": ["A"]}  # one pres type
+        # custom strength
+        ds = {"B": 0.3}
+        model = MultilayeredNetwork(
+            weights,
+            self.sensory_indices,
+            idx_to_group=self.idx_to_group,
+            divisive_normalization=dn,
+            divisive_strength=ds,
+        )
+        # one strength value
+        self.assertEqual(model.divisive_strength.numel(), 1)
+        self.assertFalse(model.divisive_strength.requires_grad)
+        self.assertAlmostEqual(model.divisive_strength.item(), 0.3, places=6)
+
+    def test_divnorm_identity_when_none(self):
+        dense = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=float)
+        weights = csr_matrix(dense)
+        model = MultilayeredNetwork(weights, self.sensory_indices)
+        slopes = torch.tensor([1.0, 2.0])
+        x_prev = torch.tensor([0.5, 0.5])
+        out = model.divnorm(slopes.clone(), x_prev)
+        self.assertTrue(torch.allclose(out, slopes))
+
+    def test_divnorm_effect_forward(self):
+        # If pre-activation=1, weight=-1 and divisive_strength=1, new slope = 0 -> no activation
+        dense = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [-0.5, 0.0, 1.0],  # C excites B, A inhibits B
+                [0.0, 0.0, 0.0],
+            ],
+            dtype=float,
+        )
+        weights = csr_matrix(dense)
+        dn = {"A": ["B"]}
+        ds = {"A": 20}  # a very big divisive strength, should set slope to 0
+        model = MultilayeredNetwork(
+            weights,
+            sensory_indices=[0, 2],
+            tanh_steepness=5,
+            idx_to_group={0: "A", 1: "B", 2: "C"},
+            divisive_normalization=dn,
+            divisive_strength=ds,
+        )
+        # one layer, one sensory neuron => shape (sensory, layers) = (2,2)
+        inp = torch.tensor([[1.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
+        out = model(inp)
+        # post neuron idx=1 should receive zero activation
+        self.assertAlmostEqual(out[1, 0].item(), 0.0, places=6)
+
+        # and on the other hand, without divisive normalization, it should > 0
+        model_no_dn = MultilayeredNetwork(
+            weights, sensory_indices=[0, 2], idx_to_group={0: "A", 1: "B", 2: "C"}
+        )
+        out_no_dn = model_no_dn(inp)
+        self.assertGreater(out_no_dn[1, 0].item(), 0.0)
