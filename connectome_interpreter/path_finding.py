@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import pandas as pd
-from scipy.sparse import issparse
+from scipy.sparse import issparse, spmatrix
 from tqdm import tqdm
 
 from .utils import (
@@ -148,13 +148,13 @@ def find_path_once(
 
 
 def find_path_iteratively(
-    inprop_csc,
-    steps_cpu,
+    inprop_csc: spmatrix,
+    steps_cpu: list,
     inidx: arrayable,
     outidx: arrayable,
-    target_layer_number,
-    top_n=-1,
-    threshold=0,
+    target_layer_number: int,
+    top_n: int = -1,
+    threshold: float = 0,
 ):
     """
     Iteratively finds the path from the specified output (outidx) back to the
@@ -164,7 +164,7 @@ def find_path_iteratively(
     Args:
       inprop_csc (scipy.sparse matrix): The direct connectivity matrix in
         Compressed Sparse Column format.
-      steps_cpu (np.ndarray): A list of compressed connectivity matrices: one
+      steps_cpu (list): A list of compressed connectivity matrices: one
         matrix for each compressed path length.
       inidx (int, float, list, set, numpy.ndarray, or pandas.Series): The
         input neuron indices.
@@ -602,8 +602,15 @@ def filter_paths(
             including the layer number, pre-synaptic index, post-synaptic
             index, and weight.
     """
+    if df.shape[0] == 0:
+        # raise error
+        raise ValueError("The input DataFrame for filter_paths() is empty! ")
+
     if threshold > 0:
         df = df[df.weight > threshold]
+        if df.shape[0] == 0:
+            print("No edges left after thresholding. Try lowering the threshold.")
+            return
 
         df = remove_excess_neurons(df)
 
@@ -684,21 +691,27 @@ def group_paths(
     intermediate_group = {k: str(v) for k, v in intermediate_group.items()}
 
     # add cell type information
-    # first use intermediate_group, then modify specifically for pre at the
-    # first layer, and post at the last layer
-    paths["pre_type"] = paths["pre"].map(intermediate_group).astype(str)
-    paths["post_type"] = paths["post"].map(intermediate_group).astype(str)
+    if "layer" in paths.columns:
+        # first use intermediate_group, then modify specifically for pre at the
+        # first layer, and post at the last layer
+        paths["pre_type"] = paths["pre"].map(intermediate_group).astype(str)
+        paths["post_type"] = paths["post"].map(intermediate_group).astype(str)
 
-    paths.loc[paths["layer"] == paths["layer"].min(), "pre_type"] = (
-        paths.loc[paths["layer"] == paths["layer"].min(), "pre"]
-        .map(pre_group)
-        .astype(str)
-    )
-    paths.loc[paths["layer"] == paths["layer"].max(), "post_type"] = (
-        paths.loc[paths["layer"] == paths["layer"].max(), "post"]
-        .map(post_group)
-        .astype(str)
-    )
+        paths.loc[paths["layer"] == paths["layer"].min(), "pre_type"] = (
+            paths.loc[paths["layer"] == paths["layer"].min(), "pre"]
+            .map(pre_group)
+            .astype(str)
+        )
+        paths.loc[paths["layer"] == paths["layer"].max(), "post_type"] = (
+            paths.loc[paths["layer"] == paths["layer"].max(), "post"]
+            .map(post_group)
+            .astype(str)
+        )
+        group_columns = ["layer", "pre_type", "post_type"]
+    else:
+        paths["pre_type"] = paths["pre"].map(pre_group).astype(str)
+        paths["post_type"] = paths["post"].map(post_group).astype(str)
+        group_columns = ["pre_type", "post_type"]
 
     if not outprop:
         # in this case, calculating the summed input proportion across all senders for
@@ -718,24 +731,14 @@ def group_paths(
 
         if combining_method == "median":
             paths_weights = (
-                paths.groupby(["layer", "pre_type", "post_type"])["weight"]
-                .median()
-                .reset_index()
+                paths.groupby(group_columns)["weight"].median().reset_index()
             )
         elif combining_method == "sum":
             # sum across presynaptic neurons of the same type
-            paths_weights = (
-                paths.groupby(["layer", "pre_type", "post_type"])
-                .weight.sum()
-                .reset_index()
-            )
+            paths_weights = paths.groupby(group_columns).weight.sum().reset_index()
         elif combining_method == "mean":
             # sum across presynaptic neurons of the same type
-            paths_weights = (
-                paths.groupby(["layer", "pre_type", "post_type"])
-                .weight.sum()
-                .reset_index()
-            )
+            paths_weights = paths.groupby(group_columns).weight.sum().reset_index()
             # divide by number of postsynaptic neurons of the same type
             paths_weights["nneuron_post"] = paths_weights.post_type.map(
                 nneuron_per_type
@@ -745,7 +748,7 @@ def group_paths(
 
         if "pre_activation" in paths.columns:
             paths = (
-                paths.groupby(["layer", "pre_type", "post_type"])
+                paths.groupby(group_columns)
                 .agg(
                     pre_activation=("pre_activation", "mean"),
                     post_activation=("post_activation", "mean"),
@@ -753,9 +756,7 @@ def group_paths(
                 .reset_index()
             )
             # then merge the weights
-            paths = pd.merge(
-                paths, paths_weights, on=["layer", "pre_type", "post_type"]
-            )
+            paths = pd.merge(paths, paths_weights, on=group_columns)
         else:
             paths = paths_weights.copy()
         paths.rename(columns={"pre_type": "pre", "post_type": "post"}, inplace=True)
@@ -780,24 +781,14 @@ def group_paths(
         # weights
         if combining_method == "median":
             paths_weights = (
-                paths.groupby(["layer", "pre_type", "post_type"])["weight"]
-                .median()
-                .reset_index()
+                paths.groupby(group_columns)["weight"].median().reset_index()
             )
         elif combining_method == "sum":
             # sum across presynaptic neurons of the same type
-            paths_weights = (
-                paths.groupby(["layer", "pre_type", "post_type"])
-                .weight.sum()
-                .reset_index()
-            )
+            paths_weights = paths.groupby(group_columns).weight.sum().reset_index()
         elif combining_method == "mean":
             # sum across presynaptic neurons of the same type
-            paths_weights = (
-                paths.groupby(["layer", "pre_type", "post_type"])
-                .weight.sum()
-                .reset_index()
-            )
+            paths_weights = paths.groupby(group_columns).weight.sum().reset_index()
             # divide by number of presynaptic neurons of the same type
             paths_weights["nneuron_pre"] = paths_weights.pre_type.map(nneuron_per_type)
             paths_weights["weight"] = paths_weights.weight / paths_weights.nneuron_pre
@@ -805,7 +796,7 @@ def group_paths(
 
         if "pre_activation" in paths.columns:
             paths = (
-                paths.groupby(["layer", "pre_type", "post_type"])
+                paths.groupby(group_columns)
                 .agg(
                     pre_activation=("pre_activation", "mean"),
                     post_activation=("post_activation", "mean"),
@@ -813,9 +804,7 @@ def group_paths(
                 .reset_index()
             )
             # then merge the weights
-            paths = pd.merge(
-                paths, paths_weights, on=["layer", "pre_type", "post_type"]
-            )
+            paths = pd.merge(paths, paths_weights, on=group_columns)
         else:
             paths = paths_weights.copy()
         paths.rename(columns={"pre_type": "pre", "post_type": "post"}, inplace=True)
@@ -1175,3 +1164,62 @@ def connected_components(
         path = remove_excess_neurons(path)
         components.append(path)
     return components
+
+
+def el_within_n_steps(
+    inprop: spmatrix,
+    steps: list,
+    inidx: arrayable,
+    outidx: arrayable,
+    n: int,
+    threshold: float = 0,
+    pre_group: dict = None,
+    post_group: dict = None,
+    return_raw_el: bool = False,
+):
+    """
+    Find paths within a specified number of steps in a directed graph, starting from
+    input indices and ending at output indices. The unique edges are returned. Filtering
+    by `threshold` happens after grouping if `idx_to_group` is provided.
+
+    Args:
+        inprop (spmatrix): The connectivity matrix, with presynaptic in the rows.
+        steps (list): A list of connectivity matrices, e.g. the result from
+            `compress_paths()`.
+        inidx (arrayable): The input neuron indices to start the paths from.
+        outidx (arrayable): The output neuron indices to end the paths at.
+        n (int): The maximum number of hops. n=1 for direct connections.
+        threshold (float, optional): The threshold for the weight of the direct
+            connection between pre and post. Defaults to 0.
+        idx_to_group (dict, optional): A dictionary mapping neuron indices to
+            their respective groups. Defaults to None.
+
+    Returns:
+        pd.DataFrame: A DataFrame containing the edges of the paths found,
+            including columns 'pre', 'post', and 'weight'.
+    """
+
+    inidx = to_nparray(inidx)
+    outidx = to_nparray(outidx)
+
+    all_paths = []
+    raw_el = []
+    for i in tqdm(range(n)):
+        paths = find_path_iteratively(inprop, steps, inidx, outidx, i + 1, threshold=0)
+        if paths is None:
+            continue
+        if return_raw_el:
+            raw_el.append(paths)
+        if pre_group is not None and post_group is not None:
+            paths = group_paths(paths, pre_group, post_group)
+        paths = filter_paths(paths, threshold)
+        all_paths.append(paths)
+    all_paths = pd.concat(all_paths, axis=0)
+    el = all_paths.drop_duplicates(subset=["pre", "post", "weight"])
+
+    if return_raw_el:
+        raw_el = pd.concat(raw_el, axis=0)
+        raw_el = raw_el.drop_duplicates(subset=["pre", "post", "weight"])
+        return el[["pre", "post", "weight"]], raw_el
+    else:
+        return el[["pre", "post", "weight"]]

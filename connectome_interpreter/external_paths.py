@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 import os
 from matplotlib import pyplot as plt
-from typing import Optional
+from typing import Optional, Union
 
 # Third-party package imports
-from scipy.sparse import csc_matrix, csr_matrix
+from scipy.sparse import csc_matrix, csr_matrix, spmatrix
 from scipy.sparse.csgraph import shortest_path
 import networkx as nx
 
+from .utils import to_nparray, el_within_n_steps, arrayable
+
 
 def compute_flow_hitting_time(
-    conn_df: pd.DataFrame,
+    conn_df: Union[pd.DataFrame, spmatrix],
     flow_seed_idx: np.ndarray[int],
     flow_steps: int,
     flow_thre: float,
@@ -23,7 +25,7 @@ def compute_flow_hitting_time(
     The main algorithm is implemented in the 'navis' library (https://github.com/navis-org/navis).
 
     Args:
-        conn_df (pd.DataFrame): DataFrame containing the connections with columns 'idx_pre', 'idx_post', and 'rel_in_weight'.
+        conn_df (pd.DataFrame): DataFrame containing the connections with columns 'pre', 'post', and 'weight'.
         flow_seed_idx (np.ndarray): Array of seed cell indices.
         flow_steps (int): Number of steps for flow calculation.
         flow_thre (float): Threshold for activation in flow calculation.
@@ -44,7 +46,22 @@ def compute_flow_hitting_time(
     def my_act(x):
         return linear_activation_p(x, min_w=0, max_w=flow_thre)
 
-    edges = conn_df[["idx_pre", "idx_post", "rel_in_weight"]]
+    if isinstance(conn_df, spmatrix):
+        # convert sparse matrix to DataFrame
+        coo = conn_df.tocoo()
+        conn_df = pd.DataFrame({"pre": coo.row, "post": coo.col, "weight": coo.data})
+    elif isinstance(conn_df, pd.DataFrame):
+        # make sure the column names are correct
+        if not all(col in conn_df.columns for col in ["pre", "post", "weight"]):
+            raise ValueError(
+                "Input DataFrame must contain columns 'pre', 'post', and 'weight'."
+            )
+    else:
+        raise TypeError(
+            "Input must be a sparse matrix or a DataFrame with columns 'pre', 'post', and 'weight'."
+        )
+
+    edges = conn_df[["pre", "post", "weight"]]
     edges.columns = ["source", "target", "weight"]
     model = BayesianTraversalModel(
         edges, flow_seed_idx, max_steps=flow_steps + 1, traversal_func=my_act
@@ -72,7 +89,7 @@ def compute_flow_hitting_time(
 
 
 def find_instance_flow(
-    inprop: csc_matrix,
+    inprop: Union[spmatrix, pd.DataFrame],
     idx_to_group: dict,
     flow_seed_groups: list[str] = [
         "L1",
@@ -93,19 +110,24 @@ def find_instance_flow(
     flow_thre: float = 0.1,
 ) -> pd.DataFrame:
     """
-    Get the hitting time for all cell groups.
-    The hitting time is computed using the information flow algorithm (navis:https://github.com/navis-org/navis) for each neuron,
-    and then taking the median across neurons of each cell group.
+    Get the hitting time for all cell groups. The hitting time is computed using the
+    information flow algorithm (navis:https://github.com/navis-org/navis) for each
+    neuron, and then taking the median across neurons of each cell group.
 
     Args:
-        inprop (csc_matrix): Input sparse matrix representing connections.
-        idx_to_group (dict): Dictionary mapping cell indices to their respective cell groups.
-        flow_seed_groups (list): List of cell groups to be used as seeds for flow calculation.
+        inprop (Union[spmatrix, pd.DataFrame]): Input sparse matrix or DataFrame
+            representing connections. If a DataFrame, it should have columns 'pre',
+            'post', and 'weight'.
+        idx_to_group (dict): Dictionary mapping cell indices to their respective cell
+            groups.
+        flow_seed_groups (list): List of cell groups to be used as seeds for flow
+            calculation.
         file_path (str): Path to the directory containing the hitting time data.
         save_flow (bool): Whether to save the computed hitting time to a CSV file.
             Defaults to True.
         save_prefix (str): Prefix for the saved file names.
-        flow_seed_groups (list): List of cell group to be used as seeds for flow calculation.
+        flow_seed_groups (list): List of cell group to be used as seeds for flow
+            calculation.
         flow_steps (int): Number of steps for flow calculation.
         flow_thre (float): Threshold for flow calculation.
 
@@ -122,7 +144,7 @@ def find_instance_flow(
             file_path = "/content/"
         else:
             # Running locally
-            file_path = ""
+            file_path = "./"
 
     # load hitting time or compute
     flow_file_name = os.path.join(
@@ -139,10 +161,7 @@ def find_instance_flow(
         # if file_path doesn't exist, create it
         if not os.path.exists(file_path):
             os.makedirs(file_path)
-        coo = inprop.tocoo()
-        conn_df = pd.DataFrame(
-            {"idx_pre": coo.row, "idx_post": coo.col, "rel_in_weight": coo.data}
-        )
+
         # get indices whose value is in flow_seed_groups
         flow_seed_idx = np.array(
             [
@@ -157,13 +176,12 @@ def find_instance_flow(
                 f"Please check the flow_seed_groups: {flow_seed_groups}."
             )
         flow_df = compute_flow_hitting_time(
-            conn_df, flow_seed_idx, flow_steps, flow_thre
+            inprop, flow_seed_idx, flow_steps, flow_thre
         )
         # add cell group to flow_df
         # note: this only includes indices in flow_seed_idx, which could in theory be a
         # subset of cells in a cell type
         flow_df["cell_group"] = flow_df["idx"].map(idx_to_group)
-        print(flow_df)
         if save_flow:
             print(f"Saving hitting time to {flow_file_name}")
             flow_df.to_csv(flow_file_name, index=False)
@@ -187,7 +205,7 @@ def find_instance_flow(
 
 
 def trim_inprop_by_flow(
-    inprop: csc_matrix,
+    inprop: Union[spmatrix, pd.DataFrame],
     idx_to_group: dict,
     flow_seed_groups: list[str] = [
         "L1",
@@ -214,8 +232,8 @@ def trim_inprop_by_flow(
     (navis: https://github.com/navis-org/navis). The hitting time is the mean
     number of hops required to reach a neuron from a neuron in flow_seed_groups.
     If the hitting time of the post neuron is larger than that of the pre neuron
-    (i.e., the difference is between flow_diff_min and flow_diff_max), then the 
-    connection is interpreted as a feedforward connection and kept. For similar 
+    (i.e., the difference is between flow_diff_min and flow_diff_max), then the
+    connection is interpreted as a feedforward connection and kept. For similar
     hitting times, the connection is interpreted as a lateral connection.
     If the hitting time of the pre neuron is larger than that of the post neuron,
     the connection is interpreted as a feedback connection.
@@ -246,13 +264,6 @@ def trim_inprop_by_flow(
             # Running locally
             file_path = ""
 
-    # convert inprop to dataframe
-    coo = inprop.tocoo()
-    # edgelist
-    conn_df = pd.DataFrame(
-        {"idx_pre": coo.row, "idx_post": coo.col, "rel_in_weight": coo.data}
-    )
-
     flow_type_df = find_instance_flow(
         inprop,
         idx_to_group,
@@ -267,12 +278,19 @@ def trim_inprop_by_flow(
     meta = pd.DataFrame(idx_to_group.items(), columns=["idx", "cell_group"])
     meta = meta.merge(flow_type_df, how="inner", on="cell_group")
 
+    if isinstance(inprop, pd.DataFrame):
+        conn_df = inprop[["pre", "post", "weight"]]
+    elif isinstance(inprop, spmatrix):
+        # convert sparse matrix to DataFrame
+        coo = inprop.tocoo()
+        conn_df = pd.DataFrame({"pre": coo.row, "post": coo.col, "weight": coo.data})
+
     # add hitting time to conn_df
     conn_flow_df = (
         conn_df.merge(
             meta[["idx", "hitting_time"]],
             how="inner",
-            left_on="idx_post",
+            left_on="post",
             right_on="idx",
         )
         .drop(columns=["idx"])
@@ -282,7 +300,7 @@ def trim_inprop_by_flow(
         conn_flow_df.merge(
             meta[["idx", "hitting_time"]],
             how="inner",
-            left_on="idx_pre",
+            left_on="pre",
             right_on="idx",
         )
         .drop(columns=["idx"])
@@ -302,8 +320,8 @@ def trim_inprop_by_flow(
     ]
     inprop_flow = csc_matrix(
         (
-            conn_flow_df["rel_in_weight"],
-            (conn_flow_df["idx_pre"], conn_flow_df["idx_post"]),
+            conn_flow_df["weight"],
+            (conn_flow_df["pre"], conn_flow_df["post"]),
         ),
         shape=inprop.shape,
     )
@@ -333,10 +351,10 @@ def find_shortest_paths(
     nodes_unique = np.unique(
         np.concatenate([paths_unique.pre.unique(), paths_unique.post.unique()])
     )
-    idx_pre = np.searchsorted(nodes_unique, paths_unique.pre.values)
-    idx_post = np.searchsorted(nodes_unique, paths_unique.post.values)
+    pre = np.searchsorted(nodes_unique, paths_unique.pre.values)
+    post = np.searchsorted(nodes_unique, paths_unique.post.values)
     graph_matrix = csr_matrix(
-        (1 / paths_unique["weight"].values, (idx_pre, idx_post)),
+        (1 / paths_unique["weight"].values, (pre, post)),
         shape=(len(nodes_unique), len(nodes_unique)),
     )
 
@@ -400,11 +418,10 @@ def plot_flow_layered_paths(
 
     Args:
         paths (pandas.DataFrame): A dataframe containing the columns 'pre', 'post',
-            'weight', 'pre_layer', and 'post_layer'. Each row represents an
-            edge in the graph. The 'pre' and 'post' columns refer to the source and
-            target nodes, respectively, and 'weight' indicates
-            the edge weight. 'pre_layer' and 'post_layer' are the flow layers of the
-            corresponding nodes.
+            'weight', 'pre_layer', and 'post_layer'. Each row represents an edge in the
+            graph. The 'pre' and 'post' columns refer to the source and target nodes,
+            respectively, and 'weight' indicates the edge weight. 'pre_layer' and
+            'post_layer' are the flow layers of the corresponding nodes.
         figsize (tuple, optional): A tuple indicating the size of the matplotlib figure.
             Defaults to (10, 8).
         weight_decimals (int, optional): The number of decimal places to display for
@@ -682,3 +699,72 @@ def plot_flow_layered_paths(
             fig.savefig(file_name + ".pdf")
             print(f"Graph saved as {file_name}.pdf")
         plt.show()
+
+
+def layered_el(
+    inprop: spmatrix,
+    steps: list,
+    inidx: arrayable,
+    outidx: arrayable,
+    n: int,
+    idx_to_group: dict,
+    threshold: float = 0,
+    flow_steps: int = 20,
+    flow_thre: float = 0.1,
+):
+    """
+    First finds paths within `n` steps, given the `threshold` (applied to direct
+    connections), grouped by `idx_to_group`, and adds flow layers to the edge list based
+    on the information flow hitting time (navis: https://github.com/navis-org/navis).
+
+    Args:
+        inprop (spmatrix): Input sparse matrix representing connections.
+        steps (list): A list of connectivity matrices, e.g. the result from
+            `compress_paths()`.
+        inidx (np.ndarray): Array of input indices.
+        outidx (np.ndarray): Array of output indices.
+        n (int): The maximum number of hops. n=1 for direct connections.
+        idx_to_group (dict): Dictionary mapping cell indices to their respective cell
+            groups.
+        threshold (float): The threshold for the weight of the direct
+            connection between pre and post, after grouping by `idx_to_group`. Defaults
+            to 0.
+    Returns:
+        pd.DataFrame: DataFrame containing the grouped edge list with flow layers.
+    """
+
+    inidx = to_nparray(inidx)
+    outidx = to_nparray(outidx)
+
+    # get edge list, both grouped by idx_to_group, and with raw indices
+    grouped, rawel = el_within_n_steps(
+        inprop,
+        steps,
+        inidx,
+        outidx,
+        n,
+        threshold,
+        idx_to_group,
+        idx_to_group,
+        return_raw_el=True,
+    )
+    rawel["pre_type"] = rawel.pre.map(idx_to_group)
+    rawel["post_type"] = rawel.post.map(idx_to_group)
+    # only keep the neurons in the types that pass the threshold
+    rawel = rawel[rawel.pre_type.isin(grouped.pre) & rawel.post_type.isin(grouped.post)]
+
+    # information flow
+    flow = find_instance_flow(
+        rawel,
+        idx_to_group,
+        set([grp for idx, grp in idx_to_group.items() if idx in inidx]),
+        save_flow=False,
+        flow_steps=flow_steps,
+        flow_thre=flow_thre,
+    )
+    type_layer = dict(zip(flow.cell_group, flow.hitting_time))
+
+    grouped["pre_layer"] = grouped.pre.map(type_layer)
+    grouped["post_layer"] = grouped.post.map(type_layer)
+    grouped.fillna(0, inplace=True)
+    return grouped
