@@ -10,7 +10,8 @@ from scipy.sparse import csc_matrix, csr_matrix, spmatrix
 from scipy.sparse.csgraph import shortest_path
 import networkx as nx
 
-from .utils import to_nparray, el_within_n_steps, arrayable
+from .utils import to_nparray, arrayable
+from .path_finding import el_within_n_steps
 
 
 def compute_flow_hitting_time(
