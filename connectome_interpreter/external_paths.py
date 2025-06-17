@@ -482,7 +482,8 @@ def plot_flow_layered_paths(
         """
         Find positions for the nodes depending on the layer flow.
         """
-        layer_bins = np.arange(-0.5 / 2, np.ceil(max(layers)) + 0.5 / 2, 1 / 2)
+        # +0.5 at the end to make sure the max(layers) is included
+        layer_bins = np.arange(-0.5 / 2, np.ceil(max(layers)) + 0.5, 1 / 2)
         layer_labels = layer_bins[1:] + layer_bins[0]
         layer_binned = pd.cut(layers, bins=layer_bins, labels=layer_labels)
 
@@ -492,10 +493,11 @@ def plot_flow_layered_paths(
             layer = layers[layer_binned == layer_b]
             layer_vertices = vertices[layer_binned == layer_b]
             if len(layer_vertices) > 0:
-                layer_h = height / len(layer_vertices)
+                # +1 so that when there aren't many vertices, they are in the middle
+                layer_h = height / (len(layer_vertices) + 1)
                 for index, v in enumerate(layer_vertices):
                     idx = np.where(vertices == v)[0][0]
-                    xy_pos[idx, 1] = index * layer_h + 0.05
+                    xy_pos[idx, 1] = (index + 1) * layer_h
                     xy_pos[idx, 0] = layer[index] * layer_w - width / 2
 
         positions = dict(zip(vertices, xy_pos))
@@ -536,7 +538,9 @@ def plot_flow_layered_paths(
             layers[index] = path_df[path_df.pre == v].pre_layer.values[0]
         elif v in path_df.post.values:
             layers[index] = path_df[path_df.post == v].post_layer.values[0]
-    positions = find_flow_positions(np.array(list(labels.values())), layers, 1, 1)
+    positions = find_flow_positions(
+        np.array(list(labels.values())), layers, figsize[1] / 10, figsize[0] / 5
+    )
 
     # Default color for nodes if not provided otherwise
     if neuron_to_color is None:
@@ -651,7 +655,7 @@ def plot_flow_layered_paths(
 
     else:
 
-        fig, ax = plt.subplots(figsize=(9, 12))
+        fig, ax = plt.subplots(figsize=figsize)
         nx.draw(
             G,
             pos=positions,
