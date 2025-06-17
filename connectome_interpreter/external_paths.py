@@ -9,6 +9,7 @@ from typing import Optional, Union
 from scipy.sparse import csc_matrix, csr_matrix, spmatrix
 from scipy.sparse.csgraph import shortest_path
 import networkx as nx
+from IPython.display import display, HTML
 
 from .utils import to_nparray, arrayable
 from .path_finding import el_within_n_steps
@@ -578,20 +579,20 @@ def plot_flow_layered_paths(
             ) from e
 
         # create pyvis graph
-        print(f"Store interactive graph as {file_name}" + ".pdf")
         net2 = Network(
             directed=True, layout=False, notebook=True, cdn_resources="in_line"
         )
-        net2.height = figsize[1] * 100
-        net2.width = figsize[0] * 100
+        canvas_h_px = int(figsize[1] * 80)  # tweak the multiplier if needed
+        net2.height = f"{canvas_h_px}px"  # explicit px keeps Colab happy
+        net2.width = "100%"  # stretch side-to-side
         net2.from_nx(G)
 
         node_colors_dict = dict(zip(G.nodes(), node_colors))
         edge_colors_dict = dict(zip(G.edges(), edge_colors))
         for v in net2.nodes:
             v["x"], v["y"] = positions.get(v["id"])
-            v["x"] = v["x"] * net2.width
-            v["y"] = v["y"] * net2.height
+            v["x"] = v["x"] * int(figsize[0] * 80)
+            v["y"] = v["y"] * canvas_h_px
             if node_text:
                 v["label"] = labels[v["id"]]
             else:
@@ -632,8 +633,21 @@ def plot_flow_layered_paths(
         }
         """
         )
-        net2.show(str(file_name) + ".html", notebook=False)
-        print(f"Interactive graph saved as {file_name}.html")
+        if "COLAB_GPU" in os.environ:
+            # display of plot in ipynb only works in colab
+            html = net2.generate_html(notebook=True)
+            if save_plot:
+                with open(f"{file_name}.html", "w") as f:
+                    f.write(html)
+
+            display(HTML(html))
+        else:
+            # if running locally, will just open in browser
+            if save_plot:
+                net2.write_html(str(file_name) + ".html")
+                print(f"Interactive graph saved as {file_name}.html")
+
+            net2.show(str(file_name) + ".html", notebook=False)
 
     else:
 
