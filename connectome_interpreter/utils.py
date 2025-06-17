@@ -855,6 +855,7 @@ def plot_layered_paths(
     node_activation_min: float | None = None,
     node_activation_max: float | None = None,
     edge_text: bool = True,
+    node_text: bool = True,
     highlight_nodes: list[str] = [],
     interactive: bool = False,
     save_plot: bool = False,
@@ -921,6 +922,8 @@ def plot_layered_paths(
             None.
         edge_text (bool, optional): Whether to display edge weights as text on the plot.
             Defaults to True.
+        node_text (bool, optional): Whether to display node names as text on the plot.
+            Defaults to True.
         highlight_nodes (list[str], optional): A list of node names to highlight bold in
             the plot. Defaults to an empty list.
         interactive (bool, optional): Whether to create an interactive plot using pyvis.
@@ -930,7 +933,8 @@ def plot_layered_paths(
             "layered_paths" in the local directory (.html if interactive and .pdf if
             static).
         label_pos (float, optional): The position of the edge labels. Defaults to 0.7.
-            Bigger values move the labels closer to the left of the edge.
+            Bigger values move the labels closer to the left of the edge. 
+            Only works if `interactive` is False.
         default_neuron_color (str, optional): The default color for nodes if no
             specific color is provided in `neuron_to_color`. Defaults to "lightblue".
         default_edge_color (str, optional): The default color for edges if no specific
@@ -939,7 +943,7 @@ def plot_layered_paths(
 
     Returns:
         None: This function does not return a value. It generates a plot using
-            matplotlib.
+            matplotlib or pyvis.
 
     Note:
         If 'pre_layer' and 'post_layer' columns are not in the dataframe, they will be
@@ -954,6 +958,7 @@ def plot_layered_paths(
             for plotting. For interactive plots, it requires the pyvis library (where
             the node label has to be underneath the node).
     """
+
     if paths.shape[0] == 0:
         raise ValueError("The provided DataFrame is empty.")
 
@@ -1153,6 +1158,23 @@ def plot_layered_paths(
                 )
                 edge["font"] = {"size": 18, "face": "arial"}
 
+        # Set physics options for the network with high spring constant
+        # to keep straighter arrows when nodes are moved around
+        net2.set_options("""
+        var options = {
+        "physics": {
+            "enabled": true,
+            "solver": "forceAtlas2Based",
+            "forceAtlas2Based": {
+            "springConstant": 0.1
+            },
+            "minVelocity": 0.1
+        },
+        "nodes": {
+            "physics": false
+        }
+        }
+        """)
         net2.toggle_physics(False)
         # net2.show_buttons(filter_=["node", "edge", "physics"])
 
@@ -1199,9 +1221,10 @@ def plot_layered_paths(
                 pad=pad,
             )
 
-        # label highlighted and normal nodes separately
-        bold_nodes = [n for n in G.nodes() if labels[n] in highlight_nodes]
-        normal_nodes = [n for n in G.nodes() if labels[n] not in highlight_nodes]
+        if node_text:
+            # label highlighted and normal nodes separately
+            bold_nodes = [n for n in G.nodes() if labels[n] in highlight_nodes]
+            normal_nodes = [n for n in G.nodes() if labels[n] not in highlight_nodes]
 
         nx.draw_networkx_labels(
             G,
