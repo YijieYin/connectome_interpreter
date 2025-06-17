@@ -1219,16 +1219,14 @@ def result_summary(
     return result_df
 
 
-def contribution_by_path_lengths(
+def contribution_by_path_lengths_data(
     steps,
     inidx: arrayable,
     outidx: arrayable,
     outidx_map: dict | None = None,
     inidx_map: dict | None = None,
-    width: int = 800,
-    height: int = 400,
 ):
-    """Plots the connection strength from all of inidx (grouped by inidx_map) to an
+    """Calculates the contribution from all of inidx (grouped by inidx_map) to an
     average outidx (grouped by outidx_map) over different path lengths. Either inidx_map
     or outidx_map, but not both, should be provided. If neither is provided, presynaptic
     neurons are grouped together. Direct connections are in path_length 1.
@@ -1244,15 +1242,12 @@ def contribution_by_path_lengths(
             of inidx_map and outidx_map should be specified.
         inidx_map (dict): Mapping from indices to presynaptic neuron groups. Only one of
             inidx_map and outidx_map should be specified.
-        width (int, optional): The width of the plot. Defaults to 800.
-        height (int, optional): The height of the plot. Defaults to 400.
 
     Returns:
-        None: Displays an interactive line plot showing the connection strength from all
-            of inidx to an average outidx over different path lengths.
-
+        pd.DataFrame: A DataFrame containing the contributions from presynaptic neurons
+            to postsynaptic neurons over different path lengths. The DataFrame has three
+            columns: 'path_length', 'presynaptic_type' (or 'postsynaptic_type'), and 'value'.
     """
-
     # remove nan values in inidx and outidx
     inidx = to_nparray(inidx)
     outidx = to_nparray(outidx)
@@ -1312,6 +1307,49 @@ def contribution_by_path_lengths(
     else:
         contri.columns = ["path_length", "postsynaptic_type", "value"]
     contri.path_length = contri.path_length + 1
+    return contri
+
+
+def contribution_by_path_lengths(
+    steps,
+    inidx: arrayable,
+    outidx: arrayable,
+    outidx_map: dict | None = None,
+    inidx_map: dict | None = None,
+    width: int = 800,
+    height: int = 400,
+):
+    """Plots the connection strength from all of inidx (grouped by inidx_map) to an
+    average outidx (grouped by outidx_map) over different path lengths. Either inidx_map
+    or outidx_map, but not both, should be provided. If neither is provided, presynaptic
+    neurons are grouped together. Direct connections are in path_length 1.
+
+    Args:
+        steps (list of scipy.sparse matrices or numpy.array): List of sparse matrices,
+            each representing synaptic strengths for a specific path length.
+        inidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of indices
+            representing input (presynaptic) neurons.
+        outidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of
+            indices representing output (postsynaptic) neurons.
+        outidx_map (dict): Mapping from indices to postsynaptic neuron groups. Only one
+            of inidx_map and outidx_map should be specified.
+        inidx_map (dict): Mapping from indices to presynaptic neuron groups. Only one of
+            inidx_map and outidx_map should be specified.
+        width (int, optional): The width of the plot. Defaults to 800.
+        height (int, optional): The height of the plot. Defaults to 400.
+
+    Returns:
+        None: Displays an interactive line plot showing the connection strength from all
+            of inidx to an average outidx over different path lengths.
+
+    """
+    contri = contribution_by_path_lengths_data(
+        steps,
+        inidx,
+        outidx,
+        outidx_map=outidx_map,
+        inidx_map=inidx_map,
+    )
 
     fig = px.line(
         contri,
@@ -1385,26 +1423,6 @@ def contribution_by_path_lengths_heatmap(
     if outidx_map is None:
         outidx_map = inidx_map
 
-    def plot_heatmap(index):
-        plt.figure(figsize=figsize)
-        # plt.imshow(heatmaps[index], cmap='viridis', aspect = 'auto')
-        # Use seaborn's heatmap function which is a higher-level API for
-        # Matplotlib's imshow
-        sns.heatmap(
-            heatmaps[index - 1],
-            annot=True,
-            fmt=".2f",
-            linewidths=0.5,
-            cmap=cmap,
-        )
-
-        # Rotate the tick labels for the columns to show them better
-        plt.xticks(rotation=90)
-        plt.yticks(rotation=0)
-
-        # Show the heatmap
-        plt.show()
-
     heatmaps = []
 
     for step in tqdm(steps):
@@ -1431,6 +1449,26 @@ def contribution_by_path_lengths_heatmap(
         description="Path length",
         continuous_update=True,
     )
+
+    def plot_heatmap(index):
+        plt.figure(figsize=figsize)
+        # plt.imshow(heatmaps[index], cmap='viridis', aspect = 'auto')
+        # Use seaborn's heatmap function which is a higher-level API for
+        # Matplotlib's imshow
+        sns.heatmap(
+            heatmaps[index - 1],
+            annot=True,
+            fmt=".2f",
+            linewidths=0.5,
+            cmap=cmap,
+        )
+
+        # Rotate the tick labels for the columns to show them better
+        plt.xticks(rotation=90)
+        plt.yticks(rotation=0)
+
+        # Show the heatmap
+        plt.show()
 
     # Link the slider to the plotting function
     display(widgets.interactive(plot_heatmap, index=slider))
