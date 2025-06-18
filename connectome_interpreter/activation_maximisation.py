@@ -414,22 +414,20 @@ class MultilayeredNetwork(nn.Module):
             # turn to the same shape as x
             slopes = torch.full(x_previous.shape, slopes, device=x_previous.device)
 
+        slopes = slopes.clone()  # ← clone here to break any aliasing but keep grad_fn
+
         for i, (apost, apre) in enumerate(self.divnorm_indices.T):
-            # max between 0, and slopes * (1 - weight * pre_activation * divisive_strength)
-            slopes[apost] = max(
-                0,
-                slopes[apost]
-                * (
-                    1
-                    # used + because the weights are negative
-                    + self.divnorm_weights[
-                        i
-                    ]  # weight between pre (divisive norm) and post
-                    * x_previous[apre]  # activation of pre
-                    * self.type2div_strength[
-                        self.idx_to_group[int(apre.cpu().numpy())]
-                    ]  # divisive strength for this pre
-                ),
+            new_slope = slopes[apost] * (
+                1
+                # used + because the weights are negative
+                + self.divnorm_weights[i]  # weight between pre (divisive norm) and post
+                * x_previous[apre]  # activation of pre
+                * self.type2div_strength[
+                    self.idx_to_group[int(apre.cpu().numpy())]
+                ]  # divisive strength for this pre
+            )
+            slopes[apost] = torch.max(
+                torch.tensor(0.0, device=slopes.device), new_slope
             )
 
         return slopes
