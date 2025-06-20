@@ -216,7 +216,7 @@ def hex_heatmap(
             mode="markers",
             marker_symbol=symbol_number,
             customdata=np.stack([x_vals, y_vals, aseries.values], axis=-1),
-            hovertemplate="x: %{customdata[0]}<br>y: %{customdata[1]}<br>value: %{customdata[2]}",
+            hovertemplate="x: %{customdata[0]}<br>y: %{customdata[1]}<br>effective weight: %{customdata[2]:.4f}",
             marker={
                 "cmin": global_min,
                 "cmax": global_max,
@@ -554,7 +554,7 @@ def make_sine_stim(phase=0, amplitude=1, n=8):
 def plot_mollweide_projection(
     data: pd.Series | pd.DataFrame,
     fig_size: tuple = (900, 700),
-    custom_colorscale: str = "Viridis",
+    custom_colorscale: list | None = None,
     global_min: float | None = None,
     global_max: float | None = None,
     dataset: str = "Zhao2024",
@@ -688,13 +688,17 @@ def plot_mollweide_projection(
                 cmax=global_max,
                 size=marker_size,
                 colorbar=dict(
-                    title=dict(text=column_name if column_name else "Value", side="right"),
+                    title=dict(text="effective weight", side="right"),
                 ),
             ),
             customdata=np.stack([x_coords, y_coords, series_data.values], axis=-1),
-            hovertemplate="x: %{customdata[0]}<br>y: %{customdata[1]}<br>value: %{customdata[2]}<extra></extra>",
+            hovertemplate="x: %{customdata[0]:.2f}<br>y: %{customdata[1]:.2f}<br>effective weight: %{customdata[2]:.4f}<extra></extra>",
             showlegend=False,
         )
+
+    # Default colorscale
+    if custom_colorscale is None:
+        custom_colorscale = [[0, "rgb(255, 255, 255)"], [1, "rgb(0, 20, 200)"]]
 
     # Clean data - remove NaN indices
     data = data[(data.index != "nan") & (~data.index.isnull())]
@@ -761,7 +765,7 @@ def plot_mollweide_projection(
 
             # Create frame data (guidelines + data scatter)
             frame_traces = guidelines + [
-                create_data_scatter(series, x_mollweide, y_mollweide, col_name)
+                create_data_scatter(series, x_mollweide, y_mollweide)
             ]
             frames.append(go.Frame(data=frame_traces, name=str(i)))
 
