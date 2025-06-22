@@ -491,9 +491,10 @@ def remove_excess_neurons(
                 ]
 
                 if df_layer.shape[0] == 0:
-                    raise ValueError(
+                    print(
                         "No path found. Try lowering the threshold for the edges to be included in the path."
                     )
+                    return
                 df_layers_update.append(df_layer)
 
                 if i == (df.local_layer.max() - 1):
@@ -514,9 +515,8 @@ def remove_excess_neurons(
 
         # at this point, if no edges left: raise error
         if df.shape[0] == 0:
-            raise ValueError(
-                "No path found. Try relaxing the criteria for edge inclusion."
-            )
+            print("No path found. Try relaxing the criteria for edge inclusion.")
+            return
 
     df.drop(columns="local_layer", inplace=True)
 
