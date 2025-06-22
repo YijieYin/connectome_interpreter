@@ -1,6 +1,7 @@
 import io
 import pkgutil
 import os
+from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -123,13 +124,13 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
 
 def hex_heatmap(
     df: pd.Series | pd.DataFrame,
-    style: dict | None = None,
-    sizing: dict | None = None,
+    style: Optional[dict] = None,
+    sizing: Optional[dict] = None,
     dpi: int = 72,
-    custom_colorscale: list | None = None,
-    global_min: float | None = None,
-    global_max: float | None = None,
-    dataset: str | None = "mcns_right",
+    custom_colorscale: Optional[Union[list, str]] = None,
+    global_min: Optional[float] = None,
+    global_max: Optional[float] = None,
+    dataset: Optional[str] = "mcns_right",
 ) -> go.Figure:
     """
     Generate a hexagonal heat map plot of the data. The index of the data
@@ -216,7 +217,7 @@ def hex_heatmap(
             mode="markers",
             marker_symbol=symbol_number,
             customdata=np.stack([x_vals, y_vals, aseries.values], axis=-1),
-            hovertemplate="x: %{customdata[0]}<br>y: %{customdata[1]}<br>effective weight: %{customdata[2]:.4f}",
+            hovertemplate="x: %{customdata[0]}<br>y: %{customdata[1]}<br>weight: %{customdata[2]:.4f}",
             marker={
                 "cmin": global_min,
                 "cmax": global_max,
@@ -554,9 +555,9 @@ def make_sine_stim(phase=0, amplitude=1, n=8):
 def plot_mollweide_projection(
     data: pd.Series | pd.DataFrame,
     fig_size: tuple = (900, 700),
-    custom_colorscale: list | None = None,
-    global_min: float | None = None,
-    global_max: float | None = None,
+    custom_colorscale: Optional[Union[list, str]] = None,
+    global_min: Optional[float] = None,
+    global_max: Optional[float] = None,
     dataset: str = "Zhao2024",
     marker_size: int = 8,
 ) -> go.Figure:
@@ -570,7 +571,9 @@ def plot_mollweide_projection(
             number is the y-coordinate. The data to plot. Each column will generate a
             separate frame in the plot.
         fig_size (tuple): Size of the figure in pixels (width, height).
-        custom_colorscale (str): Name of the Plotly colorscale to use.
+        custom_colorscale (list | str, optional): Custom colorscale for the heatmap. If
+            None, defaults to white-to-blue colorscale [[0, "rgb(255, 255, 255)"],
+            [1, "rgb(0, 20, 200)"]]. Could also be a string e.g. 'Viridis' or 'Reds'.
         global_min (float | None): Global minimum value for the color scale. If this
             minumum is >0, 0 is used.
         global_max (float | None): Global maximum value for the color scale. If None,
@@ -688,11 +691,11 @@ def plot_mollweide_projection(
                 cmax=global_max,
                 size=marker_size,
                 colorbar=dict(
-                    title=dict(text="effective weight", side="right"),
+                    title=dict(text="weight", side="right"),
                 ),
             ),
             customdata=np.stack([x_coords, y_coords, series_data.values], axis=-1),
-            hovertemplate="x: %{customdata[0]:.2f}<br>y: %{customdata[1]:.2f}<br>effective weight: %{customdata[2]:.4f}<extra></extra>",
+            hovertemplate="x: %{customdata[0]:.2f}<br>y: %{customdata[1]:.2f}<br>weight: %{customdata[2]:.4f}<extra></extra>",
             showlegend=False,
         )
 
