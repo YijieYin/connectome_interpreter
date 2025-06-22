@@ -60,8 +60,9 @@ def compress_paths(
             matrix multiplication.
         root (bool): If True, take the n-th root of the result in output.
         chunkSize (int): Size of the chunks to process at a time. This determines
-            the memory usage (on GPU if available). e.g. it might need A + (A.shape[0] *
-            chunkSize) * float32 / 8 btes.
+            the memory usage (on GPU if available). It needs < 3 times the size of the
+            dense chunk which is `A.shape[0] * chunkSize * float32 / 8 bit per byte`
+            bytes.
         device (torch.device): Device to use for computation. Uses GPU if available.
         save_to_disk (bool): If True, save the results to disk.
         save_path (str): Path to save the results.
@@ -165,8 +166,9 @@ def compress_paths(
                 )
 
             # Apply output threshold and collect non-zero entries
-            mask = torch.abs(result) > output_threshold
-            chunk_rows, chunk_cols = torch.nonzero(mask, as_tuple=True)
+            chunk_rows, chunk_cols = torch.nonzero(
+                torch.abs(result) > output_threshold, as_tuple=True
+            )
 
             # Get values based on whether root was applied
             chunk_data: npt.NDArray
@@ -177,10 +179,12 @@ def compress_paths(
                     .numpy()
                     .astype(output_dtype)
                 )
+                del result_root
             else:
                 chunk_data = (
                     result[chunk_rows, chunk_cols].cpu().numpy().astype(output_dtype)
                 )
+            torch.cuda.empty_cache()
 
             # Convert to CPU
             chunk_cols: npt.NDArray = chunk_cols.cpu().numpy()
@@ -207,7 +211,7 @@ def compress_paths(
                 )
 
         # Clear memory
-        del result, mask, chunk_rows, chunk_cols, chunk_data
+        del result, chunk_rows, chunk_cols, chunk_data
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -680,10 +684,12 @@ def compress_paths_signed(
                 torch.cuda.empty_cache()
 
             # Convert to csc for output
-            mask_e = torch.abs(dense_e) > output_threshold
-            mask_i = torch.abs(dense_i) > output_threshold
-            chunk_rows_e, chunk_cols_e = torch.nonzero(mask_e, as_tuple=True)
-            chunk_rows_i, chunk_cols_i = torch.nonzero(mask_i, as_tuple=True)
+            chunk_rows_e, chunk_cols_e = torch.nonzero(
+                torch.abs(dense_e) > output_threshold, as_tuple=True
+            )
+            chunk_rows_i, chunk_cols_i = torch.nonzero(
+                torch.abs(dense_i) > output_threshold, as_tuple=True
+            )
             if root:
                 chunk_data_e = (
                     (
