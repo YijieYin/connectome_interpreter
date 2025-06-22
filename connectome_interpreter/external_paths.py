@@ -63,6 +63,9 @@ def compute_flow_hitting_time(
             "Input must be a sparse matrix or a DataFrame with columns 'pre', 'post', and 'weight'."
         )
 
+    print(
+        f"Computing hitting time for {len(set(coo.row)|set(coo.col))} cells... May take a while."
+    )
     edges = conn_df[["pre", "post", "weight"]]
     edges.columns = ["source", "target", "weight"]
     model = BayesianTraversalModel(
@@ -154,12 +157,9 @@ def find_instance_flow(
     )
     if os.path.exists(flow_file_name):
         flow_df = pd.read_csv(flow_file_name)
-        # map idx to cell group
-        flow_df["cell_group"] = flow_df["idx"].map(idx_to_group)
+        if "cell_group" not in flow_df.columns:
+            flow_df["cell_group"] = flow_df["idx"].map(idx_to_group)
     else:
-        print(
-            f"Computing hitting time for {len(idx_to_group)} cells... May take a while."
-        )
         # if file_path doesn't exist, create it
         if not os.path.exists(file_path):
             os.makedirs(file_path)
@@ -679,7 +679,7 @@ def plot_flow_layered_paths(
                 G,
                 pos=positions,
                 labels={n: labels[n] for n in normal_nodes},
-                font_family="arial",
+                font_family="sans-serif",
                 font_weight="normal",
                 font_size=14,
                 ax=ax,
@@ -688,7 +688,7 @@ def plot_flow_layered_paths(
                 G,
                 pos=positions,
                 labels={n: labels[n] for n in bold_nodes},
-                font_family="arial",
+                font_family="sans-serif",
                 font_weight="bold",
                 font_size=14,
                 ax=ax,
@@ -730,6 +730,7 @@ def layered_el(
     threshold: float = 0,
     flow_steps: int = 20,
     flow_thre: float = 0.1,
+    flow: pd.DataFrame | None = None,
 ):
     """
     First finds paths within `n` steps, given the `threshold` (applied to direct
@@ -748,6 +749,12 @@ def layered_el(
         threshold (float): The threshold for the weight of the direct
             connection between pre and post, after grouping by `idx_to_group`. Defaults
             to 0.
+        flow_steps (int): Number of steps for flow calculation. Defaults to 20.
+        flow_thre (float): Threshold for flow calculation. Defaults to 0.1.
+        flow (pd.DataFrame, optional): DataFrame containing the flow hitting time.
+            If provided, it should have columns 'cell_group' and 'hitting_time'.
+            If None, the flow hitting time is computed from `inprop` and `idx_to_group`.
+
     Returns:
         pd.DataFrame: DataFrame containing the grouped edge list with flow layers.
     """
@@ -773,14 +780,24 @@ def layered_el(
     rawel = rawel[rawel.pre_type.isin(grouped.pre) & rawel.post_type.isin(grouped.post)]
 
     # information flow
-    flow = find_instance_flow(
-        rawel,
-        idx_to_group,
-        set([grp for idx, grp in idx_to_group.items() if idx in inidx]),
-        save_flow=False,
-        flow_steps=flow_steps,
-        flow_thre=flow_thre,
-    )
+    if flow is None:
+        # compute flow hitting time
+        flow = find_instance_flow(
+            rawel,
+            idx_to_group,
+            set([grp for idx, grp in idx_to_group.items() if idx in inidx]),
+            save_flow=False,
+            flow_steps=flow_steps,
+            flow_thre=flow_thre,
+        )
+    else:
+        # use provided flow hitting time
+        if not isinstance(flow, pd.DataFrame):
+            raise TypeError("Flow must be a pandas DataFrame.")
+        if "cell_group" not in flow.columns or "hitting_time" not in flow.columns:
+            raise ValueError(
+                "Flow DataFrame must contain 'cell_group' and 'hitting_time' columns."
+            )
     type_layer = dict(zip(flow.cell_group, flow.hitting_time))
 
     grouped["pre_layer"] = grouped.pre.map(type_layer)

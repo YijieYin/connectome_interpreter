@@ -1,6 +1,7 @@
 import io
 import pkgutil
 import os
+from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -123,13 +124,14 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
 
 def hex_heatmap(
     df: pd.Series | pd.DataFrame,
-    style: dict | None = None,
-    sizing: dict | None = None,
+    style: Optional[dict] = None,
+    sizing: Optional[dict] = None,
     dpi: int = 72,
-    custom_colorscale: list | None = None,
-    global_min: float | None = None,
-    global_max: float | None = None,
-    dataset: str | None = "mcns_right",
+    custom_colorscale: Optional[Union[list, str]] = None,
+    global_min: Optional[float] = None,
+    global_max: Optional[float] = None,
+    dataset: Optional[str] = "mcns_right",
+    value_name: str = "weight",
 ) -> go.Figure:
     """
     Generate a hexagonal heat map plot of the data. The index of the data
@@ -137,18 +139,18 @@ def hex_heatmap(
     number is the x-coordinate and the second number is the y-coordinate.
 
     Args:
-        df : pd.Series | pd.DataFrame
-            The data to plot. Each column will generate a separate frame in
-            the plot.
-        style : dict, default=None
-            Dict containing styling formatting variables. Possible keys are:
+        df (pd.Series | pd.DataFrame): The data to plot. If a Series, it will be plotted
+            as a single trace. If a DataFrame, each column will generate a separate
+            frame in the plot.
+        style (Optional[dict]): Dict containing styling formatting variables. Possible
+            keys are:
 
                 - 'font_type': str, default='arial'
                 - 'linecolor': str, default='black'
                 - 'papercolor': str, default='rgba(255,255,255,255)' (white)
 
-        sizing : dict, default=None
-            Dict containing size formatting variables. Possible keys are:
+        sizing (Optional[dict]): Dict containing size formatting variables. Possible
+            keys are:
 
                 - 'fig_width': int, default=260 (mm)
                 - 'fig_height': int, default=220 (mm)
@@ -163,20 +165,17 @@ def hex_heatmap(
                 - 'cbar_thickness': int, default=20
                 - 'cbar_len': float, default=0.75
 
-        dpi : int, default=72
-            Dots per inch for the output figure. Standard is 72 for screen/SVG/PDF.
+        dpi (int): Dots per inch for the output figure. Standard is 72 for screen/SVG/PDF.
             Use higher values (e.g., 300) for print-quality output.
-        custom_colorscale : list, default=None
-            Custom colorscale for the heatmap. If None, defaults to white-to-blue
-            colorscale [[0, "rgb(255, 255, 255)"], [1, "rgb(0, 20, 200)"]].
-        global_min : float, default=None
-            Global minimum value for the color scale.
-            If None, the minimum value of the data is used but if that is negative, use 0.
-        global_max : float, default=None
-            Global maximum value for the color scale.
-            If None, the maximum value of the data is used.
-        dataset : str, default='mcns_right'
-            The dataset to use for the hexagon locations. Options are:
+        custom_colorscale (Optional[Union[list, str]]): Custom colorscale for the
+            heatmap. If None, defaults to white-to-blue colorscale [[0, "rgb(255, 255,
+            255)"], [1, "rgb(0, 20, 200)"]].
+        global_min (Optional[float]): Global minimum value for the color scale. If None,
+            the minimum value of the data is used but if that is negative, use 0.
+        global_max (Optional[float]): Global maximum value for the color scale. If None,
+            the maximum value of the data is used.
+        dataset (str): Default='mcns_right'. The dataset to use for the hexagon
+            locations. Options are:
 
                 - 'mcns_right': columnar coordinates of individual cells from columnar cell types: L1, L2, L3, L5, Mi1, Mi4, Mi9, C2, C3, Tm1, Tm2, Tm4, Tm9, Tm20, T1, within the medulla of the right optic lobe, from Nern et al. 2024.
                 - 'fafb_right': columnar coordinates of individual cells from columnar cell types, in the right optic lobe of FAFB, from Matsliah et al. 2024.
@@ -216,7 +215,8 @@ def hex_heatmap(
             mode="markers",
             marker_symbol=symbol_number,
             customdata=np.stack([x_vals, y_vals, aseries.values], axis=-1),
-            hovertemplate="x: %{customdata[0]}<br>y: %{customdata[1]}<br>value: %{customdata[2]}",
+            hovertemplate="x: %{customdata[0]}<br>y: %{customdata[1]}<br>%{text}: %{customdata[2]:.4f}",
+            text=[value_name] * len(aseries),
             marker={
                 "cmin": global_min,
                 "cmax": global_max,
@@ -554,11 +554,12 @@ def make_sine_stim(phase=0, amplitude=1, n=8):
 def plot_mollweide_projection(
     data: pd.Series | pd.DataFrame,
     fig_size: tuple = (900, 700),
-    custom_colorscale: str = "Viridis",
-    global_min: float | None = None,
-    global_max: float | None = None,
+    custom_colorscale: Optional[Union[list, str]] = None,
+    global_min: Optional[float] = None,
+    global_max: Optional[float] = None,
     dataset: str = "Zhao2024",
     marker_size: int = 8,
+    value_name: str = "weight",
 ) -> go.Figure:
     """
     Generates a heatmap to visualize the value of column features per column using the
@@ -570,7 +571,9 @@ def plot_mollweide_projection(
             number is the y-coordinate. The data to plot. Each column will generate a
             separate frame in the plot.
         fig_size (tuple): Size of the figure in pixels (width, height).
-        custom_colorscale (str): Name of the Plotly colorscale to use.
+        custom_colorscale (list | str, optional): Custom colorscale for the heatmap. If
+            None, defaults to white-to-blue colorscale [[0, "rgb(255, 255, 255)"],
+            [1, "rgb(0, 20, 200)"]]. Could also be a string e.g. 'Viridis' or 'Reds'.
         global_min (float | None): Global minimum value for the color scale. If this
             minumum is >0, 0 is used.
         global_max (float | None): Global maximum value for the color scale. If None,
@@ -688,13 +691,18 @@ def plot_mollweide_projection(
                 cmax=global_max,
                 size=marker_size,
                 colorbar=dict(
-                    title=dict(text=column_name if column_name else "Value", side="right"),
+                    title=dict(text=value_name, side="right"),
                 ),
             ),
             customdata=np.stack([x_coords, y_coords, series_data.values], axis=-1),
-            hovertemplate="x: %{customdata[0]}<br>y: %{customdata[1]}<br>value: %{customdata[2]}<extra></extra>",
+            hovertemplate="x: %{customdata[0]:.2f}<br>y: %{customdata[1]:.2f}<br>%{text}: %{customdata[2]:.4f}<extra></extra>",
+            text=[value_name] * len(series_data),
             showlegend=False,
         )
+
+    # Default colorscale
+    if custom_colorscale is None:
+        custom_colorscale = [[0, "rgb(255, 255, 255)"], [1, "rgb(0, 20, 200)"]]
 
     # Clean data - remove NaN indices
     data = data[(data.index != "nan") & (~data.index.isnull())]
@@ -761,7 +769,7 @@ def plot_mollweide_projection(
 
             # Create frame data (guidelines + data scatter)
             frame_traces = guidelines + [
-                create_data_scatter(series, x_mollweide, y_mollweide, col_name)
+                create_data_scatter(series, x_mollweide, y_mollweide)
             ]
             frames.append(go.Frame(data=frame_traces, name=str(i)))
 

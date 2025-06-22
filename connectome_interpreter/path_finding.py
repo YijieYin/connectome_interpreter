@@ -219,10 +219,9 @@ def find_path_iteratively(
 
         # If no indices are found, break the loop as no path can be formed
         if len(df) == 0:
-            print(
-                "Cannot trace back to the input :(. Try providing a bigger "
-                "top_n value, or a lower threshold?"
-            )
+            print(f"Cannot trace back to the input in {target_layer_number} steps.")
+            if (top_n > -1)| (threshold > 0):
+                print("Try lowering the threshold or increasing top_n.")
             return
 
         df["layer"] = layer
@@ -1183,7 +1182,7 @@ def el_within_n_steps(
     """
     Find paths within a specified number of steps in a directed graph, starting from
     input indices and ending at output indices. The unique edges are returned. Filtering
-    by `threshold` happens after grouping if `idx_to_group` is provided.
+    by `threshold` happens after grouping if `pre_group` and `post_group` are provided.
 
     Args:
         inprop (spmatrix): The connectivity matrix, with presynaptic in the rows.
@@ -1194,7 +1193,9 @@ def el_within_n_steps(
         n (int): The maximum number of hops. n=1 for direct connections.
         threshold (float, optional): The threshold for the weight of the direct
             connection between pre and post. Defaults to 0.
-        idx_to_group (dict, optional): A dictionary mapping neuron indices to
+        pre_group (dict, optional): A dictionary mapping pre neuron indices to
+            their respective groups. Defaults to None.
+        post_group (dict, optional): A dictionary mapping post neuron indices to
             their respective groups. Defaults to None.
 
     Returns:
