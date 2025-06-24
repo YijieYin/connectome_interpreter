@@ -1178,6 +1178,7 @@ def el_within_n_steps(
     pre_group: dict = None,
     post_group: dict = None,
     return_raw_el: bool = False,
+    combining_method: str = "mean",
 ):
     """
     Find paths within a specified number of steps in a directed graph, starting from
@@ -1197,7 +1198,11 @@ def el_within_n_steps(
             their respective groups. Defaults to None.
         post_group (dict, optional): A dictionary mapping post neuron indices to
             their respective groups. Defaults to None.
-
+        return_raw_el (bool, optional): If True, returns the raw edges before
+            grouping. Defaults to False.
+        combining_method (str, optional): Method to combine inputs (outprop=False)
+            or outputs (outprop=True). Can be 'sum', 'mean', or 'median'. Defaults to
+            'mean'.
     Returns:
         pd.DataFrame: A DataFrame containing the edges of the paths found,
             including columns 'pre', 'post', and 'weight'.
@@ -1215,15 +1220,15 @@ def el_within_n_steps(
         if return_raw_el:
             raw_el.append(paths)
         if pre_group is not None and post_group is not None:
-            paths = group_paths(paths, pre_group, post_group)
+            paths = group_paths(paths, pre_group, post_group, combining_method=combining_method)
         paths = filter_paths(paths, threshold)
         all_paths.append(paths)
     all_paths = pd.concat(all_paths, axis=0)
-    el = all_paths.drop_duplicates(subset=["pre", "post", "weight"])
+    el = all_paths.groupby(["pre", "post"])["weight"].mean().reset_index()
 
     if return_raw_el:
         raw_el = pd.concat(raw_el, axis=0)
-        raw_el = raw_el.drop_duplicates(subset=["pre", "post", "weight"])
-        return el[["pre", "post", "weight"]], raw_el
+        raw_el = raw_el.groupby(["pre", "post"])["weight"].mean().reset_index()
+        return el, raw_el
     else:
-        return el[["pre", "post", "weight"]]
+        return el
