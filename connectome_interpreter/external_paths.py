@@ -64,7 +64,7 @@ def compute_flow_hitting_time(
         )
 
     print(
-        f"Computing hitting time for {len(set(coo.row)|set(coo.col))} cells... May take a while."
+        f"Computing hitting time for {len(set(conn_df.pre)|set(conn_df.post))} cells... May take a while."
     )
     edges = conn_df[["pre", "post", "weight"]]
     edges.columns = ["source", "target", "weight"]
