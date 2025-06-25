@@ -10,6 +10,10 @@ import torch.nn as nn
 from tqdm import tqdm
 from scipy import sparse
 from scipy.sparse import coo_matrix
+import plotly.graph_objects as go
+from plotly.colors import qualitative
+import plotly.colors
+
 
 from .compress_paths import result_summary
 from .utils import (
@@ -1934,3 +1938,348 @@ def activity_by_column(
     )
 
     return column_acts
+
+
+def plot_activity_by_column(
+    activity,
+    idx_to_group: dict,
+    idx_to_column: dict,
+    selected_group: arrayable,
+    plot_type: str = "line",
+    model_input: Optional[Union[np.ndarray, torch.Tensor]] = None,
+    sensory_indices: Optional[arrayable] = None,
+    figsize: tuple = (800, 600),
+    global_min: Optional[float] = None,
+    global_max: Optional[float] = None,
+):
+    """
+    Take output from `activity_by_column()` and plot the activity per neuron group, per
+    time step, per column. The x axis is the normalised column, normalised within each
+    neuron group.
+
+    Args:
+        activity (torch.Tensor | numpy.ndarray): The activity of the model. Shape should
+            be (num_neurons, num_timepoints).
+        idx_to_group (dict): A dictionary mapping indices from the model to the groups
+            of interest (e.g. cell type). max(idx_to_group.keys()) should be equal to
+            number of units in the model.
+        idx_to_column (dict): A dictionary mapping indices from the model to the columns
+            of interest (e.g. column in the central complex).
+        selected_group (arrayable): The groups to select from the activity. This should
+            be a list of groups that are present in `idx_to_group.values()`.
+        plot_type (str, optional): The type of plot to create. Can be either 'scatter'
+            or 'line'. Defaults to 'line'.
+        model_input (numpy.ndarray | torch.Tensor, optional): The input to the model.
+            Shape should be (num_neurons, num_timepoints). If provided, the first
+            timepoint of model_input is also included in the output dataframe
+            (time_step = 0). Defaults to None.
+        sensory_indices (arrayable, optional): The indices of sensory neurons.
+            If provided, it should be a list of indices that are present in
+            `idx_to_group`. If provided, it must also be provided with `model_input`.
+            Defaults to None.
+        figsize (tuple, optional): The size of the figure in pixels. Defaults to (800,
+            600).
+        global_min (float, optional): The minimum value for the y-axis. If None, the
+            minimum value is set to the smaller of 0, and the minimum activation value
+            across all groups and time steps. Defaults to None.
+        global_max (float, optional): The maximum value for the y-axis. If None, the
+            maximum value is set to the bigger of 1, and the maximum activation value
+            across all groups and time steps. Defaults to None.
+
+    Returns:
+        plotly.graph_objects.Figure: A Plotly figure object.
+    """
+
+    column_acts = activity_by_column(
+        activity,
+        idx_to_group,
+        idx_to_column,
+        selected_group,
+        model_input=model_input,
+        sensory_indices=sensory_indices,
+    )
+
+    # Get unique values
+    unique_groups = column_acts["cell_group"].unique()
+    unique_times = sorted(column_acts["time_step"].unique())
+
+    # Create color mapping
+    colors = plotly.colors.qualitative.Plotly[: len(unique_groups)]
+    color_map = {group: colors[i] for i, group in enumerate(unique_groups)}
+
+    # Create figure
+    fig = go.Figure()
+
+    # Add traces for each time step and group combination
+    for time_step in unique_times:
+        time_data = column_acts[column_acts["time_step"] == time_step]
+
+        for group in unique_groups:
+            group_data = time_data[time_data["cell_group"] == group]
+
+            if plot_type == "scatter":
+                fig.add_trace(
+                    go.Scatter(
+                        x=group_data["normalised_column"],
+                        y=group_data["activation"],
+                        mode="markers",
+                        name=group,
+                        legendgroup=group,  # Group legend entries
+                        showlegend=True,
+                        visible=bool(
+                            time_step == unique_times[0]
+                        ),  # Convert to Python bool
+                        marker=dict(color=color_map[group], size=8),
+                    )
+                )
+            else:  # line
+                fig.add_trace(
+                    go.Scatter(
+                        x=group_data["normalised_column"],
+                        y=group_data["activation"],
+                        mode="lines+markers",
+                        name=group,
+                        legendgroup=group,
+                        showlegend=True,
+                        visible=bool(
+                            time_step == unique_times[0]
+                        ),  # Convert to Python bool
+                        line=dict(color=color_map[group]),
+                        marker=dict(size=6),
+                    )
+                )
+
+    # Create slider steps
+    steps = []
+    for i, time_step in enumerate(unique_times):
+        step = dict(
+            method="update",
+            args=[
+                {"visible": [False] * len(fig.data)},
+                {"title": f"Neural Activity - Time Step: {time_step}"},
+            ],
+            label=str(time_step),
+        )
+
+        # Make traces visible for current time step
+        start_idx = i * len(unique_groups)
+        end_idx = start_idx + len(unique_groups)
+        for j in range(start_idx, end_idx):
+            step["args"][0]["visible"][j] = True
+
+        steps.append(step)
+
+    # Add slider
+    sliders = [
+        dict(
+            active=0, currentvalue={"prefix": "Time Step: "}, pad={"t": 50}, steps=steps
+        )
+    ]
+
+    fig.update_layout(
+        sliders=sliders,
+        title=f"Neural Activity - Time Step: {unique_times[0]}",
+        xaxis_title="Normalised Column",
+        yaxis_title="Activation Value",
+        width=figsize[0],
+        height=figsize[1],
+    )
+    if global_min is None:
+        global_min = min(0, column_acts["activation"].min())
+    if global_max is None:
+        global_max = max(1, column_acts["activation"].max())
+    fig.update_yaxes(range=[global_min, global_max])
+
+    return fig
+
+
+def plot_timeseries(
+    df: pd.DataFrame,
+    style: Optional[dict] = None,
+    sizing: Optional[dict] = None,
+    x_label: str = "Time",
+    y_label: str = "Activation",
+    title: Optional[str] = None,
+    slider_dim: Optional[str] = "batch",
+) -> go.Figure:
+    """
+    Generate an interactive time-series plot of neural activations, based on a dataframe
+    that's like the output of get_neuron_activation().
+
+    If both **'batch_name'** and **'group'** columns exist, the **slider_dim**
+    argument decides which dimension the slider animates over.
+
+    Args:
+        df (pd.DataFrame): Must contain **'group'** plus one or more **'time_*'**
+            columns (e.g. 'time_0', 'time_1' …). A **'batch_name'** column is
+            optional.
+
+        style (Optional[dict]): Plot styling; keys:
+
+            - 'font_type': str, default='Arial'
+            - 'linecolor': str, default='black'
+            - 'papercolor': str, default='rgba(255,255,255,255)'
+
+        sizing (Optional[dict]): Layout sizing; keys (px / pt):
+
+            - 'fig_width': int, default=600
+            - 'fig_height': int, default=400
+            - 'fig_margin': int, default=0
+            - 'fsize_ticks_pt': int, default=12
+            - 'fsize_title_pt': int, default=16
+            - 'markersize': int, default=8
+            - 'ticklen': int, default=5
+            - 'tickwidth': int, default=1
+            - 'axislinewidth': int, default=1.5
+            - 'markerlinewidth': int, default=1
+
+        x_label (str): X-axis label.
+        y_label (str): Y-axis label.
+        title (Optional[str]): Figure title.
+
+        slider_dim (str | None): Dimension for slider if both are present.
+
+            - 'batch' (default): slider toggles **batch_name**, traces coloured by group.
+            - 'group': slider toggles **group**, traces coloured by batch_name.
+            - None: no slider (all traces in one panel).
+
+    Returns:
+        fig (go.Figure)
+    """
+    # ---------- defaults ----------------------------------------------------
+    style_d = {
+        "font_type": "Arial",
+        "linecolor": "black",
+        "papercolor": "rgba(255,255,255,255)",
+    }
+    sizing_d = {
+        "fig_width": 600,
+        "fig_height": 400,
+        "fig_margin": 0,
+        "fsize_ticks_pt": 12,
+        "fsize_title_pt": 16,
+        "markersize": 8,
+        "ticklen": 5,
+        "tickwidth": 1,
+        "axislinewidth": 1.5,
+        "markerlinewidth": 1,
+    }
+    if style:
+        style_d.update(style)
+    if sizing:
+        sizing_d.update(sizing)
+    s, z = style_d, sizing_d
+
+    # ---------- sanity checks ----------------------------------------------
+    time_cols = sorted(
+        [c for c in df.columns if c.startswith("time_")],
+        key=lambda c: int(c.split("_")[1]),
+    )
+    if not time_cols:
+        raise ValueError("No 'time_*' columns found.")
+    if "group" not in df.columns:
+        raise ValueError("'group' column required.")
+
+    has_batch = "batch_name" in df.columns
+    if not has_batch:
+        slider_dim = None  # can't animate over batch without data
+    elif slider_dim not in {"batch", "group", None}:
+        raise ValueError("slider_dim must be 'batch', 'group', or None.")
+
+    x_vals = [int(c.split("_")[1]) for c in time_cols]
+
+    # ---------- figure ------------------------------------------------------
+    fig = go.Figure(
+        layout=dict(
+            width=z["fig_width"],
+            height=z["fig_height"] + (100 if slider_dim else 0),
+            margin=dict(l=50, r=20, t=(60 if title else 20), b=50 + z["fig_margin"]),
+            paper_bgcolor=s["papercolor"],
+            plot_bgcolor=s["papercolor"],
+            font=dict(family=s["font_type"], size=z["fsize_ticks_pt"]),
+            xaxis=dict(
+                title=x_label,
+                linecolor=s["linecolor"],
+                linewidth=z["axislinewidth"],
+                ticklen=z["ticklen"],
+                tickwidth=z["tickwidth"],
+            ),
+            yaxis=dict(
+                title=y_label,
+                linecolor=s["linecolor"],
+                linewidth=z["axislinewidth"],
+                ticklen=z["ticklen"],
+                tickwidth=z["tickwidth"],
+            ),
+            title=(
+                dict(text=title, x=0.5, font=dict(size=z["fsize_title_pt"]))
+                if title
+                else None
+            ),
+            showlegend=True,
+            legend=dict(borderwidth=0),
+            sliders=[],
+        )
+    )
+
+    # ---------- helper ------------------------------------------------------
+    def make_trace(name, y, color_i):
+        return go.Scatter(
+            x=x_vals,
+            y=y,
+            mode="lines+markers",
+            name=str(name),
+            legendgroup=str(name),
+            line=dict(
+                color=qualitative.Plotly[color_i % len(qualitative.Plotly)],
+                width=z["axislinewidth"],
+            ),
+            marker=dict(
+                size=z["markersize"],
+                line=dict(width=z["markerlinewidth"], color=s["linecolor"]),
+            ),
+        )
+
+    # ---------- no slider /  single dim ------------------------------------
+    if slider_dim is None:
+        # colour by group
+        for gi, (grp, gdf) in enumerate(df.groupby("group")):
+            fig.add_trace(make_trace(grp, gdf[time_cols].iloc[0], gi))
+        return fig
+
+    # ---------- slider: batch OR group -------------------------------------
+    outer_key = "batch_name" if slider_dim == "batch" else "group"
+    inner_key = "group" if slider_dim == "batch" else "batch_name"
+
+    frames, steps = [], []
+    for oi, (o_val, outer_df) in enumerate(df.groupby(outer_key)):
+        traces = []
+        for ii, (i_val, inner_df) in enumerate(outer_df.groupby(inner_key)):
+            traces.append(make_trace(i_val, inner_df[time_cols].iloc[0], ii))
+        frames.append(go.Frame(data=traces, name=str(oi)))
+        steps.append(
+            dict(
+                label=o_val,
+                method="animate",
+                args=[
+                    [str(oi)],
+                    {"mode": "immediate", "frame": {"duration": 0, "redraw": True}},
+                ],
+            )
+        )
+        if oi == 0:
+            fig.add_traces(traces)
+
+    fig.frames = frames
+    fig.update_layout(
+        sliders=[
+            dict(
+                active=0,
+                steps=steps,
+                x=0.05,
+                len=0.9,
+                y=-0.08,
+            )
+        ]
+    )
+    return fig

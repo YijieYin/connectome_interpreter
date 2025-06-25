@@ -19,9 +19,6 @@ from IPython.display import display, IFrame, HTML
 from scipy.sparse import coo_matrix, issparse
 import seaborn as sns
 
-import plotly.graph_objects as go
-import plotly.colors
-
 # types that can be made into a numeric numpy array
 arrayable = npt.ArrayLike
 
@@ -933,7 +930,7 @@ def plot_layered_paths(
             "layered_paths" in the local directory (.html if interactive and .pdf if
             static).
         label_pos (float, optional): The position of the edge labels. Defaults to 0.7.
-            Bigger values move the labels closer to the left of the edge. 
+            Bigger values move the labels closer to the left of the edge.
             Only works if `interactive` is False.
         default_neuron_color (str, optional): The default color for nodes if no
             specific color is provided in `neuron_to_color`. Defaults to "lightblue".
@@ -1160,7 +1157,8 @@ def plot_layered_paths(
 
         # Set physics options for the network with high spring constant
         # to keep straighter arrows when nodes are moved around
-        net2.set_options("""
+        net2.set_options(
+            """
         var options = {
         "physics": {
             "enabled": true,
@@ -1174,7 +1172,8 @@ def plot_layered_paths(
             "physics": false
         }
         }
-        """)
+        """
+        )
         net2.toggle_physics(False)
         # net2.show_buttons(filter_=["node", "edge", "physics"])
 
@@ -1949,157 +1948,3 @@ def scipy_sparse_to_pytorch(
     shape = torch.Size(coo.shape)
 
     return torch.sparse_coo_tensor(indices, values, shape, device=device)
-
-
-def plot_activity_by_column(
-    activity,
-    idx_to_group: dict,
-    idx_to_column: dict,
-    selected_group: arrayable,
-    plot_type: str = "line",
-    model_input: Optional[Union[np.ndarray, torch.Tensor]] = None,
-    sensory_indices: Optional[arrayable] = None,
-    figsize: tuple = (800, 600),
-    global_min: Optional[float] = None,
-    global_max: Optional[float] = None,
-):
-    """
-    Take output from `activity_by_column()` and plot the activity per neuron group, per
-    time step, per column. The x axis is the normalised column, normalised within each
-    neuron group.
-
-    Args:
-        activity (torch.Tensor | numpy.ndarray): The activity of the model. Shape should
-            be (num_neurons, num_timepoints).
-        idx_to_group (dict): A dictionary mapping indices from the model to the groups
-            of interest (e.g. cell type). max(idx_to_group.keys()) should be equal to
-            number of units in the model.
-        idx_to_column (dict): A dictionary mapping indices from the model to the columns
-            of interest (e.g. column in the central complex).
-        selected_group (arrayable): The groups to select from the activity. This should
-            be a list of groups that are present in `idx_to_group.values()`.
-        plot_type (str, optional): The type of plot to create. Can be either 'scatter'
-            or 'line'. Defaults to 'line'.
-        model_input (numpy.ndarray | torch.Tensor, optional): The input to the model.
-            Shape should be (num_neurons, num_timepoints). If provided, the first
-            timepoint of model_input is also included in the output dataframe
-            (time_step = 0). Defaults to None.
-        sensory_indices (arrayable, optional): The indices of sensory neurons.
-            If provided, it should be a list of indices that are present in
-            `idx_to_group`. If provided, it must also be provided with `model_input`.
-            Defaults to None.
-        figsize (tuple, optional): The size of the figure in pixels. Defaults to (800,
-            600).
-        global_min (float, optional): The minimum value for the y-axis. If None, the
-            minimum value is set to the smaller of 0, and the minimum activation value
-            across all groups and time steps. Defaults to None.
-        global_max (float, optional): The maximum value for the y-axis. If None, the
-            maximum value is set to the bigger of 1, and the maximum activation value
-            across all groups and time steps. Defaults to None.
-
-    Returns:
-        plotly.graph_objects.Figure: A Plotly figure object.
-    """
-    from .activation_maximisation import activity_by_column
-
-    column_acts = activity_by_column(
-        activity,
-        idx_to_group,
-        idx_to_column,
-        selected_group,
-        model_input=model_input,
-        sensory_indices=sensory_indices,
-    )
-
-    # Get unique values
-    unique_groups = column_acts["cell_group"].unique()
-    unique_times = sorted(column_acts["time_step"].unique())
-
-    # Create color mapping
-    colors = plotly.colors.qualitative.Plotly[: len(unique_groups)]
-    color_map = {group: colors[i] for i, group in enumerate(unique_groups)}
-
-    # Create figure
-    fig = go.Figure()
-
-    # Add traces for each time step and group combination
-    for time_step in unique_times:
-        time_data = column_acts[column_acts["time_step"] == time_step]
-
-        for group in unique_groups:
-            group_data = time_data[time_data["cell_group"] == group]
-
-            if plot_type == "scatter":
-                fig.add_trace(
-                    go.Scatter(
-                        x=group_data["normalised_column"],
-                        y=group_data["activation"],
-                        mode="markers",
-                        name=group,
-                        legendgroup=group,  # Group legend entries
-                        showlegend=True,
-                        visible=bool(
-                            time_step == unique_times[0]
-                        ),  # Convert to Python bool
-                        marker=dict(color=color_map[group], size=8),
-                    )
-                )
-            else:  # line
-                fig.add_trace(
-                    go.Scatter(
-                        x=group_data["normalised_column"],
-                        y=group_data["activation"],
-                        mode="lines+markers",
-                        name=group,
-                        legendgroup=group,
-                        showlegend=True,
-                        visible=bool(
-                            time_step == unique_times[0]
-                        ),  # Convert to Python bool
-                        line=dict(color=color_map[group]),
-                        marker=dict(size=6),
-                    )
-                )
-
-    # Create slider steps
-    steps = []
-    for i, time_step in enumerate(unique_times):
-        step = dict(
-            method="update",
-            args=[
-                {"visible": [False] * len(fig.data)},
-                {"title": f"Neural Activity - Time Step: {time_step}"},
-            ],
-            label=str(time_step),
-        )
-
-        # Make traces visible for current time step
-        start_idx = i * len(unique_groups)
-        end_idx = start_idx + len(unique_groups)
-        for j in range(start_idx, end_idx):
-            step["args"][0]["visible"][j] = True
-
-        steps.append(step)
-
-    # Add slider
-    sliders = [
-        dict(
-            active=0, currentvalue={"prefix": "Time Step: "}, pad={"t": 50}, steps=steps
-        )
-    ]
-
-    fig.update_layout(
-        sliders=sliders,
-        title=f"Neural Activity - Time Step: {unique_times[0]}",
-        xaxis_title="Normalised Column",
-        yaxis_title="Activation Value",
-        width=figsize[0],
-        height=figsize[1],
-    )
-    if global_min is None:
-        global_min = min(0, column_acts["activation"].min())
-    if global_max is None:
-        global_max = max(1, column_acts["activation"].max())
-    fig.update_yaxes(range=[global_min, global_max])
-
-    return fig
