@@ -220,7 +220,7 @@ def find_path_iteratively(
         # If no indices are found, break the loop as no path can be formed
         if len(df) == 0:
             print(f"Cannot trace back to the input in {target_layer_number} steps.")
-            if (top_n > -1)| (threshold > 0):
+            if (top_n > -1) | (threshold > 0):
                 print("Try lowering the threshold or increasing top_n.")
             return
 
@@ -725,8 +725,14 @@ def group_paths(
             nneuron_per_type = count_keys_per_value(intermediate_group)
             nneuron_per_type.update(count_keys_per_value(post_group))
         else:
-            # count number of unique neurons in each type
-            nneuron_per_type = paths.groupby("post_type")["post"].nunique().to_dict()
+            # count number of unique neurons in each type (for each layer)
+            # group by post_type, and layer if it exists
+            group_columns_sub = list(set(group_columns) - set(["pre_type"]))
+            nneuron_per_type = (
+                paths.groupby(group_columns_sub)["post"]
+                .nunique()
+                .reset_index(name="nneuron_post")
+            )
 
         if combining_method == "median":
             paths_weights = (
@@ -739,9 +745,7 @@ def group_paths(
             # sum across presynaptic neurons of the same type
             paths_weights = paths.groupby(group_columns).weight.sum().reset_index()
             # divide by number of postsynaptic neurons of the same type
-            paths_weights["nneuron_post"] = paths_weights.post_type.map(
-                nneuron_per_type
-            )
+            paths_weights = paths_weights.merge(nneuron_per_type, on=group_columns_sub)
             paths_weights["weight"] = paths_weights.weight / paths_weights.nneuron_post
             paths_weights.drop(columns="nneuron_post", inplace=True)
 
@@ -775,7 +779,12 @@ def group_paths(
             nneuron_per_type.update(count_keys_per_value(pre_group))
         else:
             # count number of unique neurons in each type
-            nneuron_per_type = paths.groupby("pre_type")["pre"].nunique().to_dict()
+            group_columns_sub = list(set(group_columns) - set(["post_type"]))
+            nneuron_per_type = (
+                paths.groupby(group_columns_sub)["pre"]
+                .nunique()
+                .reset_index(name="nneuron_pre")
+            )
 
         # weights
         if combining_method == "median":
@@ -789,7 +798,7 @@ def group_paths(
             # sum across presynaptic neurons of the same type
             paths_weights = paths.groupby(group_columns).weight.sum().reset_index()
             # divide by number of presynaptic neurons of the same type
-            paths_weights["nneuron_pre"] = paths_weights.pre_type.map(nneuron_per_type)
+            paths_weights = paths_weights.merge(nneuron_per_type, on=group_columns_sub)
             paths_weights["weight"] = paths_weights.weight / paths_weights.nneuron_pre
             paths_weights.drop(columns="nneuron_pre", inplace=True)
 
@@ -1178,11 +1187,25 @@ def el_within_n_steps(
     pre_group: dict = None,
     post_group: dict = None,
     return_raw_el: bool = False,
+    combining_method: str = "mean",
+    avg_within_connected: bool = False,
+    all_connections_between_groups: bool = False,
 ):
     """
     Find paths within a specified number of steps in a directed graph, starting from
     input indices and ending at output indices. The unique edges are returned. Filtering
     by `threshold` happens after grouping if `pre_group` and `post_group` are provided.
+
+    `avg_within_connected` calculates the weight based on the connected neurons, instead
+    of all neurons in any group involved. This might be useful when obtaining paths from
+    one single neuron in a cell type, while there are many other neurons in the same
+    type. This might be especially useful for optic lobe connectivity analysis that's
+    spatially local.
+
+    Two neuron groups might be connected to different extents in different layers
+    (when a pair of cell types are connected with different individual neurons in
+    different layers.). In that case the highest weight is returned by default, but see
+    `all_connections_between_groups` argument.
 
     Args:
         inprop (spmatrix): The connectivity matrix, with presynaptic in the rows.
@@ -1197,7 +1220,20 @@ def el_within_n_steps(
             their respective groups. Defaults to None.
         post_group (dict, optional): A dictionary mapping post neuron indices to
             their respective groups. Defaults to None.
-
+        return_raw_el (bool, optional): If True, returns the raw edges before
+            grouping. Defaults to False.
+        combining_method (str, optional): Method to combine inputs (outprop=False)
+            or outputs (outprop=True). Can be 'sum', 'mean', or 'median'. Defaults to
+            'mean'.
+        avg_within_connected (bool, optional): If True, the weight is calculated within
+            the *connected* neurons of the same group. If False, the weight is
+            calculated across *all* neurons of the same group. Defaults to False.
+        all_connections_between_groups (bool, optional): If True, use all connections
+            between groups inidx and outidx are in, even if inidx doesn't cover all
+            neurons in that group. For example, if inidx is *one* L1 neuron, and
+            pre_group maps indices to cell type, outidx is *one* Tm3 neuron, then the
+            function will return L1->Tm3 connections for *all* L1 and Tm3 neurons.
+            Defaults to False.
     Returns:
         pd.DataFrame: A DataFrame containing the edges of the paths found,
             including columns 'pre', 'post', and 'weight'.
@@ -1215,15 +1251,41 @@ def el_within_n_steps(
         if return_raw_el:
             raw_el.append(paths)
         if pre_group is not None and post_group is not None:
-            paths = group_paths(paths, pre_group, post_group)
+            paths = group_paths(
+                paths,
+                pre_group,
+                post_group,
+                avg_within_connected=avg_within_connected,
+                combining_method=combining_method,
+            )
         paths = filter_paths(paths, threshold)
         all_paths.append(paths)
     all_paths = pd.concat(all_paths, axis=0)
-    el = all_paths.drop_duplicates(subset=["pre", "post", "weight"])
+    el = all_paths.groupby(["pre", "post"])["weight"].max().reset_index()
+
+    if all_connections_between_groups:
+        from .compress_paths import result_summary
+
+        new_inidx = [idx for idx, grp in pre_group.items() if grp in el.pre]
+        new_outidx = [idx for idx, grp in post_group.items() if grp in el.post]
+        mat = result_summary(
+            inprop,
+            new_inidx,
+            new_outidx,
+            pre_group,
+            post_group,
+            display_threshold=0,
+            display_output=False,
+        )
+        # make longer
+        mat_long = mat.melt(ignore_index=False).reset_index()
+        mat_long.columns = ["pre", "post", "weight"]
+        el = el[["pre", "post"]].merge(mat_long, on=["pre", "post"], how="left")
 
     if return_raw_el:
         raw_el = pd.concat(raw_el, axis=0)
+        # pre, post are single neurons, so the rows should be real duplicates
         raw_el = raw_el.drop_duplicates(subset=["pre", "post", "weight"])
-        return el[["pre", "post", "weight"]], raw_el
+        return el, raw_el
     else:
-        return el[["pre", "post", "weight"]]
+        return el
