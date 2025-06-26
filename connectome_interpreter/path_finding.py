@@ -745,7 +745,14 @@ def group_paths(
             # sum across presynaptic neurons of the same type
             paths_weights = paths.groupby(group_columns).weight.sum().reset_index()
             # divide by number of postsynaptic neurons of the same type
-            paths_weights = paths_weights.merge(nneuron_per_type, on=group_columns_sub)
+            if isinstance(nneuron_per_type, pd.DataFrame):
+                paths_weights = paths_weights.merge(
+                    nneuron_per_type, on=group_columns_sub
+                )
+            elif isinstance(nneuron_per_type, dict):
+                paths_weights["nneuron_post"] = paths_weights.post_type.map(
+                    nneuron_per_type
+                )
             paths_weights["weight"] = paths_weights.weight / paths_weights.nneuron_post
             paths_weights.drop(columns="nneuron_post", inplace=True)
 
@@ -798,7 +805,14 @@ def group_paths(
             # sum across presynaptic neurons of the same type
             paths_weights = paths.groupby(group_columns).weight.sum().reset_index()
             # divide by number of presynaptic neurons of the same type
-            paths_weights = paths_weights.merge(nneuron_per_type, on=group_columns_sub)
+            if isinstance(nneuron_per_type, pd.DataFrame):
+                paths_weights = paths_weights.merge(
+                    nneuron_per_type, on=group_columns_sub
+                )
+            elif isinstance(nneuron_per_type, dict):
+                paths_weights["nneuron_pre"] = paths_weights.pre_type.map(
+                    nneuron_per_type
+                )
             paths_weights["weight"] = paths_weights.weight / paths_weights.nneuron_pre
             paths_weights.drop(columns="nneuron_pre", inplace=True)
 
