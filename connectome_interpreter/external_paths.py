@@ -6,7 +6,7 @@ from matplotlib import pyplot as plt
 from typing import Optional, Union
 
 # Third-party package imports
-from scipy.sparse import csc_matrix, csr_matrix, spmatrix
+from scipy.sparse import csr_matrix, spmatrix
 from scipy.sparse.csgraph import shortest_path
 import networkx as nx
 from IPython.display import display, HTML
@@ -204,131 +204,6 @@ def find_instance_flow(
             flow_type_df.to_csv(flow_type_file_name, index=False)
 
     return flow_type_df
-
-
-def trim_inprop_by_flow(
-    inprop: Union[spmatrix, pd.DataFrame],
-    idx_to_group: dict,
-    flow_seed_groups: list[str] = [
-        "L1",
-        "L2",
-        "L3",
-        "R7p",
-        "R8p",
-        "R7y",
-        "R8y",
-        "R7d",
-        "R8d",
-        "HBeyelet",
-    ],
-    file_path: str = None,
-    save_flow: Optional[bool] = True,
-    save_prefix: Optional[str] = "flow_",
-    flow_steps: int = 20,
-    flow_thre: float = 0.1,
-    flow_diff_min: float = 0.5,
-    flow_diff_max: float = 20,
-) -> csc_matrix:
-    """
-    Trim connections based on hitting time assigned by information flow algorithm
-    (navis: https://github.com/navis-org/navis). The hitting time is the mean
-    number of hops required to reach a neuron from a neuron in flow_seed_groups.
-    If the hitting time of the post neuron is larger than that of the pre neuron
-    (i.e., the difference is between flow_diff_min and flow_diff_max), then the
-    connection is interpreted as a feedforward connection and kept. For similar
-    hitting times, the connection is interpreted as a lateral connection.
-    If the hitting time of the pre neuron is larger than that of the post neuron,
-    the connection is interpreted as a feedback connection.
-    Lateral and feedback connections are removed.
-
-    Args:
-        inprop (csc_matrix): Input sparse matrix representing connections.
-        idx_to_group (dict): Dictionary mapping cell indices to their respective cell groups.
-        flow_seed_groups (list): List of cell groups to be used as seeds for flow calculation.
-        file_path (str): Path to the directory containing the hitting time data.
-        save_flow (bool): Whether to save the computed hitting time to a CSV file.
-        flow_steps (int): Number of steps for flow calculation.
-        flow_thre (float): Threshold for flow calculation.
-        flow_diff_min (float): Minimum difference in hitting time for connection retention.
-        flow_diff_max (float): Maximum difference in hitting time for connection retention.
-
-    Returns:
-        csc_matrix: sparse matrix for which pairs of connections have hitting time
-        within specified range.
-    """
-
-    if file_path is None:
-        # Check if running in Google Colab
-        if "COLAB_GPU" in os.environ:
-            # Running in Colab
-            file_path = "/content/"
-        else:
-            # Running locally
-            file_path = ""
-
-    flow_type_df = find_instance_flow(
-        inprop,
-        idx_to_group,
-        flow_seed_groups,
-        file_path,
-        save_flow,
-        save_prefix,
-        flow_steps,
-        flow_thre,
-    )  # has columns 'cell_group' and 'hitting_time'
-    # note: this includes all neurons of e.g. a cell type
-    meta = pd.DataFrame(idx_to_group.items(), columns=["idx", "cell_group"])
-    meta = meta.merge(flow_type_df, how="inner", on="cell_group")
-
-    if isinstance(inprop, pd.DataFrame):
-        conn_df = inprop[["pre", "post", "weight"]]
-    elif isinstance(inprop, spmatrix):
-        # convert sparse matrix to DataFrame
-        coo = inprop.tocoo()
-        conn_df = pd.DataFrame({"pre": coo.row, "post": coo.col, "weight": coo.data})
-
-    # add hitting time to conn_df
-    conn_flow_df = (
-        conn_df.merge(
-            meta[["idx", "hitting_time"]],
-            how="inner",
-            left_on="post",
-            right_on="idx",
-        )
-        .drop(columns=["idx"])
-        .rename(columns={"hitting_time": "hitting_time_post"})
-    )
-    conn_flow_df = (
-        conn_flow_df.merge(
-            meta[["idx", "hitting_time"]],
-            how="inner",
-            left_on="pre",
-            right_on="idx",
-        )
-        .drop(columns=["idx"])
-        .rename(columns={"hitting_time": "hitting_time_pre"})
-    )
-
-    # remove connections for which difference in hitting time is too small or too large
-    conn_flow_df = conn_flow_df[
-        (
-            conn_flow_df["hitting_time_post"] - conn_flow_df["hitting_time_pre"]
-            >= flow_diff_min
-        )
-        & (
-            conn_flow_df["hitting_time_post"] - conn_flow_df["hitting_time_pre"]
-            <= flow_diff_max
-        )
-    ]
-    inprop_flow = csc_matrix(
-        (
-            conn_flow_df["weight"],
-            (conn_flow_df["pre"], conn_flow_df["post"]),
-        ),
-        shape=inprop.shape,
-    )
-
-    return inprop_flow
 
 
 def find_shortest_paths(
@@ -713,7 +588,7 @@ def plot_flow_layered_paths(
                 ax=ax,
             )
 
-        ax.set_ylim(0, 1)
+        # ax.set_ylim(0, 1)
         if save_plot:
             fig.savefig(file_name + ".pdf")
             print(f"Graph saved as {file_name}.pdf")
@@ -727,10 +602,11 @@ def layered_el(
     outidx: arrayable,
     n: int,
     idx_to_group: dict,
+    combining_method: str = "mean",
     threshold: float = 0,
     flow_steps: int = 20,
     flow_thre: float = 0.1,
-    flow: pd.DataFrame | None = None,
+    flow: pd.DataFrame | None = None,   
 ):
     """
     First finds paths within `n` steps, given the `threshold` (applied to direct
@@ -746,6 +622,9 @@ def layered_el(
         n (int): The maximum number of hops. n=1 for direct connections.
         idx_to_group (dict): Dictionary mapping cell indices to their respective cell
             groups.
+        combining_method (str, optional): Method to combine inputs (outprop=False)
+            or outputs (outprop=True). Can be 'sum', 'mean', or 'median'. Defaults to
+            'mean'.
         threshold (float): The threshold for the weight of the direct
             connection between pre and post, after grouping by `idx_to_group`. Defaults
             to 0.
@@ -753,8 +632,7 @@ def layered_el(
         flow_thre (float): Threshold for flow calculation. Defaults to 0.1.
         flow (pd.DataFrame, optional): DataFrame containing the flow hitting time.
             If provided, it should have columns 'cell_group' and 'hitting_time'.
-            If None, the flow hitting time is computed from `inprop` and `idx_to_group`.
-
+            If None, the flow hitting time is computed from `inprop` and `idx_to_group`.        
     Returns:
         pd.DataFrame: DataFrame containing the grouped edge list with flow layers.
     """
@@ -773,6 +651,7 @@ def layered_el(
         idx_to_group,
         idx_to_group,
         return_raw_el=True,
+        combining_method=combining_method,
     )
     rawel["pre_type"] = rawel.pre.map(idx_to_group)
     rawel["post_type"] = rawel.post.map(idx_to_group)
@@ -803,4 +682,5 @@ def layered_el(
     grouped["pre_layer"] = grouped.pre.map(type_layer)
     grouped["post_layer"] = grouped.post.map(type_layer)
     grouped.fillna(0, inplace=True)
+    
     return grouped
