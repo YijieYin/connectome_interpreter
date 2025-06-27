@@ -1,7 +1,7 @@
 # Standard library imports
 import itertools
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Union
 
 # Third-party package imports
 import matplotlib.patches as mpatches
@@ -145,6 +145,149 @@ def find_path_once(
     )
 
     return df
+
+
+def find_paths_of_length(
+    edgelist: Union[spmatrix, pd.DataFrame],
+    inidx: arrayable,
+    outidx: arrayable,
+    target_layer_number: int,
+):
+    """
+    Finds the path of length target_layer_number between inidx and outidx, returning the
+    edgelist in a DataFrame, including the pre and post indices, the layer (direct
+    connections from inidx: layer = 1), and the weight of the direct connection between
+    pre and post.
+
+    Args:
+      edgelist (Union[spmatrix, pd.DataFrame]): The edgelist of the entire graph. If
+        a DataFrame, it must contain columns "pre", "post", and "weight". If a
+        sparse matrix, the pre needs to be in the rows.
+      inidx (int, float, list, set, numpy.ndarray, or pandas.Series): The source indices.
+      outidx (int, float, list, set, numpy.ndarray, or pandas.Series): The target
+        indices.
+      target_layer_number (int): The target layer number to examine. Must be
+        >= 1. When target_layer_number = 1, we are looking at the direct
+        synaptic connectivity.
+
+    Returns:
+      pd.DataFrame: A DataFrame containing the path data, including the
+        pre-synaptic and post-synaptic neuron indices, the layer (direct
+        connections from inidx: layer = 1), and the weight (input proportion of
+        the postsynaptic neuron) of the direct connection between pre and post.
+    """
+
+    inidx = to_nparray(inidx)
+    outidx = to_nparray(outidx)
+
+    assert len(inidx) > 0, "inidx must not be empty"
+    assert len(outidx) > 0, "outidx must not be empty"
+
+    if isinstance(edgelist, pd.DataFrame):
+        # if edgelist is a DataFrame, convert it to a sparse matrix
+        if not all(col in edgelist.columns for col in ["pre", "post", "weight"]):
+            raise ValueError(
+                "edgelist DataFrame must contain 'pre', 'post', and 'weight' columns."
+            )
+    elif isinstance(edgelist, spmatrix):
+        edgelist = edgelist.tocoo()
+        edgelist = pd.DataFrame(
+            {
+                "pre": edgelist.row,
+                "post": edgelist.col,
+                "weight": edgelist.data,
+            }
+        )
+    else:
+        raise TypeError("edgelist must be a pandas DataFrame or a scipy sparse matrix.")
+
+    assert target_layer_number >= 1, "target_layer_number must be >= 1"
+    if target_layer_number == 1:
+        # if target_layer_number is 1, we just return the direct connections
+        el = edgelist[
+            (edgelist["pre"].isin(inidx)) & (edgelist["post"].isin(outidx))
+        ].copy()
+        el.loc[:, ["layer"]] = 1
+        return el
+
+    # first find the middle layer:
+    if target_layer_number % 2 == 0:
+        middle_layer = target_layer_number // 2
+    else:
+        middle_layer = (target_layer_number + 1) // 2
+
+    # list of empty lists, of length target_layer_number+1
+    layer_indices = [[] for _ in range(target_layer_number + 1)]
+    # first one is inidx
+    layer_indices[0] = inidx
+    # last one is outidx
+    layer_indices[-1] = outidx
+
+    # first go from inidx to middle layer
+    for layer in range(1, middle_layer + 1):
+        layer_indices[layer] = list(
+            edgelist[edgelist["pre"].isin(layer_indices[layer - 1])]["post"].unique()
+        )
+        if len(layer_indices[layer]) == 0:
+            print(f"No neurons found in layer {layer}. Returning None.")
+            return None
+    # then go from outidx to middle layer
+    # stopping at the layer after middle_layer
+    for layer in range(target_layer_number, middle_layer, -1):
+        layer_indices[layer - 1] = list(
+            edgelist[edgelist["post"].isin(layer_indices[layer])]["pre"].unique()
+        )
+        if len(layer_indices[layer - 1]) == 0:
+            print(f"No neurons found in layer {layer - 1}. Returning None.")
+            return None
+
+    # link middle layer with the one after
+    el = edgelist[
+        (edgelist["pre"].isin(layer_indices[middle_layer]))
+        & (edgelist["post"].isin(layer_indices[middle_layer + 1]))
+    ]
+    layer_indices[middle_layer] = el["pre"].unique()
+    layer_indices[middle_layer + 1] = el["post"].unique()
+    if (
+        len(layer_indices[middle_layer]) == 0
+        or len(layer_indices[middle_layer + 1]) == 0
+    ):
+        print(
+            f"No neurons found in layer {middle_layer} or {middle_layer + 1}. Returning None."
+        )
+        return None
+
+    # now go from middle layer to the first layer
+    for layer in range(middle_layer - 1, -1, -1):
+        el = edgelist[
+            edgelist["pre"].isin(layer_indices[layer])
+            & edgelist["post"].isin(layer_indices[layer + 1])
+        ]
+        layer_indices[layer] = el["pre"].unique()
+        if len(layer_indices[layer]) == 0:
+            print(f"No neurons found in layer {layer}. Returning None.")
+            return None
+    # now go from middle layer to the last layer
+    for layer in range(middle_layer + 1, target_layer_number):
+        el = edgelist[
+            edgelist["pre"].isin(layer_indices[layer - 1])
+            & edgelist["post"].isin(layer_indices[layer])
+        ]
+        layer_indices[layer] = el["post"].unique()
+        if len(layer_indices[layer]) == 0:
+            print(f"No neurons found in layer {layer}. Returning None.")
+            return None
+
+    # add the weights
+    path = []
+    for layer in range(target_layer_number):
+        el = edgelist[
+            (edgelist["pre"].isin(layer_indices[layer]))
+            & (edgelist["post"].isin(layer_indices[layer + 1]))
+        ]
+        el.loc[:, ["layer"]] = layer + 1
+        path.append(el)
+    return pd.concat(path, ignore_index=True)
 
 
 def find_path_iteratively(
@@ -1260,7 +1403,7 @@ def el_within_n_steps(
     raw_el = []
     for i in tqdm(range(n)):
         paths = find_path_iteratively(inprop, steps, inidx, outidx, i + 1, threshold=0)
-        if paths is None:
+        if paths is None or paths.shape[0] == 0:
             continue
         if return_raw_el:
             raw_el.append(paths)

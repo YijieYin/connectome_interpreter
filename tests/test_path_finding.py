@@ -4,7 +4,10 @@ import unittest
 
 import pandas as pd
 
-from connectome_interpreter.path_finding import find_xor
+from connectome_interpreter.path_finding import find_xor, find_paths_of_length
+
+import numpy as np
+import scipy.sparse as sp
 
 
 class TestFindXOR(unittest.TestCase):
@@ -209,3 +212,83 @@ class TestFindXOR(unittest.TestCase):
         circuits = find_xor(df)
         max_possible = len(list(itertools.combinations(middles, 3)))
         self.assertLessEqual(len(circuits), max_possible)
+
+
+class TestFindPathsOfLength(unittest.TestCase):
+    # ------------------------------------------------------------------ helpers
+    @staticmethod
+    def mk_chain_df(nodes, w=1.0):
+        """chain graph → DataFrame"""
+        return pd.DataFrame(
+            [(nodes[i], nodes[i + 1], w) for i in range(len(nodes) - 1)],
+            columns=["pre", "post", "weight"],
+        )
+
+    @staticmethod
+    def mk_chain_sparse(n):
+        """simple 0->1->…->n sparse COO"""
+        rows = np.arange(n)
+        cols = np.arange(1, n + 1)
+        data = np.ones(n)
+        return sp.coo_matrix((data, (rows, cols)), shape=(n + 1, n + 1))
+
+    # --------------------------------------------------------- basic correctness
+    def test_layer1_direct(self):
+        df = self.mk_chain_df(["a", "b"])
+        res = find_paths_of_length(df, ["a"], ["b"], 1)
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res.iloc[0]["pre"], "a")
+        self.assertEqual(res.iloc[0]["post"], "b")
+        self.assertEqual(res.iloc[0]["layer"], 1)
+
+    def test_even_length_path(self):
+        df = self.mk_chain_df(list(range(5)))  # 0-1-2-3-4
+        res = find_paths_of_length(df, [0], [4], 4)
+        self.assertEqual(len(res), 4)
+        self.assertTrue((res["layer"].values == np.arange(1, 5)).all())
+        self.assertListEqual(res["pre"].tolist(), [0, 1, 2, 3])
+        self.assertListEqual(res["post"].tolist(), [1, 2, 3, 4])
+
+    def test_odd_length_path(self):
+        df = self.mk_chain_df(list("abcd"))  # a-b-c-d
+        res = find_paths_of_length(df, ["a"], ["d"], 3)
+        self.assertEqual(len(res), 3)
+        self.assertListEqual(res["layer"].tolist(), [1, 2, 3])
+
+    # ------------------------------------------------------ input type handling
+    def test_sparse_matrix_input(self):
+        sparse_graph = self.mk_chain_sparse(3)  # 0-1-2-3
+        res = find_paths_of_length(sparse_graph, [0], [3], 3)
+        self.assertEqual(len(res), 3)
+        self.assertListEqual(res["pre"].tolist(), [0, 1, 2])
+        self.assertListEqual(res["post"].tolist(), [1, 2, 3])
+
+    # ------------------------------------------------------------- edge cases
+    def test_no_path_returns_none(self):
+        df = pd.DataFrame(
+            [("a", "b", 1.0), ("c", "d", 1.0)], columns=["pre", "post", "weight"]
+        )
+        self.assertIsNone(find_paths_of_length(df, ["a"], ["d"], 2))
+
+    def test_invalid_target_layer(self):
+        df = self.mk_chain_df(["x", "y"])
+        with self.assertRaises(AssertionError):
+            find_paths_of_length(df, ["x"], ["y"], 0)
+
+    def test_empty_indices(self):
+        df = self.mk_chain_df(["x", "y"])
+        with self.assertRaises(AssertionError):
+            find_paths_of_length(df, [], ["y"], 1)
+        with self.assertRaises(AssertionError):
+            find_paths_of_length(df, ["x"], [], 1)
+
+    def test_missing_columns(self):
+        bad_df = pd.DataFrame({"pre": ["a"], "post": ["b"]})
+        with self.assertRaises(ValueError):
+            find_paths_of_length(bad_df, ["a"], ["b"], 1)
+
+    # ------------------------------- algorithm early-exit on unreachable middle
+    def test_early_exit_middle_layer(self):
+        # graph: 0->1  (no edge onward), so layer 2 unreachable
+        df = self.mk_chain_df([0, 1])
+        self.assertIsNone(find_paths_of_length(df, [0], [2], 2))
