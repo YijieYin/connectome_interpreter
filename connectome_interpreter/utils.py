@@ -632,7 +632,12 @@ def get_ngl_link(
     # Normalize the values in the DataFrame
     if normalise is not None:
         if normalise == "all":
-            df = (df - df.min().min()) / (df.max().max() - df.min().min())
+            if df_format == "wide":
+                df = (df - df.min().min()) / (df.max().max() - df.min().min())
+            elif df_format == "long":
+                df["activation"] = (df["activation"] - df["activation"].min()) / (
+                    df["activation"].max() - df["activation"].min()
+                )
 
     scene["layout"] = "3d"
 
