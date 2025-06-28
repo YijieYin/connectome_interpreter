@@ -4,7 +4,11 @@ import unittest
 
 import pandas as pd
 
-from connectome_interpreter.path_finding import find_xor, find_paths_of_length
+from connectome_interpreter.path_finding import (
+    find_xor,
+    find_paths_of_length,
+    enumerate_paths,
+)
 
 import numpy as np
 import scipy.sparse as sp
@@ -292,3 +296,86 @@ class TestFindPathsOfLength(unittest.TestCase):
         # graph: 0->1  (no edge onward), so layer 2 unreachable
         df = self.mk_chain_df([0, 1])
         self.assertIsNone(find_paths_of_length(df, [0], [2], 2))
+
+
+class TestEnumeratePathsBetweenLayers(unittest.TestCase):
+    # -------------------------- helpers
+    @staticmethod
+    def mk_df(edges):
+        return pd.DataFrame(edges, columns=["pre", "post", "weight", "layer"])
+
+    @staticmethod
+    def to_set(paths):
+        return {tuple(path) for path in paths}
+
+    # ------------------------ correctness
+    def test_simple_chain(self):
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("b", "c", 2.0, 2),
+        ]
+        df = self.mk_df(edges)
+        paths = enumerate_paths(df, 1, 2)
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(paths[0], [("a", "b", 1.0), ("b", "c", 2.0)])
+
+    def test_branching_two_paths(self):
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("a", "d", 1.0, 1),
+            ("b", "c", 1.0, 2),
+            ("d", "c", 1.0, 2),
+        ]
+        df = self.mk_df(edges)
+        paths = enumerate_paths(df, 1, 2)
+        expected = {
+            (("a", "b", 1.0), ("b", "c", 1.0)),
+            (("a", "d", 1.0), ("d", "c", 1.0)),
+        }
+        self.assertEqual(self.to_set(paths), expected)
+
+    def test_default_end_layer(self):
+        edges = [
+            ("x", "y", 1, 1),
+            ("y", "z", 1, 2),
+            ("z", "w", 1, 3),
+        ]
+        df = self.mk_df(edges)
+        paths = enumerate_paths(df)  # end_layer defaults to 3
+        self.assertEqual(paths[0][-1], ("z", "w", 1))
+
+    # --------------------------- edge cases
+    def test_no_paths_due_to_gap(self):
+        edges = [
+            ("p", "q", 1, 1),
+            ("q", "r", 1, 3),  # layer 2 missing
+        ]
+        df = self.mk_df(edges)
+        self.assertEqual(enumerate_paths(df, 1, 3), [])
+
+    def test_start_equals_end_layer(self):
+        edges = [
+            ("m", "n", 0.5, 2),
+            ("o", "p", 1.0, 2),
+        ]
+        df = self.mk_df(edges)
+        paths = enumerate_paths(df, 2, 2)
+        expected = {
+            (("m", "n", 0.5),),
+            (("o", "p", 1.0),),
+        }
+        self.assertEqual(self.to_set(paths), expected)
+
+    def test_invalid_layer_order_raises(self):
+        df = self.mk_df([("a", "b", 1, 1), ("b", "c", 1, 2)])
+        with self.assertRaises(ValueError):
+            enumerate_paths(df, 3, 2)
+
+    def test_mixed_node_types_and_weights(self):
+        edges = [
+            (0, "a", 0.3, 1),
+            ("a", 2, 0.7, 2),
+        ]
+        df = self.mk_df(edges)
+        paths = enumerate_paths(df, 1, 2)
+        self.assertEqual(paths[0], [(0, "a", 0.3), ("a", 2, 0.7)])

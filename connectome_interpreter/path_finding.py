@@ -1,7 +1,8 @@
 # Standard library imports
 import itertools
 from dataclasses import dataclass
-from typing import Dict, List, Union
+from typing import Dict, List, Union, Tuple, Optional
+from collections import defaultdict
 
 # Third-party package imports
 import matplotlib.patches as mpatches
@@ -290,6 +291,62 @@ def find_paths_of_length(
     return pd.concat(path, ignore_index=True)
 
 
+def enumerate_paths(
+    edgelist: pd.DataFrame,
+    start_layer: int = 1,
+    end_layer: Optional[int] = None,
+) -> List[List[Tuple[Union[str, int], Union[str, int], float]]]:
+    """
+    Finds all paths that begin with an edge in start_layer and end with an edge in
+    end_layer, assuming valid paths proceed layer-by-layer without skipping.
+
+    Args:
+      edgelist (pd.DataFrame): The edgelist of the entire graph. Must contain columns:
+        "layer", "pre", "post", and "weight". Each row is a directed, weighted edge
+        from "pre" to "post" at a given layer.
+      start_layer (int): The layer from which all paths must begin. Must be <= end_layer.
+      end_layer (int): The layer at which all paths must terminate. If None, defaults to
+        the maximum layer in the edgelist.
+
+    Returns:
+      List[List[Tuple[Union[str, int], Union[str, int], float]]]: A list of valid paths.
+        Each path is a list of (pre, post, weight) tuples, ordered from start to end.
+    """
+    if end_layer is None:
+        end_layer = edgelist["layer"].max()
+    if start_layer > end_layer:
+        raise ValueError("start_layer must be less than or equal to end_layer.")
+
+    # Build adjacency: adj[layer][pre] → list of (post, weight)
+    # pre and post can be either strings or integers
+    adj: Dict[int, Dict[Union[str, int], List[Tuple[Union[str, int], float]]]] = (
+        defaultdict(lambda: defaultdict(list))
+    )
+    for _, row in edgelist.iterrows():
+        adj[row["layer"]][row["pre"]].append((row["post"], row["weight"]))
+
+    # list of paths
+    # path: list of edges (pre, post, weight)
+    paths: List[List[Tuple[Union[str, int], Union[str, int], float]]] = []
+
+    def dfs(
+        node: Union[str, int],
+        layer: int,
+        path: List[Tuple[Union[str, int], Union[str, int], float]],
+    ):
+        if layer == end_layer:
+            paths.append(path)
+            return
+        for post, wt in adj.get(layer + 1, {}).get(node, []):
+            dfs(post, layer + 1, path + [(node, post, wt)])
+
+    for pre, edges in adj.get(start_layer, {}).items():
+        for post, wt in edges:
+            dfs(post, start_layer, [(pre, post, wt)])
+
+    return paths
+
+
 def find_path_iteratively(
     inprop_csc: spmatrix,
     steps_cpu: list,
@@ -329,6 +386,10 @@ def find_path_iteratively(
             proportion of the postsynaptic neuron) of the direct connection
             between pre and post.
     """
+
+    print(
+        'Have you tried "find_paths_of_length()" instead? About the same speed, no need to pre-load `steps`, and more accurate!'
+    )
 
     inprop_csc.data = np.abs(inprop_csc.data)
     inidx = to_nparray(inidx)
