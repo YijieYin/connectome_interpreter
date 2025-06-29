@@ -15,7 +15,7 @@ Documentation [here](https://connectome-interpreter.readthedocs.io/en/latest/) (
 ## Full Adult Fly Brain 
 Data obtained from [Dorkenwald et al. 2024](https://www.nature.com/articles/s41586-024-07558-y), [Schlegel et al. 2024](https://www.nature.com/articles/s41586-024-07686-5), and [Matsliah et al. 2024](https://www.nature.com/articles/s41586-024-07981-1). To visualise the neurons, you can use this url: [https://tinyurl.com/flywire783](https://tinyurl.com/flywire783). By using the connectivity information, you agree to follow the [FlyWire citation guidelines and principles](https://codex.flywire.ai/api/download).
   - [central brain, single-neuron level](https://colab.research.google.com/drive/1_beqiKPX8pC7---DWepKO8dEv1sJ2vA4?usp=sharing) (recommended. Shows a variety of capabilities)
-  - [central brain, cell type level](https://colab.research.google.com/drive/1ECUagwN-r2rnKyfcYgtR1oG8Lox8m8BW?usp=sharing)
+  - [full brain, single-neuron level](https://colab.research.google.com/drive/1wHah__f5XP7hKRtZ71ObVlLkUNZGsoz1?usp=sharing)
   - [right hemisphere optic lobe, single-neuron level](https://colab.research.google.com/drive/1SHMZ3DUTeakdh0znMmXu5g2qffx6rFGV?usp=sharing)
 
 ## MaleCNS 
