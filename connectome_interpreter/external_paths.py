@@ -597,7 +597,6 @@ def plot_flow_layered_paths(
 
 def layered_el(
     inprop: spmatrix,
-    steps: list,
     inidx: arrayable,
     outidx: arrayable,
     n: int,
@@ -606,7 +605,7 @@ def layered_el(
     threshold: float = 0,
     flow_steps: int = 20,
     flow_thre: float = 0.1,
-    flow: pd.DataFrame | None = None,   
+    flow: pd.DataFrame | None = None,
 ):
     """
     First finds paths within `n` steps, given the `threshold` (applied to direct
@@ -615,8 +614,6 @@ def layered_el(
 
     Args:
         inprop (spmatrix): Input sparse matrix representing connections.
-        steps (list): A list of connectivity matrices, e.g. the result from
-            `compress_paths()`.
         inidx (np.ndarray): Array of input indices.
         outidx (np.ndarray): Array of output indices.
         n (int): The maximum number of hops. n=1 for direct connections.
@@ -632,7 +629,7 @@ def layered_el(
         flow_thre (float): Threshold for flow calculation. Defaults to 0.1.
         flow (pd.DataFrame, optional): DataFrame containing the flow hitting time.
             If provided, it should have columns 'cell_group' and 'hitting_time'.
-            If None, the flow hitting time is computed from `inprop` and `idx_to_group`.        
+            If None, the flow hitting time is computed from `inprop` and `idx_to_group`.
     Returns:
         pd.DataFrame: DataFrame containing the grouped edge list with flow layers.
     """
@@ -643,7 +640,6 @@ def layered_el(
     # get edge list, both grouped by idx_to_group, and with raw indices
     grouped, rawel = el_within_n_steps(
         inprop,
-        steps,
         inidx,
         outidx,
         n,
@@ -682,5 +678,5 @@ def layered_el(
     grouped["pre_layer"] = grouped.pre.map(type_layer)
     grouped["post_layer"] = grouped.post.map(type_layer)
     grouped.fillna(0, inplace=True)
-    
+
     return grouped

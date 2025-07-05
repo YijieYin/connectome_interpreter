@@ -19,7 +19,6 @@ from .utils import (
     count_keys_per_value,
     to_nparray,
 )
-from .compress_paths import effective_conn_from_paths
 
 
 def find_path_once(
@@ -1320,6 +1319,8 @@ def path_for_ngl(path):
     """
 
     out = []
+    from .compress_paths import effective_conn_from_paths
+
     for alayer in path.layer.unique():
         path_sub = path[path.layer >= alayer]
         effconn = effective_conn_from_paths(path_sub)
@@ -1397,7 +1398,6 @@ def connected_components(
 
 def el_within_n_steps(
     inprop: spmatrix,
-    steps: list,
     inidx: arrayable,
     outidx: arrayable,
     n: int,
@@ -1427,8 +1427,6 @@ def el_within_n_steps(
 
     Args:
         inprop (spmatrix): The connectivity matrix, with presynaptic in the rows.
-        steps (list): A list of connectivity matrices, e.g. the result from
-            `compress_paths()`.
         inidx (arrayable): The input neuron indices to start the paths from.
         outidx (arrayable): The output neuron indices to end the paths at.
         n (int): The maximum number of hops. n=1 for direct connections.
@@ -1463,7 +1461,7 @@ def el_within_n_steps(
     all_paths = []
     raw_el = []
     for i in tqdm(range(n)):
-        paths = find_path_iteratively(inprop, steps, inidx, outidx, i + 1, threshold=0)
+        paths = find_paths_of_length(inprop, inidx, outidx, i + 1)
         if paths is None or paths.shape[0] == 0:
             continue
         if return_raw_el:
