@@ -1166,7 +1166,7 @@ def plot_layered_paths(
             """
         var options = {
         "physics": {
-            "enabled": true,
+            "enabled": false,
             "solver": "forceAtlas2Based",
             "forceAtlas2Based": {
             "springConstant": 0.1
@@ -1175,11 +1175,12 @@ def plot_layered_paths(
         },
         "nodes": {
             "physics": false
-        }
+        }, 
+        "edges": {
+            "smooth": false}
         }
         """
         )
-        net2.toggle_physics(False)
         # net2.show_buttons(filter_=["node", "edge", "physics"])
 
         if "COLAB_GPU" in os.environ:
@@ -1529,37 +1530,6 @@ def check_consecutive_layers(df):
         all_layers[i] + 1 == all_layers[i + 1] for i in range(len(all_layers) - 1)
     )
     return consecutive_layers
-
-
-def group_edge_by(edgelist, group_dict):
-    """
-    Group the edges in an edgelist by a dictionary.
-
-    Args:
-        edgelist (pd.DataFrame): A DataFrame with columns 'pre', 'post' and
-            'weight' representing the edges.
-        by (dict): A dictionary mapping the values in the 'pre' and 'post'
-            columns of `edgelist` to the groups.
-
-    Returns:
-        pd.DataFrame: A DataFrame with columns 'pre' and 'post' representing
-            the edges, and 'group_pre' and 'group_post' representing the
-            groups.
-    """
-    edgelist.loc[:, ["group_pre"]] = edgelist.pre.map(group_dict)
-    edgelist.loc[:, ["group_post"]] = edgelist.post.map(group_dict)
-    # group by pre, sum; group by post, average
-    # e.g. if group is cell type: the input proportion from type A to an
-    # average neuron in type B
-    edgelist = (
-        edgelist.groupby(["group_pre", "group_post", "post"]).weight.sum().reset_index()
-    )  # sum across pre
-    edgelist = (
-        edgelist.groupby(["group_pre", "group_post"]).weight.mean().reset_index()
-    )  # average across post
-    edgelist.columns = ["pre", "post", "weight"]
-
-    return edgelist
 
 
 def display_df(df, cmap="Blues"):
