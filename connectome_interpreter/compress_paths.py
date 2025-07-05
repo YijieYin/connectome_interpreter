@@ -1,6 +1,6 @@
 # Standard library imports
 import math
-from typing import List
+from typing import List, Optional, Union
 import os
 import gc
 
@@ -15,12 +15,11 @@ import scipy as sp
 import seaborn as sns
 import torch
 from IPython.display import display
-from scipy.sparse import csr_matrix, issparse, csc_matrix, coo_matrix
+from scipy.sparse import csr_matrix, issparse, csc_matrix, coo_matrix, spmatrix, vstack
 from tqdm import tqdm
 
 from .utils import (
     dynamic_representation,
-    group_edge_by,
     tensor_to_csc,
     to_nparray,
     torch_sparse_where,
@@ -30,7 +29,7 @@ from .utils import (
 
 
 def compress_paths(
-    A: sp.sparse.spmatrix,
+    A: spmatrix,
     step_number: int,
     threshold: float = 0,
     output_threshold: float = 1e-4,
@@ -1014,6 +1013,241 @@ def add_first_n_matrices(matrices, n):
     return sum_matrix
 
 
+def connectivity_summary(
+    stepsn: Union[spmatrix, np.ndarray],
+    inidx: arrayable,
+    outidx: arrayable,
+    inidx_map: dict | None = None,
+    outidx_map: dict | None = None,
+    display_output: bool = True,
+    display_threshold: float = 1e-3,
+    threshold_axis: str = "row",
+    sort_within: str = "column",
+    sort_names: str | List | None = None,
+    pre_in_column: bool = False,
+    include_undefined_groups: bool = False,
+    outprop: bool = False,
+    combining_method: str = "mean",
+    return_long: bool = False,
+):
+    """
+    Generates a summary of connectivity from `inidx` to `outidx`, grouped by `inidx_map`
+    and `outidx_map`, respectively. By default, it displays the total input across
+    single cells of the same type, to an average post-synaptic cell.
+
+    Args:
+        stepsn (scipy.sparse matrix or numpy.ndarray): Matrix representing the synaptic
+            strengths between neurons, can be dense or sparse. Pres are in the rows.
+        inidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of indices
+            representing the input (presynaptic) neurons, used to subset stepsn. nan
+            values are removed.
+        outidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of
+            indices representing the output (postsynaptic) neurons.
+        inidx_map (dict, optional): Mapping from indices to neuron groups for the input
+            neurons. Defaults to None, in which case neurons are not grouped.
+        outidx_map (dict, optional): Mapping from indices to neuron groups for the
+            output neurons. Defaults to None, in which case it is set to be the same as
+            inidx_map.
+        display_output (bool, optional): Whether to display the output in a coloured
+            dataframe. Defaults to True.
+        display_threshold (float, optional): The minimum threshold for displaying the
+            output. Defaults to 0.
+        threshold_axis (str, optional): The axis to apply the display_threshold to.
+            Defaults to 'row' (removing entire rows if no value exceeds
+            display_threshold).
+        sort_within (str, optional): The axis to sort the output in. Defaults to
+            'column'.
+        sort_names (str or list, optional): the column/row name(s) to sort the result by.
+            If none is provided, then sort by the first column/row.
+        pre_in_column (bool, optional): Whether to have the presynaptic neuron groups as
+            columns. Defaults to False (pre in rows, post: columns).
+        include_undefined_groups (bool, optional): Whether to include undefined groups
+            in the output. Defaults to False.
+        outprop (bool, optional): If True, get the summed output proportion (across
+            recipient single cells in the same cell type) for each average sender. If
+            False (default), get the summed input proportion across all senders for
+            each average recipient.
+        combining_method (str, optional): Method to combine inputs (outprop=False)
+            or outputs (outprop=True). Can be 'sum', 'mean', or 'median'.
+            Defaults to 'mean'.
+        return_long (bool, optional): Whether to return the connectivity summary in long
+            format (in which case display no longer works). Defaults to False.
+
+    Returns:
+        pd.DataFrame: A dataframe representing the summed synaptic input from
+        presynaptic neuron groups to an average neuron in each postsynaptic
+        neuron group. This dataframe is always returned, regardless of the
+        value of display_output.
+
+    Displays:
+        If display_output is True, the function will display a styled version
+        of the resulting dataframe.
+    """
+    # ---------------------------------------------------------------------#
+    # Sanity checks & defaults
+    # ---------------------------------------------------------------------#
+    assert combining_method in {"mean", "median", "sum"}
+    inidx = to_nparray(inidx)
+    outidx = to_nparray(outidx)
+
+    # make sure inidx and outidx only contain integers
+    inidx = np.array([int(x) for x in inidx])
+    outidx = np.array([int(x) for x in outidx])
+
+    if inidx_map is None:
+        inidx_map = {idx: idx for idx in range(stepsn.shape[0])}
+    if outidx_map is None:
+        outidx_map = inidx_map
+
+    if include_undefined_groups:
+        inidx_map = {
+            k: (v if pd.notna(v) else "undefined") for k, v in inidx_map.items()
+        }
+        outidx_map = {
+            k: (v if pd.notna(v) else "undefined") for k, v in outidx_map.items()
+        }
+
+    # ---------------------------------------------------------------------#
+    # Ensure sparse and slice
+    # ---------------------------------------------------------------------#
+
+    if issparse(stepsn):
+        submat = stepsn.tocsc()[inidx, :][:, outidx].tocoo()
+        # map sub-indices back to original ids
+        pre_ids = inidx[submat.row]
+        post_ids = outidx[submat.col]
+        weights = submat.data
+        edgelist = pd.DataFrame(
+            {
+                "pre_id": pre_ids,
+                "post_id": post_ids,
+                "weight": weights,
+                "pre_group": pd.Series(pre_ids).map(inidx_map).astype(str).values,
+                "post_group": pd.Series(post_ids).map(outidx_map).astype(str).values,
+            }
+        )
+    else:
+        submat = stepsn[inidx, :][:, outidx]
+        edgelist = pd.DataFrame(
+            {
+                "pre_id": np.repeat(inidx, submat.shape[1]),
+                "post_id": np.tile(outidx, submat.shape[0]),
+                "weight": submat.flatten(),
+            }
+        )
+        edgelist["pre_group"] = edgelist["pre_id"].map(inidx_map).astype(str)
+        edgelist["post_group"] = edgelist["post_id"].map(outidx_map).astype(str)
+
+    # ---------------------------------------------------------------------#
+    # Aggregate according to outprop / combining_method
+    # ---------------------------------------------------------------------#
+    if not outprop:
+        # INPUT-centred: average neuron in *post* group
+        # total input from that type, for the e.g. average/median postsynaptic neuron
+        per_post_neuron = (
+            edgelist.groupby(["pre_group", "post_id"], sort=False)["weight"]
+            .sum()
+            .reset_index()
+        )
+        per_post_neuron["post_group"] = (
+            per_post_neuron["post_id"].map(outidx_map).astype(str)
+        )
+        agg_method = {"sum": "sum", "mean": "mean", "median": "median"}[
+            combining_method
+        ]
+        result = (
+            per_post_neuron.groupby(["pre_group", "post_group"], sort=False)["weight"]
+            .agg(agg_method)
+            .unstack(fill_value=0)
+        )
+    else:
+        # OUTPUT-centred: average neuron in *pre* group
+        # output proportion from an average source to a target type
+        per_pre_neuron = (
+            edgelist.groupby(["pre_id", "post_group"], sort=False)["weight"]
+            .sum()
+            .reset_index()
+        )
+        per_pre_neuron["pre_group"] = (
+            per_pre_neuron["pre_id"].map(inidx_map).astype(str)
+        )
+        agg_method = {"sum": "sum", "mean": "mean", "median": "median"}[
+            combining_method
+        ]
+        result = (
+            per_pre_neuron.groupby(["pre_group", "post_group"], sort=False)["weight"]
+            .agg(agg_method)
+            .unstack(fill_value=0)
+        )
+
+    # ---------------------------------------------------------------------#
+    # Layout adjustments
+    # ---------------------------------------------------------------------#
+    if pre_in_column:
+        result = result.T
+
+    # threshold filtering
+    if display_threshold > 0:
+        if threshold_axis == "row":
+            result = result[(np.abs(result) >= display_threshold).any(axis=1)]
+        elif threshold_axis == "column":
+            result = result.loc[:, (np.abs(result) >= display_threshold).any(axis=0)]
+        else:
+            raise ValueError("threshold_axis must be 'column' or 'row'.")
+
+    if result.empty:
+        raise ValueError(
+            "No values left after applying the display_threshold; lower the threshold."
+        )
+
+    # sorting
+    if sort_within == "column":
+        if sort_names is None:
+            result = result.sort_values(by=result.columns[0], ascending=False)
+        else:
+            sort_names = [sort_names] if isinstance(sort_names, str) else sort_names
+            if set(sort_names).issubset(result.columns):
+                result = result.sort_values(by=sort_names, ascending=False)
+            else:
+                raise ValueError("sort_names must be present in outidx_map values.")
+    elif sort_within == "row":
+        result = result.loc[
+            np.abs(result).mean(axis=1).sort_values(ascending=False).index
+        ]
+        if sort_names is None:
+            result = result.sort_values(by=result.index[0], axis=1, ascending=False)
+        else:
+            sort_names = [sort_names] if isinstance(sort_names, str) else sort_names
+            if set(sort_names).issubset(result.index):
+                result = result.sort_values(by=sort_names, axis=1, ascending=False)
+            else:
+                raise ValueError("sort_names must be present in inidx_map values.")
+    else:
+        raise ValueError("sort_within must be 'column' or 'row'.")
+
+    # ---------------------------------------------------------------------#
+    # Display (only if wide)
+    # ---------------------------------------------------------------------#
+    if display_output and not return_long:
+        styled = result.style.background_gradient(
+            cmap="Blues",
+            vmin=np.abs(result).min().min(),
+            vmax=np.abs(result).max().max(),
+        )
+        display(styled)
+
+    # ---------------------------------------------------------------------#
+    # Return
+    # ---------------------------------------------------------------------#
+    if return_long:
+        idx_name = result.index.name or "pre_group"
+        long_df = result.reset_index().melt(
+            id_vars=idx_name, var_name="post_group", value_name="value"
+        )
+        return long_df
+    return result
+
+
 def result_summary(
     stepsn,
     inidx: arrayable,
@@ -1085,6 +1319,9 @@ def result_summary(
     assert combining_method in ["mean", "median", "sum"], (
         "The combining_method should be either 'mean', 'median', or 'sum'. "
         f"Currently it is {combining_method}."
+    )
+    print(
+        "Feel free to try `connectivity_summary()` - the same function with less memory usage!"
     )
 
     if inidx_map is None:
@@ -1484,22 +1721,273 @@ def contribution_by_path_lengths_heatmap(
     display(widgets.interactive(plot_heatmap, index=slider))
 
 
-def effective_conn_from_paths(paths, group_dict=None, wide=True):
+def effective_conn_from_paths(
+    paths: pd.DataFrame,
+    pre_group: dict,
+    post_group: dict,
+    intermediate_group: Optional[dict] = None,
+    wide: bool = True,
+    combining_method: str = "mean",
+    chunk_size: int = 2000,  # rows per chunk
+    density_threshold: float = 0.2,
+    use_gpu: bool = True,
+):
+    """
+    Calculate the effective connectivity from the paths Dataframe (which could be an
+    output of `find_paths_of_length()`), from the 'pre' in the earliest layer, to the
+    'post' in the latest layer, grouped by `pre_group`, `post_group`, and
+    `intermediate_group`.
+
+    Args:
+        paths (pd.DataFrame): DataFrame containing the paths with columns: 'pre', 'post',
+            'weight', and 'layer'. The 'pre' and 'post' columns represent the
+            presynaptic and postsynaptic neurons, respectively. The 'weight' column
+            represents the strength of the connection, and the 'layer' column indicates
+            the layer of the connection (starting from 1).
+        pre_group (dict): Mapping from presynaptic neuron indices (what's in the `pre`
+            column in paths) to their groups.
+        post_group (dict): Mapping from postsynaptic neuron indices to their groups.
+        intermediate_group (dict, optional): Mapping for intermediate neurons. Defaults
+            to None.
+        wide (bool, optional): If True, returns the result in wide format. If False,
+            returns in long format. Defaults to True.
+        combining_method (str, optional): Method to combine inputs or outputs. Can be
+            'mean', 'median', or 'sum'. Defaults to 'mean'.
+        chunk_size (int, optional): Number of rows to process in each chunk when using
+            GPU. Defaults to 2000.
+        density_threshold (float, optional): Threshold for converting sparse matrices to
+            dense. If the density of the matrix exceeds this value, it will be converted
+            to a dense matrix to save memory. Defaults to 0.2.
+        use_gpu (bool, optional): Whether to use GPU for computation. Defaults to True.
+            If GPU is not available, it will fall back to CPU.
+
+    Returns:
+        pd.DataFrame: A DataFrame summarizing the effective connectivity between
+        presynaptic and postsynaptic groups.
+    """
+    # --------------------------------------------------------------------- #
+    # 0. preliminaries
+    # --------------------------------------------------------------------- #
+    local_idx_dict = {
+        idx: i for i, idx in enumerate(set(paths.pre).union(set(paths.post)))
+    }
+    local_to_global_idx = {i: idx for idx, i in local_idx_dict.items()}
+
+    paths["pre_idx"] = paths.pre.map(local_idx_dict)
+    paths["post_idx"] = paths.post.map(local_idx_dict)
+
+    m = len(local_idx_dict)
+    if use_gpu:
+        if torch is not None and torch.cuda.is_available():
+            pass
+        else:
+            use_gpu = False
+            print("GPU not available, using CPU instead.")
+
+    if not use_gpu:
+        for i, layer in enumerate(sorted(paths.layer.unique())):
+            if i == 0:
+                initial_el = paths[paths.layer == layer]  # edgelist
+                csr = csr_matrix(
+                    (
+                        initial_el.weight,
+                        (initial_el.pre_idx.values, initial_el.post_idx.values),
+                    ),
+                    shape=(m, m),
+                    dtype=np.float32,
+                )  # make sparse matrix of the shape all_elements, all_elements
+
+            else:
+                el = paths[paths.layer == layer]
+                csr = csr @ csr_matrix(
+                    (el.weight, (el.pre_idx.values, el.post_idx.values)),
+                    shape=(m, m),
+                    dtype=np.float32,
+                )
+
+        coo = csr.tocoo()
+        result_el = pd.DataFrame(
+            {"pre_idx": coo.row, "post_idx": coo.col, "weight": coo.data}
+        )
+        result_el.loc[:, ["pre"]] = result_el.pre_idx.map(local_to_global_idx)
+        result_el.loc[:, ["post"]] = result_el.post_idx.map(local_to_global_idx)
+
+    else:
+        device = torch.device("cuda")
+        with torch.no_grad():
+            if chunk_size > m:
+                chunk_size = m
+            num_of_chunks = math.ceil(len(local_idx_dict) / chunk_size)
+
+            # pre-define sparse matrices for each layer
+            layer_mats = {}
+            for layer in sorted(paths.layer.unique()):
+                layer_el = paths[paths.layer == layer]
+                idx = torch.as_tensor(
+                    np.vstack((layer_el.pre_idx.values, layer_el.post_idx.values)),
+                    device=device,
+                    dtype=torch.long,
+                )
+                val = torch.as_tensor(
+                    layer_el.weight.values, device=device, dtype=torch.float32
+                )
+                layer_mat = torch.sparse_coo_tensor(
+                    idx, val, (m, m), dtype=torch.float32, device=device
+                ).coalesce()
+                layer_mats[layer] = layer_mat
+
+            chunk_els = []
+            for i in range(num_of_chunks):
+                start_idx = i * chunk_size
+                end_idx = min((i + 1) * chunk_size, len(local_idx_dict))
+                local_to_input_idx = {
+                    idx: i for i, idx in enumerate(range(start_idx, end_idx))
+                }
+                input_idx_to_local = {v: k for k, v in local_to_input_idx.items()}
+
+                for layer in sorted(paths.layer.unique()):
+                    layer_el = paths[paths.layer == layer]
+                    if layer == paths.layer.min():
+                        layer_el_chunk = layer_el[
+                            (layer_el.pre_idx >= start_idx)
+                            & (layer_el.pre_idx < end_idx)
+                        ]
+                        layer_el_chunk.loc[:, ["pre_idx"]] = layer_el_chunk.pre_idx.map(
+                            local_to_input_idx
+                        )
+                        if layer_el_chunk.empty:
+                            mat = None
+                            break  # break out of the iteration through layers
+                        idx = torch.as_tensor(
+                            np.vstack(
+                                (
+                                    # now pre_idx between 0 and chunk_size
+                                    layer_el_chunk.pre_idx.values,
+                                    # post_idx between 0 and m, which is the number of
+                                    # nodes in the paths
+                                    layer_el_chunk.post_idx.values,
+                                )
+                            ),
+                            device=device,
+                            dtype=torch.long,
+                        )
+                        val = torch.as_tensor(
+                            layer_el_chunk.weight.values,
+                            device=device,
+                            dtype=torch.float32,
+                        )
+                        mat = torch.sparse_coo_tensor(
+                            idx,
+                            val,
+                            (len(local_to_input_idx), m),
+                            dtype=torch.float32,
+                            device=device,
+                        ).coalesce()
+                        if (
+                            mat._nnz() / (len(local_to_input_idx) * m)
+                        ) > density_threshold:
+                            mat = mat.to_dense()
+                    else:
+                        mat = torch.sparse.mm(
+                            layer_mats[layer].t().to(device), mat.t().to(device)
+                        ).t()  # shape (len(local_to_input_idx), m)
+                        # if mat isn't dense:
+                        if mat.is_sparse:
+                            if (
+                                mat._nnz() / (len(local_to_input_idx) * m)
+                            ) > density_threshold:
+                                mat = mat.to_dense()
+                        torch.cuda.empty_cache()
+
+                if mat is None:
+                    continue
+                mat = mat.to("cpu")
+                if mat.is_sparse:
+                    mat = mat.coalesce().to_sparse_coo()
+                    rows, cols = mat.indices()
+                    vals = mat.values()
+                    chunk_el = pd.DataFrame(
+                        {
+                            "pre_idx": rows.numpy(),
+                            "post_idx": cols.numpy(),
+                            "weight": vals.numpy(),
+                        }
+                    )
+                    chunk_el.loc[:, ["pre_idx"]] = chunk_el.pre_idx.map(
+                        input_idx_to_local
+                    )
+                    chunk_els.append(chunk_el)
+                else:
+                    chunk_el = pd.DataFrame(
+                        data=mat.numpy(),
+                        index=input_idx_to_local.values(),
+                        columns=local_to_global_idx.keys(),
+                    )
+                    # make longer
+                    chunk_el = chunk_el.melt(ignore_index=False).reset_index()
+                    chunk_el.columns = ["pre_idx", "post_idx", "weight"]
+                    chunk_el = chunk_el[chunk_el.weight != 0]
+                    chunk_el.loc[:, ["pre"]] = chunk_el.pre_idx.map(input_idx_to_local)
+                    chunk_els.append(chunk_el)
+                del mat
+                # free up memory
+                torch.cuda.empty_cache()
+
+        result_el = pd.concat(chunk_els, ignore_index=True)
+        result_el["pre"] = result_el.pre_idx.map(local_to_global_idx)
+        result_el["post"] = result_el.post_idx.map(local_to_global_idx)
+
+    # --------------------------------------------------------------------- #
+    # 4. back to edge-list, group, pivot
+    # --------------------------------------------------------------------- #
+    from .path_finding import group_paths
+
+    result_el = group_paths(
+        result_el,
+        pre_group,
+        post_group,
+        intermediate_group,
+        combining_method=combining_method,
+    )
+
+    if wide:
+        result_el = result_el.pivot(index="pre", columns="post", values="weight")
+        result_el.fillna(0, inplace=True)
+
+    return result_el
+
+
+def effective_conn_from_paths_cpu(
+    paths,
+    pre_group: dict,
+    post_group: dict,
+    intermediate_group: dict | None = None,
+    wide=True,
+    combining_method: str = "mean",
+):
     """Calculate the effective connectivity between (groups of) neurons based
     only on the provided `paths` between neurons. This function runs on CPU,
     and doesn't expect a big connectivity matrix as input.
 
     Args:
-        paths (pd.DataFrame): A dataframe representing the paths between
-            neurons, with columns 'pre', 'post', 'weight', and 'layer'.
-        group_dict (dict, optional): A dictionary mapping neuron indices
-            (values in columns `pre` and `post`) to groups. Defaults to None.
-        wide (bool, optional): Whether to pivot the output dataframe to a wide
-            format. Defaults to True.
+        paths (pd.DataFrame): A dataframe representing the paths between neurons, with
+            columns 'pre', 'post', 'weight', and 'layer'.
+        pre_group (dict): A dictionary that maps pre-synaptic neuron indices to their
+            respective group.
+        post_group (dict): A dictionary that maps post-synaptic neuron indices to their
+            respective group.
+        intermediate_group (dict, optional): A dictionary that maps intermediate neuron
+            indices to their respective group. Defaults to None. If None, it will be set
+            to pre_group.
+        wide (bool, optional): Whether to pivot the output dataframe to a wide format.
+            Defaults to True.
+        combining_method (str, optional): Method to combine inputs (outprop=False) or
+            outputs (outprop=True). Can be 'sum', 'mean', or 'median'. Defaults to
+            'mean'.
 
     Returns:
-        pd.DataFrame: A dataframe representing the effective connectivity
-            between groups of neurons.
+        pd.DataFrame: A dataframe representing the effective connectivity between groups
+            of neurons.
     """
 
     # it will get confusing if we didn't use the same mapping for all layers
@@ -1523,6 +2011,7 @@ def effective_conn_from_paths(paths, group_dict=None, wide=True):
                     (initial_el.pre_idx.values, initial_el.post_idx.values),
                 ),
                 shape=(len(local_idx_dict), len(local_idx_dict)),
+                dtype=np.float32,
             )  # make sparse matrix of the shape all_elements, all_elements
 
         else:
@@ -1530,6 +2019,7 @@ def effective_conn_from_paths(paths, group_dict=None, wide=True):
             csr = csr @ csr_matrix(
                 (el.weight, (el.pre_idx.values, el.post_idx.values)),
                 shape=(len(local_idx_dict), len(local_idx_dict)),
+                dtype=np.float32,
             )
 
     coo = csr.tocoo()
@@ -1539,18 +2029,15 @@ def effective_conn_from_paths(paths, group_dict=None, wide=True):
     result_el.loc[:, ["pre"]] = result_el.pre_idx.map(local_to_global_idx)
     result_el.loc[:, ["post"]] = result_el.post_idx.map(local_to_global_idx)
 
-    if group_dict is not None:
-        result_el = group_edge_by(result_el, group_dict)
-        # result_el.loc[:, ['group_pre']] = result_el.pre.map(group_dict)
-        # result_el.loc[:, ['group_post']] = result_el.post.map(group_dict)
-        # # group by pre, sum; group by post, average
-        # # e.g. if group is cell type: the input proportion from type A to an
-        # average neuron in type B
-        # result_el = result_el.groupby( # sum across pre
-        #     ['group_pre', 'group_post', 'post']).weight.sum().reset_index()
-        # result_el = result_el.groupby( # average across post
-        #     ['group_pre', 'group_post']).weight.mean().reset_index()
-        # result_el.columns = ['pre', 'post', 'weight']
+    from .path_finding import group_paths
+
+    result_el = group_paths(
+        result_el,
+        pre_group,
+        post_group,
+        intermediate_group,
+        combining_method=combining_method,
+    )
 
     # pivot wider
     if wide:
@@ -1560,7 +2047,15 @@ def effective_conn_from_paths(paths, group_dict=None, wide=True):
     return result_el
 
 
-def signed_effective_conn_from_paths(paths, group_dict=None, wide=True, idx_to_nt=None):
+def signed_effective_conn_from_paths(
+    paths,
+    pre_group: Optional[dict],
+    post_group: Optional[dict],
+    intermediate_group: dict | None = None,
+    wide: bool = True,
+    idx_to_nt: dict = None,
+    combining_method: str = "mean",
+):
     """Calculate the *signed* effective connectivity between (groups of)
     neurons based only on the provided `paths` between neurons. This function
     runs on CPU, and doesn't expect a big connectivity matrix as input.
@@ -1671,9 +2166,22 @@ def signed_effective_conn_from_paths(paths, group_dict=None, wide=True, idx_to_n
     result_el_i.loc[:, ["pre"]] = result_el_i.pre_idx.map(local_to_global_idx)
     result_el_i.loc[:, ["post"]] = result_el_i.post_idx.map(local_to_global_idx)
 
-    if group_dict is not None:
-        result_el_e = group_edge_by(result_el_e, group_dict)
-        result_el_i = group_edge_by(result_el_i, group_dict)
+    from .path_finding import group_paths
+
+    result_el_e = group_paths(
+        result_el_e,
+        pre_group,
+        post_group,
+        intermediate_group,
+        combining_method=combining_method,
+    )
+    result_el_i = group_paths(
+        result_el_i,
+        pre_group,
+        post_group,
+        intermediate_group,
+        combining_method=combining_method,
+    )
 
     if wide:
         result_el_e = result_el_e.pivot(index="pre", columns="post", values="weight")
