@@ -2,8 +2,7 @@
 import random
 import warnings
 from collections import defaultdict
-from numbers import Real
-from typing import Collection, List, Tuple, Optional, Union
+from typing import List, Tuple, Optional, Sequence, Mapping
 import os
 
 import ipywidgets as widgets
@@ -1923,3 +1922,601 @@ def scipy_sparse_to_pytorch(
     shape = torch.Size(coo.shape)
 
     return torch.sparse_coo_tensor(indices, values, shape, device=device)
+
+
+# ------------------------------------------------------------------
+# helpers for path plotting
+# ------------------------------------------------------------------
+
+
+def _is_number(txt: str) -> bool:
+    try:
+        float(txt)
+        return True
+    except ValueError:
+        return False
+
+
+def _get_node(node: str) -> str:
+    """
+    Return node name without the *last* “_layer” suffix.
+    Works for integer or float layer tags, while leaving genuine underscores
+    inside the name untouched.
+        _get_node("DNp42_3")        → "DNp42"
+        _get_node("KCg-m_a_b_4.5")  → "KCg-m_a_b"
+        _get_node("Delta7")         → "Delta7"
+    """
+    head, _, tail = node.rpartition("_")
+    return head if head and _is_number(tail) else node
+
+
+def _check_consecutive_layers(df: pd.DataFrame) -> bool:
+    """layers must be integer and consecutive."""
+    if "layer" not in df.columns:
+        return True
+    layers = sorted(df["layer"].unique())
+    return layers == list(range(layers[0], layers[-1] + 1))
+
+
+def _barycentre_order(
+    layer_nodes: list[str],
+    neighbor_pos: Mapping[str, int],
+    fixed_nodes: set[str],
+) -> list[str]:
+    """Return order list with (non-fixed) nodes sorted by barycentre."""
+    mobiles = [n for n in layer_nodes if n not in fixed_nodes]
+    fixed = [n for n in layer_nodes if n in fixed_nodes]
+    bary = {}
+    for n in mobiles:
+        neigh = [neighbor_pos[p] for p in neighbor_pos if _get_node(p) == _get_node(n)]
+        bary[n] = float(np.mean(neigh)) if neigh else np.inf
+    mobiles.sort(key=lambda x: bary.get(x, np.inf))
+    return mobiles + fixed  # fixed always on top (end of list → higher y)
+
+
+def _untangle_layers(
+    path_df: pd.DataFrame,
+    priority_indices: Optional[Sequence[str]],
+    sort_dict: Optional[Mapping[str, float]],
+    passes: int = 4,
+) -> dict[str, float]:
+    """
+    Sugiyama-style: forward/backward barycentre passes, while keeping any node
+    whose base-name appears in priority_indices OR sort_dict fixed at the top.
+    Returns dict {node_layer: order_index}.
+    """
+    if "post_layer_id" not in path_df.columns:
+        path_df["post_layer_id"] = (
+            path_df["post"].astype(str) + "_" + path_df["layer"].astype(str)
+        )
+    if "pre_layer_id" not in path_df.columns:
+        path_df["pre_layer_id"] = (
+            path_df["pre"].astype(str) + "_" + (path_df["layer"] - 1).astype(str)
+        )
+
+    layers = sorted(path_df["layer"].unique())
+    n_layers = len(layers) + 1  # include input layer 0
+    layer_to_nodes: dict[int, list[str]] = {i: [] for i in range(n_layers)}
+    for _, r in path_df.iterrows():
+        layer_to_nodes[r.layer - 1].append(r.pre_layer_id)
+        layer_to_nodes[r.layer].append(r.post_layer_id)
+    for k in layer_to_nodes:
+        layer_to_nodes[k] = list(
+            dict.fromkeys(layer_to_nodes[k])
+        )  # preserve order & uniq
+
+    # fixed nodes => priority_indices and sort_dict keys
+    fixed_basenames = set(priority_indices or [])
+    if sort_dict:
+        fixed_basenames.update(sort_dict.keys())
+
+    # initial order: move fixed to end
+    for k, nodes in layer_to_nodes.items():
+        non_fix = [n for n in nodes if _get_node(n) not in fixed_basenames]
+        fix = [n for n in nodes if _get_node(n) in fixed_basenames]
+        # sort fixed chunk by sort_dict value desc
+        if sort_dict:
+            fix.sort(key=lambda x: sort_dict.get(_get_node(x), -np.inf), reverse=True)
+        layer_to_nodes[k] = non_fix + fix
+
+    if not passes:
+        # return initial (already priority/sort-dict ordered) indexing
+        order_index = {
+            n: i for l, nodes in layer_to_nodes.items() for i, n in enumerate(nodes, 1)
+        }
+        return order_index
+
+    # build adjacency (predecessors / successors) for barycentre calc
+    preds: dict[str, set[str]] = {}
+    succs: dict[str, set[str]] = {}
+    for u, v in zip(path_df.pre_layer_id, path_df.post_layer_id):
+        succs.setdefault(u, set()).add(v)
+        preds.setdefault(v, set()).add(u)
+
+    # iterate forward / backward
+    for _ in range(passes):
+        # forward
+        for l in range(1, n_layers):
+            prev_pos = {n: i for i, n in enumerate(layer_to_nodes[l - 1])}
+            layer_to_nodes[l] = _barycentre_order(
+                layer_to_nodes[l], prev_pos, fixed_nodes=set(fixed_basenames)
+            )
+        # backward
+        for l in reversed(range(n_layers - 1)):
+            next_pos = {n: i for i, n in enumerate(layer_to_nodes[l + 1])}
+            layer_to_nodes[l] = _barycentre_order(
+                layer_to_nodes[l], next_pos, fixed_nodes=set(fixed_basenames)
+            )
+
+    # produce order index
+    order_index = {}
+    for l, nodes in layer_to_nodes.items():
+        for idx, n in enumerate(nodes, start=1):
+            order_index[n] = idx
+    return order_index
+
+
+def _create_layered_positions_tidy(
+    df: pd.DataFrame,
+    priority_indices: Optional[Sequence[str]],
+    sort_dict: Optional[Mapping[str, float]],
+    untangle_iter: int = 4,
+) -> dict[str, tuple[float, float]]:
+    """Layered positions with untangled ordering and **even vertical spacing
+    within each layer**."""
+    if not _check_consecutive_layers(df):
+        raise ValueError("layer numbers are not consecutive")
+
+    if "post_layer_id" not in df.columns:
+        df["post_layer_id"] = df["post"].astype(str) + "_" + df["layer"].astype(str)
+    if "pre_layer_id" not in df.columns:
+        df["pre_layer_id"] = df["pre"].astype(str) + "_" + (df["layer"] - 1).astype(str)
+
+    # total layers (+1 for input layer)
+    n_layers = df["layer"].nunique() + 1
+    layer_width = 1.0 / (n_layers + 1)
+
+    # untangle ordering: returns idx starting at 1 **per layer**
+    order_idx = _untangle_layers(df, priority_indices, sort_dict, untangle_iter)
+
+    # count nodes per layer for even spacing
+    layer_sizes: dict[int, int] = {}
+    for node in order_idx:
+        lyr = int(node.split("_")[-1])
+        layer_sizes[lyr] = layer_sizes.get(lyr, 0) + 1
+
+    positions = {}
+    for node, idx in order_idx.items():
+        lyr = int(node.split("_")[-1])
+        positions[node] = (
+            lyr * layer_width,
+            idx / (layer_sizes[lyr] + 1),
+        )
+    return positions
+
+
+def _find_flow_positions_tidy(
+    vertices: np.ndarray,
+    layers: np.ndarray,
+    height: float,
+    width: float,
+    df_edges: pd.DataFrame,
+    priority_indices: Optional[Sequence[str]],
+    sort_dict: Optional[Mapping[str, float]],
+) -> dict[str, tuple[float, float]]:
+    """
+    Similar to original find_flow_positions but re-orders nodes in each bin by
+    upstream barycentre, keeping fixed nodes (priority or sort_dict) on top.
+    """
+    layer_bins = np.arange(-0.25, np.ceil(layers.max()) + 1.5, 0.5)
+    layer_labels = layer_bins[:-1] + 0.25
+    layer_binned = pd.cut(layers, bins=layer_bins, labels=layer_labels)
+
+    fixed_basenames = set(priority_indices or [])
+    if sort_dict:
+        fixed_basenames.update(sort_dict.keys())
+
+    # build predecessors map for barycentre
+    preds: dict[str, set[str]] = {}
+    for _, r in df_edges.iterrows():
+        preds.setdefault(r.post, set()).add(r.pre)
+
+    positions = {}
+    layer_w = width / layers.max()
+
+    for lb in np.unique(layer_binned):
+        idxs = np.where(layer_binned == lb)[0]
+        if len(idxs) == 0:
+            continue
+        verts = vertices[idxs]
+        heights = height / (len(verts) + 1)
+
+        # order
+        prev_layer_nodes = {
+            v: i
+            for i, v in enumerate(vertices[np.where(layer_binned == (lb - 0.5))[0]])
+        }
+        bary = {}
+        for v in verts:
+            neigh = preds.get(v, [])
+            neigh_idx = [prev_layer_nodes.get(n, 0) for n in neigh]
+            bary[v] = np.mean(neigh_idx) if neigh_idx else np.inf
+
+        fixed = [v for v in verts if v in fixed_basenames]
+        non_fixed = [v for v in verts if v not in fixed]
+
+        # non-fixed order: sort_dict value takes precedence, else barycentre
+        def _key(v):
+            return (
+                sort_dict.get(v, None)
+                if sort_dict and v in sort_dict
+                else -bary.get(v, np.inf)  # negate so bigger bary ↓
+            )
+
+        non_fixed.sort(key=_key)  # bigger sort_dict → top
+
+        # fixed chunk sorted by sort_dict (bigger → top)
+        if sort_dict:
+            fixed.sort(key=lambda x: sort_dict.get(_get_node(x), np.inf))
+
+        ordered = fixed + non_fixed
+
+        for j, v in enumerate(ordered, start=1):
+            positions[v] = (
+                layers[np.where(vertices == v)[0][0]] * layer_w - width / 2,
+                j * heights,
+            )
+    return positions
+
+
+# ------------------------------------------------------------------
+# main API
+# ------------------------------------------------------------------
+
+
+def plot_paths(
+    paths: pd.DataFrame,
+    # ---- shared ----
+    figsize: tuple = (10, 8),
+    priority_indices: Sequence[str] | None = None,
+    sort_dict: Optional[dict] = None,
+    sort_by_activation: bool = False,
+    weight_decimals: int = 2,
+    neuron_to_sign: dict | None = None,
+    sign_color_map: dict = {1: "red", -1: "blue"},
+    neuron_to_color: dict | None = None,
+    node_activation_min: float | None = None,
+    node_activation_max: float | None = None,
+    edge_text: bool = True,
+    node_text: bool = True,
+    highlight_nodes: list[str] = [],
+    interactive: bool = False,
+    save_plot: bool = False,
+    file_name: str = "paths",
+    label_pos: float = 0.7,
+    default_neuron_color: str = "lightblue",
+    default_edge_color: str = "lightgrey",
+    node_size: int = 500,
+    untangle_passes: int = 4,
+) -> None:
+    """
+    Plotting function for both layered (where layers are discrete, in `layer` column of
+    `paths`), and flow paths (where layers can be continuous, in `pre_layer` and
+    `post_layer` columns in `paths`).
+
+    Args:
+        paths (pd.DataFrame): DataFrame containing the paths to plot. It could be the
+            output of e.g. `find_paths_of_length()`, `layered_el()`, or
+            `find_paths_iteratively()`.
+        figsize (tuple, optional): Size of the figure. Defaults to (10, 8).
+        priority_indices (list, optional): List of neuron identifiers to put on top in
+            the layout. Defaults to None.
+        sort_dict (dict, optional): Dictionary mapping neuron identifiers to values
+            for sorting. If provided, neurons will be sorted by these values. Smaller
+            values are on top. Defaults to None.
+        sort_by_activation (bool, optional): If True, sort neurons by their activation
+            values (if available in the DataFrame). Defaults to False.
+        weight_decimals (int, optional): Number of decimal places to display for weights.
+            Defaults to 2.
+        neuron_to_sign (dict, optional): Dictionary mapping neuron identifiers to their
+            sign (keys in the `sign_color_map`). If provided, edges will be colored
+            based on the sign. Defaults to None.
+        sign_color_map (dict, optional): Dictionary mapping sign values to colors.
+            Defaults to {1: "red", -1: "blue"}.
+        neuron_to_color (dict, optional): Dictionary mapping neuron identifiers to
+            colors. If None, a default color will be used for all neurons. Defaults to
+            None.
+        node_activation_min (float, optional): Minimum activation value for node
+            coloring. If None, the minimum activation value from the DataFrame will be
+            used. Defaults to None.
+        node_activation_max (float, optional): Maximum activation value for node
+            coloring. If None, the maximum activation value from the DataFrame will be
+            used. Defaults to None.
+        edge_text (bool, optional): If True, display edge weights as text on the plot.
+            Defaults to True.
+        node_text (bool, optional): If True, display neuron identifiers as text on the
+            plot. Defaults to True.
+        highlight_nodes (list, optional): List of neuron identifiers to highlight in the
+            plot. Defaults to an empty list.
+        interactive (bool, optional): If True, create an interactive plot using Pyvis.
+            Defaults to False.
+        save_plot (bool, optional): If True, save the plot to a file. Defaults to False.
+        file_name (str, optional): Name of the file to save the plot if `save_plot` is
+            True. Defaults to "paths".
+        label_pos (float, optional): Position of the weight labels on the edges.
+            Defaults to 0.7.
+        default_neuron_color (str, optional): Default color for neurons if not specified
+            in `neuron_to_color`. Defaults to "lightblue".
+        default_edge_color (str, optional): Default color for edges if not specified in
+            `neuron_to_sign`. Defaults to "lightgrey".
+        node_size (int, optional): Size of the nodes in the plot. Defaults to 500.
+        untangle_passes (int, optional): Number of passes for untangling the layout.
+            Defaults to 4.
+
+    Returns:
+        None: Displays the plot or creates an interactive visualization.
+    """
+    if paths.empty:
+        raise ValueError("paths DataFrame is empty")
+
+    df = paths.copy()
+
+    # ------------------------------------------------------------------
+    # prepare node identifiers if needed
+    # ------------------------------------------------------------------
+    layered_mode = not ("pre_layer" in df.columns and "post_layer" in df.columns)
+    if layered_mode and (
+        ("pre_layer_id" not in df.columns) or ("post_layer_id" not in df.columns)
+    ):
+        df["post_layer_id"] = df["post"].astype(str) + "_" + df["layer"].astype(str)
+        df["pre_layer_id"] = df["pre"].astype(str) + "_" + (df["layer"] - 1).astype(str)
+
+    # ------------------------------------------------------------------
+    # scale weights for width
+    # ------------------------------------------------------------------
+    wmin, wmax = df.weight.min(), df.weight.max()
+    if wmax == wmin:
+        df["weight"] = 1
+    else:
+        df["weight"] = 1 + 9 * (df.weight - wmin) / (wmax - wmin)
+
+    # ------------------------------------------------------------------
+    # build graph
+    # ------------------------------------------------------------------
+    if layered_mode:
+        G = nx.from_pandas_edgelist(
+            df,
+            source="pre_layer_id",
+            target="post_layer_id",
+            edge_attr=["weight"],
+            create_using=nx.DiGraph(),
+        )
+        label_map = dict(zip(df.pre_layer_id, df.pre))
+        label_map.update(dict(zip(df.post_layer_id, df.post)))
+    else:
+        G = nx.from_pandas_edgelist(
+            df,
+            source="pre",
+            target="post",
+            edge_attr=["weight"],
+            create_using=nx.DiGraph(),
+        )
+        label_map = {v: v for v in G.nodes()}
+
+    # ------------------------------------------------------------------
+    # positions
+    # ------------------------------------------------------------------
+    # activation-driven ordering
+    if sort_by_activation and {"pre_activation", "post_activation"}.issubset(
+        df.columns
+    ):
+        act_dict = dict(
+            zip(df.pre_layer_id if layered_mode else df.pre, df.pre_activation)
+        )
+        act_dict.update(
+            zip(df.post_layer_id if layered_mode else df.post, df.post_activation)
+        )
+    else:
+        act_dict = {}
+
+    # honour caller’s explicit sort_dict over activations
+    merged_sort = {**act_dict, **(sort_dict or {})} or None
+
+    if layered_mode:
+        pos = _create_layered_positions_tidy(
+            df,
+            priority_indices,
+            merged_sort,
+            untangle_iter=(
+                0
+                if merged_sort
+                and len(merged_sort)
+                == len(set(df.pre_layer_id) | set(df.post_layer_id))
+                else untangle_passes
+            ),
+        )
+    else:
+        verts = np.array(list(label_map.keys()))
+        layers = np.zeros(len(verts))
+        for i, v in enumerate(verts):
+            if v in df.pre.values:
+                layers[i] = df[df.pre == v].pre_layer.values[0]
+            elif v in df.post.values:
+                layers[i] = df[df.post == v].post_layer.values[0]
+        pos = _find_flow_positions_tidy(
+            verts,
+            layers,
+            figsize[1] / 10,
+            figsize[0] / 5,
+            df[["pre", "post"]],
+            priority_indices,
+            merged_sort,
+        )
+
+    # ------------------------------------------------------------------
+    # node colour
+    # ------------------------------------------------------------------
+    if neuron_to_color is None:
+        neuron_to_color = {n: default_neuron_color for n in set(label_map.values())}
+    else:
+        missing = set(label_map.values()) - set(neuron_to_color)
+        neuron_to_color.update({m: default_neuron_color for m in missing})
+
+    if {"pre_activation", "post_activation"}.issubset(df.columns):
+        acts = np.concatenate([df.pre_activation, df.post_activation])
+        node_activation_min = node_activation_min or acts.min()
+        node_activation_max = node_activation_max or acts.max()
+        norm = plt.Normalize(vmin=node_activation_min, vmax=node_activation_max)
+        cmap = plt.get_cmap("viridis")
+        nx.set_node_attributes(
+            G,
+            dict(zip(df.pre_layer_id if layered_mode else df.pre, df.pre_activation)),
+            "activation",
+        )
+        nx.set_node_attributes(
+            G,
+            dict(
+                zip(df.post_layer_id if layered_mode else df.post, df.post_activation)
+            ),
+            "activation",
+        )
+        node_colors = [cmap(norm(G.nodes[n]["activation"])) for n in G.nodes()]
+    else:
+        node_colors = [neuron_to_color[label_map[n]] for n in G.nodes()]
+
+    # ------------------------------------------------------------------
+    # edge colour
+    # ------------------------------------------------------------------
+    if neuron_to_sign:
+        missing = set(neuron_to_sign.values()) - set(sign_color_map)
+        if missing:
+            print("Warning: sign_color_map missing keys:", missing)
+    edge_colors = []
+    for u, _ in G.edges():
+        pre = label_map[u]
+        if neuron_to_sign and pre in neuron_to_sign:
+            edge_colors.append(
+                sign_color_map.get(neuron_to_sign[pre], default_edge_color)
+            )
+        else:
+            edge_colors.append(default_edge_color)
+
+    # ------------------------------------------------------------------
+    # interactive or static
+    # ------------------------------------------------------------------
+    if interactive:
+        try:
+            from pyvis.network import Network
+        except ImportError as e:
+            raise ImportError("pip install pyvis") from e
+
+        net = Network(
+            directed=True, layout=False, notebook=True, cdn_resources="in_line"
+        )
+        net.height = f"{int(figsize[1] * 80)}px"
+        net.width = "100%"
+        net.from_nx(G)
+
+        nc_dict = dict(zip(G.nodes(), node_colors))
+        ec_dict = dict(zip(G.edges(), edge_colors))
+        for n in net.nodes:
+            n["x"], n["y"] = pos[n["id"]]
+            n["x"] *= int(figsize[0] * 80)
+            n["y"] *= int(figsize[1] * 80)
+            n["label"] = label_map[n["id"]] if node_text else ""
+            n["color"] = mpl.colors.rgb2hex(nc_dict[n["id"]], keep_alpha=True)
+            n["size"] = node_size / 20
+            n["font"] = {
+                "size": 26,
+                "face": (
+                    "arial black" if label_map[n["id"]] in highlight_nodes else "arial"
+                ),
+            }
+
+        for e in net.edges:
+            u, v = e["from"], e["to"]
+            e["color"] = ec_dict[(u, v)]
+            if edge_text:
+                e["label"] = (
+                    f"{(wmin + (wmax - wmin) * (e['width'] - 1) / 9):.{weight_decimals}f}"
+                )
+                e["font"] = {"size": 18, "face": "arial"}
+
+        net.set_options(
+            """
+            var options = {
+              "physics":{"enabled":false,"solver":"forceAtlas2Based",
+              "forceAtlas2Based":{"springConstant":0.1},"minVelocity":0.1},
+              "nodes":{"physics":false},"edges":{"smooth":false}
+            }
+            """
+        )
+
+        if save_plot:
+            net.write_html(f"{file_name}.html")
+            print(f"Interactive graph saved as {file_name}.html")
+        net.show(f"{file_name}.html", notebook=False)
+    else:
+        fig, ax = plt.subplots(figsize=figsize)
+        nx.draw(
+            G,
+            pos=pos,
+            with_labels=False,
+            node_size=node_size,
+            node_color=node_colors,
+            arrows=True,
+            arrowstyle="-|>",
+            arrowsize=10,
+            width=[G[u][v]["weight"] for u, v in G.edges()],
+            edge_color=edge_colors,
+            ax=ax,
+        )
+        if {"pre_activation", "post_activation"}.issubset(df.columns):
+            plt.colorbar(
+                plt.cm.ScalarMappable(norm=norm, cmap=cmap),
+                ax=ax,
+                label="Activation",
+                fraction=0.03,
+                pad=0.02,
+            )
+        if node_text:
+            bold = [n for n in G.nodes() if label_map[n] in highlight_nodes]
+            normal = [n for n in G.nodes() if label_map[n] not in highlight_nodes]
+            nx.draw_networkx_labels(
+                G,
+                pos=pos,
+                labels={n: label_map[n] for n in normal},
+                font_size=14,
+                ax=ax,
+            )
+            nx.draw_networkx_labels(
+                G,
+                pos=pos,
+                labels={n: label_map[n] for n in bold},
+                font_size=14,
+                font_weight="bold",
+                ax=ax,
+            )
+        if edge_text:
+            elbl = {
+                (
+                    u,
+                    v,
+                ): f"{(wmin + (wmax - wmin) * (G[u][v]['weight'] - 1) / 9):.{weight_decimals}f}"
+                for u, v in G.edges()
+            }
+            nx.draw_networkx_edge_labels(
+                G,
+                pos=pos,
+                edge_labels=elbl,
+                label_pos=label_pos,
+                font_size=14,
+                rotate=False,
+                ax=ax,
+            )
+        if layered_mode:
+            ax.set_ylim(0, 1)
+        if save_plot:
+            fig.savefig(file_name + ".pdf")
+            print(f"Graph saved as {file_name}.pdf")
+        plt.show()
