@@ -212,8 +212,10 @@ def find_paths_of_length(
 
     # first find the middle layer:
     if target_layer_number % 2 == 0:
+        # when target_layer_number == 2, the middle layer is 1
         middle_layer = target_layer_number // 2
     else:
+        # when target_layer_number == 3, the middle layer is 2
         middle_layer = (target_layer_number + 1) // 2
 
     # list of empty lists, of length target_layer_number+1
@@ -233,12 +235,14 @@ def find_paths_of_length(
             return None
     # then go from outidx to middle layer
     # stopping at the layer after middle_layer
-    for layer in range(target_layer_number, middle_layer, -1):
-        layer_indices[layer - 1] = list(
-            edgelist[edgelist["post"].isin(layer_indices[layer])]["pre"].unique()
+    # when target_layer_number is 2 or 3, this is skipped
+    # when target_layer_number == 4:
+    for layer in range(target_layer_number - 1, middle_layer, -1):  # layer is 3
+        layer_indices[layer] = list(
+            edgelist[edgelist["post"].isin(layer_indices[layer + 1])]["pre"].unique()
         )
-        if len(layer_indices[layer - 1]) == 0:
-            print(f"No neurons found in layer {layer - 1}. Returning None.")
+        if len(layer_indices[layer]) == 0:
+            print(f"No neurons found in layer {layer}. Returning None.")
             return None
 
     # link middle layer with the one after
