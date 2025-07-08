@@ -1244,6 +1244,7 @@ def connectivity_summary(
         long_df = result.reset_index().melt(
             id_vars=idx_name, var_name="post_group", value_name="value"
         )
+        long_df = long_df[long_df["value"] != 0].reset_index(drop=True)
         return long_df
     return result
 
@@ -1723,14 +1724,15 @@ def contribution_by_path_lengths_heatmap(
 
 def effective_conn_from_paths(
     paths: pd.DataFrame,
-    pre_group: dict,
-    post_group: dict,
+    pre_group: Optional[dict] = None,
+    post_group: Optional[dict] = None,
     intermediate_group: Optional[dict] = None,
     wide: bool = True,
     combining_method: str = "mean",
     chunk_size: int = 2000,  # rows per chunk
     density_threshold: float = 0.2,
     use_gpu: bool = True,
+    root: bool = False,
 ):
     """
     Calculate the effective connectivity from the paths Dataframe (which could be an
@@ -1815,8 +1817,7 @@ def effective_conn_from_paths(
     else:
         device = torch.device("cuda")
         with torch.no_grad():
-            if chunk_size > m:
-                chunk_size = m
+            chunk_size = min(chunk_size, m)
             num_of_chunks = math.ceil(len(local_idx_dict) / chunk_size)
 
             # pre-define sparse matrices for each layer
@@ -1937,18 +1938,21 @@ def effective_conn_from_paths(
         result_el["pre"] = result_el.pre_idx.map(local_to_global_idx)
         result_el["post"] = result_el.post_idx.map(local_to_global_idx)
 
+    if root:
+        result_el["weight"] = result_el.weight ** (1 / len(paths.layer.unique()))
     # --------------------------------------------------------------------- #
     # 4. back to edge-list, group, pivot
     # --------------------------------------------------------------------- #
     from .path_finding import group_paths
 
-    result_el = group_paths(
-        result_el,
-        pre_group,
-        post_group,
-        intermediate_group,
-        combining_method=combining_method,
-    )
+    if pre_group is not None and post_group is not None:
+        result_el = group_paths(
+            result_el,
+            pre_group,
+            post_group,
+            intermediate_group,
+            combining_method=combining_method,
+        )
 
     if wide:
         result_el = result_el.pivot(index="pre", columns="post", values="weight")
