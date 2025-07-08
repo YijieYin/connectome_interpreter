@@ -358,7 +358,7 @@ def plot_flow_layered_paths(
         Find positions for the nodes depending on the layer flow.
         """
         # +0.5 at the end to make sure the max(layers) is included
-        layer_bins = np.arange(-0.5 / 2, np.ceil(max(layers)) + 0.5, 1 / 2)
+        layer_bins = np.arange(-0.5 / 2, np.ceil(max(layers)) + 1.5, 1 / 2)
         layer_labels = layer_bins[1:] + layer_bins[0]
         layer_binned = pd.cut(layers, bins=layer_bins, labels=layer_labels)
 
