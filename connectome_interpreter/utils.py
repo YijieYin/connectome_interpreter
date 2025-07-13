@@ -2217,13 +2217,18 @@ def plot_paths(
     `paths`), and flow paths (where layers can be continuous, in `pre_layer` and
     `post_layer` columns in `paths`).
 
+    The priority of nodes works as follows: without `priority_indices`, `sort_dict` or
+    `sort_by_activation`, the nodes are ordered to minimize edge crossings. Otherwise,
+    `sort_dict` > `priority_indices` > `sort_by_activation` for ordering nodes.
+
     Args:
         paths (pd.DataFrame): DataFrame containing the paths to plot. It could be the
             output of e.g. `find_paths_of_length()`, `layered_el()`, or
             `find_paths_iteratively()`.
         figsize (tuple, optional): Size of the figure. Defaults to (10, 8).
         priority_indices (list, optional): List of neuron identifiers to put on top in
-            the layout. Defaults to None.
+            the layout. This is treated the same as sort_dict with value 1. Defaults to
+            None.
         sort_dict (dict, optional): Dictionary mapping neuron identifiers to values
             for sorting. If provided, neurons will be sorted by these values. Bigger
             values are on top. Defaults to None.
@@ -2333,12 +2338,7 @@ def plot_paths(
         act_dict = {}
 
     if priority_indices is not None:
-        act_dict.update(
-            dict.fromkeys(
-                priority_indices,
-                max(df.pre_activation.max(), df.post_activation.max()) + 0.001,
-            )
-        )
+        act_dict.update(dict.fromkeys(priority_indices, 1))
 
     # honour caller’s explicit sort_dict over activations
     merged_sort = {**act_dict, **(sort_dict or {})} or None
