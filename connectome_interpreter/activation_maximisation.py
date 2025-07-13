@@ -1617,6 +1617,7 @@ def get_activations_for_path(
     Returns:
         pd.DataFrame: The activations for the pre and post neurons in the path.
     """
+    pathdf = path.copy()
 
     if isinstance(activations, torch.Tensor):
         activations = activations.cpu().detach().numpy()
@@ -1630,11 +1631,11 @@ def get_activations_for_path(
         idx_to_group = {idx: idx for idx in range(activations.shape[0])}
 
     # if starting later, just bump up the layer numbers
-    path.loc[:, ["layer"]] += activation_start
+    pathdf.loc[:, ["layer"]] += activation_start
 
     out_df = []
-    for l in sorted(path.layer.unique()):  # layer number starts at 1
-        layer_path = path[path.layer == l]
+    for l in sorted(pathdf.layer.unique()):  # layer number starts at 1
+        layer_path = pathdf[pathdf.layer == l]
 
         # pre activations
         prenodes = set(layer_path.pre)
@@ -2101,6 +2102,8 @@ def plot_timeseries(
     y_label: str = "Activation",
     title: Optional[str] = None,
     slider_dim: Optional[str] = "batch",
+    ymin: Optional[float] = None,
+    ymax: Optional[float] = None,
 ) -> go.Figure:
     """
     Generate an interactive time-series plot of neural activations, based on a dataframe
@@ -2113,7 +2116,6 @@ def plot_timeseries(
         df (pd.DataFrame): Must contain **'group'** plus one or more **'time_*'**
             columns (e.g. 'time_0', 'time_1' …). A **'batch_name'** column is
             optional.
-
         style (Optional[dict]): Plot styling; keys:
 
             - 'font_type': str, default='Arial'
@@ -2136,12 +2138,14 @@ def plot_timeseries(
         x_label (str): X-axis label.
         y_label (str): Y-axis label.
         title (Optional[str]): Figure title.
-
         slider_dim (str | None): Dimension for slider if both are present.
 
             - 'batch' (default): slider toggles **batch_name**, traces coloured by group.
             - 'group': slider toggles **group**, traces coloured by batch_name.
             - None: no slider (all traces in one panel).
+
+        ymin (Optional[float]): Minimum y-axis value. If None, set to minimum activation.
+        ymax (Optional[float]): Maximum y-axis value. If None, set to maximum activation
 
     Returns:
         fig (go.Figure)
@@ -2188,6 +2192,12 @@ def plot_timeseries(
 
     x_vals = [int(c.split("_")[1]) for c in time_cols]
 
+    y_data = df[time_cols].values.flatten()
+    y_range = [
+        ymin if ymin is not None else y_data.min(),
+        ymax if ymax is not None else y_data.max(),
+    ]
+
     # ---------- figure ------------------------------------------------------
     fig = go.Figure(
         layout=dict(
@@ -2210,6 +2220,7 @@ def plot_timeseries(
                 linewidth=z["axislinewidth"],
                 ticklen=z["ticklen"],
                 tickwidth=z["tickwidth"],
+                range=y_range,
             ),
             title=(
                 dict(text=title, x=0.5, font=dict(size=z["fsize_title_pt"]))
