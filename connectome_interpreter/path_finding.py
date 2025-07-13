@@ -813,9 +813,16 @@ def filter_paths(
         raise ValueError("The input DataFrame for filter_paths() is empty! ")
 
     if threshold > 0:
+        max_layer_num = df["layer"].max()
         df = df[df.weight > threshold]
         if df.shape[0] == 0:
             print("No edges left after thresholding. Try lowering the threshold.")
+            return
+        elif df["layer"].max() != max_layer_num:
+            print(
+                "No edges left in the last layer after thresholding."
+                "Try lowering the threshold."
+            )
             return
 
         df = remove_excess_neurons(df)
