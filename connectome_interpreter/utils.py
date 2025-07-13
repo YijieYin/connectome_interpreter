@@ -1927,8 +1927,6 @@ def scipy_sparse_to_pytorch(
 # ------------------------------------------------------------------
 # helpers for path plotting
 # ------------------------------------------------------------------
-
-
 def _is_number(txt: str) -> bool:
     try:
         float(txt)
@@ -1976,7 +1974,6 @@ def _barycentre_order(
 
 def _untangle_layers(
     path_df: pd.DataFrame,
-    priority_indices: Optional[Sequence[str]],
     sort_dict: Optional[Mapping[str, float]],
     passes: int = 4,
 ) -> dict[str, float]:
@@ -2006,17 +2003,35 @@ def _untangle_layers(
         )  # preserve order & uniq
 
     # fixed nodes => priority_indices and sort_dict keys
-    fixed_basenames = set(priority_indices or [])
+    fixed_basenames = set()
     if sort_dict:
         fixed_basenames.update(sort_dict.keys())
 
     # initial order: move fixed to end
     for k, nodes in layer_to_nodes.items():
-        non_fix = [n for n in nodes if _get_node(n) not in fixed_basenames]
-        fix = [n for n in nodes if _get_node(n) in fixed_basenames]
+        non_fix = [
+            n
+            for n in nodes
+            if _get_node(n) not in fixed_basenames and n not in fixed_basenames
+        ]
+        fix = [
+            n for n in nodes if _get_node(n) in fixed_basenames or n in fixed_basenames
+        ]
         # sort fixed chunk by sort_dict value desc
         if sort_dict:
-            fix.sort(key=lambda x: sort_dict.get(_get_node(x), -np.inf), reverse=True)
+            composite_sort_dict = {}
+            for x in fix:
+                node = _get_node(x)
+                if node in sort_dict:
+                    composite_sort_dict[x] = sort_dict[node]
+                elif x in sort_dict:
+                    composite_sort_dict[x] = sort_dict[x]
+                else:
+                    composite_sort_dict[x] = -np.inf
+            fix.sort(
+                key=lambda x: composite_sort_dict.get(x, -np.inf),
+                # reverse=True,
+            )
         layer_to_nodes[k] = non_fix + fix
 
     if not passes:
@@ -2058,7 +2073,6 @@ def _untangle_layers(
 
 def _create_layered_positions_tidy(
     df: pd.DataFrame,
-    priority_indices: Optional[Sequence[str]],
     sort_dict: Optional[Mapping[str, float]],
     untangle_iter: int = 4,
 ) -> dict[str, tuple[float, float]]:
@@ -2077,7 +2091,7 @@ def _create_layered_positions_tidy(
     layer_width = 1.0 / (n_layers + 1)
 
     # untangle ordering: returns idx starting at 1 **per layer**
-    order_idx = _untangle_layers(df, priority_indices, sort_dict, untangle_iter)
+    order_idx = _untangle_layers(df, sort_dict, untangle_iter)
 
     # count nodes per layer for even spacing
     layer_sizes: dict[int, int] = {}
@@ -2101,7 +2115,6 @@ def _find_flow_positions_tidy(
     height: float,
     width: float,
     df_edges: pd.DataFrame,
-    priority_indices: Optional[Sequence[str]],
     sort_dict: Optional[Mapping[str, float]],
 ) -> dict[str, tuple[float, float]]:
     """
@@ -2112,7 +2125,7 @@ def _find_flow_positions_tidy(
     layer_labels = layer_bins[:-1] + 0.25
     layer_binned = pd.cut(layers, bins=layer_bins, labels=layer_labels)
 
-    fixed_basenames = set(priority_indices or [])
+    fixed_basenames = set()
     if sort_dict:
         fixed_basenames.update(sort_dict.keys())
 
@@ -2212,7 +2225,7 @@ def plot_paths(
         priority_indices (list, optional): List of neuron identifiers to put on top in
             the layout. Defaults to None.
         sort_dict (dict, optional): Dictionary mapping neuron identifiers to values
-            for sorting. If provided, neurons will be sorted by these values. Smaller
+            for sorting. If provided, neurons will be sorted by these values. Bigger
             values are on top. Defaults to None.
         sort_by_activation (bool, optional): If True, sort neurons by their activation
             values (if available in the DataFrame). Defaults to False.
@@ -2319,13 +2332,20 @@ def plot_paths(
     else:
         act_dict = {}
 
+    if priority_indices is not None:
+        act_dict.update(
+            dict.fromkeys(
+                priority_indices,
+                max(df.pre_activation.max(), df.post_activation.max()) + 0.001,
+            )
+        )
+
     # honour caller’s explicit sort_dict over activations
     merged_sort = {**act_dict, **(sort_dict or {})} or None
 
     if layered_mode:
         pos = _create_layered_positions_tidy(
             df,
-            priority_indices,
             merged_sort,
             untangle_iter=(
                 0
@@ -2349,7 +2369,6 @@ def plot_paths(
             figsize[1] / 10,
             figsize[0] / 5,
             df[["pre", "post"]],
-            priority_indices,
             merged_sort,
         )
 
