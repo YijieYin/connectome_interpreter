@@ -1728,6 +1728,7 @@ def contribution_by_paths_of_length_data(
     outidx: arrayable,
     n: int,
     idx_map: dict | None = None,
+    combining_method: str = "mean",
 ):
     """Calculates the contribution from all of inidx to an
     average outidx (grouped by idx_map) over different path lengths. Presynaptic
@@ -1741,6 +1742,8 @@ def contribution_by_paths_of_length_data(
             indices.
         n (int): The maximum number of hops. n=1 for direct connections.
         idx_map (dict): Mapping from indices to neuron groups. 
+        combining_method (str, optional): Method to combine inputs or outputs. Can be
+            'mean', 'median', or 'sum'. Defaults to 'mean'.
 
     Returns:
         pd.DataFrame: A DataFrame containing the contributions from presynaptic neurons
@@ -1761,7 +1764,7 @@ def contribution_by_paths_of_length_data(
                 index=[0], columns=out_group,
             )
         else:
-            df = effective_conn_from_paths(paths, idx_map, idx_map)
+            df = effective_conn_from_paths(paths, idx_map, idx_map, combining_method=combining_method, wide=True)
             df = df.sum().to_frame().T
         rows.append(df)
 
@@ -1778,6 +1781,7 @@ def contribution_by_paths_of_length(
     outidx: arrayable,
     n: int,
     idx_map: dict | None = None,
+    combining_method: str = "mean",
     width: int = 800,
     height: int = 400,
 ):
@@ -1793,6 +1797,8 @@ def contribution_by_paths_of_length(
             indices.
         n (int): The maximum number of hops. n=1 for direct connections.
         idx_map (dict): Mapping from indices to neuron groups. 
+        combining_method (str, optional): Method to combine inputs or outputs. Can be
+            'mean', 'median', or 'sum'. Defaults to 'mean'.
 
     Returns:
         None: Displays an interactive line plot showing the connection strength from all
@@ -1804,7 +1810,8 @@ def contribution_by_paths_of_length(
         inidx, 
         outidx, 
         n, 
-        idx_map
+        idx_map=idx_map,
+        combining_method=combining_method,
     )
 
     fig = px.line(
