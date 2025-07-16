@@ -1114,6 +1114,7 @@ def connectivity_summary(
     if issparse(stepsn):
         submat = stepsn.tocsc()[inidx, :][:, outidx].tocoo()
         # map sub-indices back to original ids
+        # submat.row is the local indices of inidx
         pre_ids = inidx[submat.row]
         post_ids = outidx[submat.col]
         weights = submat.data
@@ -1122,10 +1123,19 @@ def connectivity_summary(
                 "pre_id": pre_ids,
                 "post_id": post_ids,
                 "weight": weights,
-                "pre_group": pd.Series(pre_ids).map(inidx_map).astype(str).values,
-                "post_group": pd.Series(post_ids).map(outidx_map).astype(str).values,
             }
         )
+        # do this to make sure the aggregation result is correct
+        # in case where e.g. a group only connects to a subset of neurons in the post
+        el_fullcombo = pd.DataFrame(
+            {
+                "pre_id": np.repeat(inidx, len(outidx)),
+                "post_id": np.tile(outidx, len(inidx)),
+            }
+        )
+        edgelist = pd.merge(
+            el_fullcombo, edgelist, how="left", on=["pre_id", "post_id"]
+        ).fillna(0)
     else:
         submat = stepsn[inidx, :][:, outidx]
         edgelist = pd.DataFrame(
@@ -1135,8 +1145,9 @@ def connectivity_summary(
                 "weight": submat.flatten(),
             }
         )
-        edgelist["pre_group"] = edgelist["pre_id"].map(inidx_map).astype(str)
-        edgelist["post_group"] = edgelist["post_id"].map(outidx_map).astype(str)
+
+    edgelist["pre_group"] = edgelist["pre_id"].map(inidx_map).astype(str)
+    edgelist["post_group"] = edgelist["post_id"].map(outidx_map).astype(str)
 
     # ---------------------------------------------------------------------#
     # Aggregate according to outprop / combining_method
@@ -1244,7 +1255,7 @@ def connectivity_summary(
         long_df = result.reset_index().melt(
             id_vars=idx_name, var_name="post_group", value_name="value"
         )
-        long_df = long_df[long_df["value"] != 0].reset_index(drop=True)
+        long_df = long_df[long_df["value"] >= display_threshold].reset_index(drop=True)
         return long_df
     return result
 
@@ -2053,8 +2064,8 @@ def effective_conn_from_paths_cpu(
 
 def signed_effective_conn_from_paths(
     paths,
-    pre_group: Optional[dict],
-    post_group: Optional[dict],
+    pre_group: Optional[dict] = None,
+    post_group: Optional[dict] = None,
     intermediate_group: dict | None = None,
     wide: bool = True,
     idx_to_nt: dict = None,
@@ -2170,22 +2181,23 @@ def signed_effective_conn_from_paths(
     result_el_i.loc[:, ["pre"]] = result_el_i.pre_idx.map(local_to_global_idx)
     result_el_i.loc[:, ["post"]] = result_el_i.post_idx.map(local_to_global_idx)
 
-    from .path_finding import group_paths
+    if pre_group is not None and post_group is not None:
+        from .path_finding import group_paths
 
-    result_el_e = group_paths(
-        result_el_e,
-        pre_group,
-        post_group,
-        intermediate_group,
-        combining_method=combining_method,
-    )
-    result_el_i = group_paths(
-        result_el_i,
-        pre_group,
-        post_group,
-        intermediate_group,
-        combining_method=combining_method,
-    )
+        result_el_e = group_paths(
+            result_el_e,
+            pre_group,
+            post_group,
+            intermediate_group,
+            combining_method=combining_method,
+        )
+        result_el_i = group_paths(
+            result_el_i,
+            pre_group,
+            post_group,
+            intermediate_group,
+            combining_method=combining_method,
+        )
 
     if wide:
         result_el_e = result_el_e.pivot(index="pre", columns="post", values="weight")
