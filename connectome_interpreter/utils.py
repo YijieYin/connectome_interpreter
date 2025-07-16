@@ -2210,6 +2210,7 @@ def plot_paths(
     default_neuron_color: str = "lightblue",
     default_edge_color: str = "lightgrey",
     node_size: int = 500,
+    node_text_size: int = 12,
     untangle_passes: int = 4,
 ) -> None:
     """
@@ -2446,7 +2447,7 @@ def plot_paths(
             n["color"] = mpl.colors.rgb2hex(nc_dict[n["id"]], keep_alpha=True)
             n["size"] = node_size / 20
             n["font"] = {
-                "size": 26,
+                "size": node_text_size,
                 "face": (
                     "arial black" if label_map[n["id"]] in highlight_nodes else "arial"
                 ),
@@ -2505,14 +2506,14 @@ def plot_paths(
                 G,
                 pos=pos,
                 labels={n: label_map[n] for n in normal},
-                font_size=14,
+                font_size=node_text_size,
                 ax=ax,
             )
             nx.draw_networkx_labels(
                 G,
                 pos=pos,
                 labels={n: label_map[n] for n in bold},
-                font_size=14,
+                font_size=node_text_size,
                 font_weight="bold",
                 ax=ax,
             )
