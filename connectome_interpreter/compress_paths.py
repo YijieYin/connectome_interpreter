@@ -1722,6 +1722,108 @@ def contribution_by_path_lengths_heatmap(
     display(widgets.interactive(plot_heatmap, index=slider))
 
 
+def contribution_by_paths_of_length_data(
+    inprop: spmatrix,
+    inidx: arrayable,
+    outidx: arrayable,
+    n: int,
+    idx_map: dict | None = None,
+):
+    """Calculates the contribution from all of inidx to an
+    average outidx (grouped by idx_map) over different path lengths. Presynaptic
+    neurons are summed over; postsynaptic neurons are grouped by idx_map. 
+    Direct connections are in path_length 1.
+
+    Args:
+        inprop (spmatrix): The connectivity matrix, with presynaptic in the rows.
+        inidx (int, float, list, set, numpy.ndarray, or pandas.Series): The source indices.
+        outidx (int, float, list, set, numpy.ndarray, or pandas.Series): The target
+            indices.
+        n (int): The maximum number of hops. n=1 for direct connections.
+        idx_map (dict): Mapping from indices to neuron groups. 
+
+    Returns:
+        pd.DataFrame: A DataFrame containing the contributions from presynaptic neurons
+            to postsynaptic groups over different path lengths. The DataFrame has three
+            columns: 'path_length', 'postsynaptic_type', and 'value'.
+    """
+
+    from .path_finding import find_paths_of_length
+    
+    rows = []
+    for i in tqdm(range(n)):
+        paths = find_paths_of_length(inprop, inidx, outidx, i+1)
+
+        if paths.empty:
+            out_group = np.unique(outidx.map(idx_map)) if idx_map is not None else np.unique(outidx)            
+            df = pd.DataFrame(
+                np.zeros((1, len(out_group))),
+                index=[0], columns=out_group,
+            )
+        else:
+            df = effective_conn_from_paths(paths, idx_map, idx_map)
+            df = df.sum().to_frame().T
+        rows.append(df)
+
+    contri = pd.concat(rows, ignore_index=True).melt(ignore_index=False).reset_index()
+    contri.columns = ["path_length", "postsynaptic_type", "value"]
+    contri.path_length = contri.path_length + 1
+    
+    return contri
+
+
+def contribution_by_paths_of_length(
+    inprop: spmatrix,
+    inidx: arrayable,
+    outidx: arrayable,
+    n: int,
+    idx_map: dict | None = None,
+    width: int = 800,
+    height: int = 400,
+):
+    """Plots the connection strength from all of inidx to an
+    average outidx (grouped by idx_map) over different path lengths. Presynaptic
+    neurons are summed over; postsynaptic neurons are grouped by idx_map. 
+    Direct connections are in path_length 1.
+
+    Args:
+        inprop (spmatrix): The connectivity matrix, with presynaptic in the rows.
+        inidx (int, float, list, set, numpy.ndarray, or pandas.Series): The source indices.
+        outidx (int, float, list, set, numpy.ndarray, or pandas.Series): The target
+            indices.
+        n (int): The maximum number of hops. n=1 for direct connections.
+        idx_map (dict): Mapping from indices to neuron groups. 
+
+    Returns:
+        None: Displays an interactive line plot showing the connection strength from all
+            of inidx to an average outidx over different path lengths.
+
+    """
+    contri = contribution_by_paths_of_length_data(
+        inprop, 
+        inidx, 
+        outidx, 
+        n, 
+        idx_map
+    )
+
+    fig = px.line(
+        contri,
+        x="path_length",
+        y="value",
+        color=contri.columns[1],
+        width=width,
+        height=height,
+    )
+    fig.update_layout(
+        xaxis=dict(tickmode="linear", tick0=1, dtick=1),
+        yaxis=dict(tickmode="linear", tick0=0, dtick=contri.value.max() / 5),
+    )
+    # fig.show()
+
+    return fig
+
+
 def effective_conn_from_paths(
     paths: pd.DataFrame,
     pre_group: Optional[dict] = None,
