@@ -1959,6 +1959,7 @@ def _check_consecutive_layers(df: pd.DataFrame) -> bool:
 def _barycentre_order(
     layer_nodes: list[str],
     neighbor_pos: Mapping[str, int],
+    adj: Mapping[str, set[str]],
     fixed_nodes: set[str],
 ) -> list[str]:
     """Return order list with (non-fixed) nodes sorted by barycentre."""
@@ -1966,7 +1967,7 @@ def _barycentre_order(
     fixed = [n for n in layer_nodes if n in fixed_nodes]
     bary = {}
     for n in mobiles:
-        neigh = [neighbor_pos[p] for p in neighbor_pos if _get_node(p) == _get_node(n)]
+        neigh = [neighbor_pos[p] for p in adj[n]]
         bary[n] = float(np.mean(neigh)) if neigh else np.inf
     mobiles.sort(key=lambda x: bary.get(x, np.inf))
     return mobiles + fixed  # fixed always on top (end of list → higher y)
@@ -2054,13 +2055,13 @@ def _untangle_layers(
         for l in range(1, n_layers):
             prev_pos = {n: i for i, n in enumerate(layer_to_nodes[l - 1])}
             layer_to_nodes[l] = _barycentre_order(
-                layer_to_nodes[l], prev_pos, fixed_nodes=set(fixed_basenames)
+                layer_to_nodes[l], prev_pos, preds, fixed_nodes=set(fixed_basenames)
             )
         # backward
         for l in reversed(range(n_layers - 1)):
             next_pos = {n: i for i, n in enumerate(layer_to_nodes[l + 1])}
             layer_to_nodes[l] = _barycentre_order(
-                layer_to_nodes[l], next_pos, fixed_nodes=set(fixed_basenames)
+                layer_to_nodes[l], next_pos, succs, fixed_nodes=set(fixed_basenames)
             )
 
     # produce order index
@@ -2068,6 +2069,7 @@ def _untangle_layers(
     for l, nodes in layer_to_nodes.items():
         for idx, n in enumerate(nodes, start=1):
             order_index[n] = idx
+
     return order_index
 
 
