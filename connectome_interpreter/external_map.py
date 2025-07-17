@@ -19,9 +19,10 @@ DATA_SOURCES: dict[str, str] = {
     "Matsliah2024": "data/Matsliah2024/fafb_right_vis_cols.csv",
     "Badel2016_PN": "data/Badel2016/Badel2016.csv",
     "Zhao2024": "data/Zhao2024/ucl_hex_right_20240701_tomale.csv",
-    "Hallem2026": "data/Hallem_Carlson_2006/odour_response_s1_tidy.csv",
-    "Hallem2026_dilution": "data/Hallem_Carlson_2006/odour_dilution_response_s2_tidy.csv",
-    "Hallem2026_time": "data/Hallem_Carlson_2006/odour_time_response_s3_tidy.csv",
+    "Hallem2006": "data/Hallem_Carlson_2006/odour_response_s1_tidy.csv",
+    "Hallem2006_dilution": "data/Hallem_Carlson_2006/odour_dilution_response_s2_tidy.csv",
+    "Hallem2006_time": "data/Hallem_Carlson_2006/odour_time_response_s3_tidy.csv",
+    "Knaden2012_odour_valence": "data/Knaden2012/Knaden2012_odour_valence.csv",
 }
 
 
@@ -44,9 +45,10 @@ def load_dataset(dataset: str) -> pd.DataFrame:
             - 'Matsliah2024': columnar coordinates of individual cells from a collection of columnar cell types in the right optic lobe from FAFB, from Matsliah et al. 2024 (https://www.nature.com/articles/s41586-024-07981-1).
             - 'Badel2016_PN': mapping from olfactory projection neurons to odours, from Badel et al. 2016 (https://www.cell.com/neuron/fulltext/S0896-6273(16)30201-X).
             - 'Zhao2024': mapping from hexagonal coordinates to 3D coordinates, update from Zhao et al. 2022 (https://www.biorxiv.org/content/10.1101/2022.12.14.520178v1).
-            - 'Hallem2026': mapping from glomeruli to chemicals, from Hallem and Carlson 2006 (https://www.cell.com/cell/abstract/S0092-8674(06)00363-1).
-            - 'Hallem2026_dilution': mapping from glomeruli to chemicals across dilution rates, from Hallem and Carlson 2006.
-            - 'Hallem2026_time': response of glomeruli to odours, across timepoints, from Hallem and Carlson 2006.
+            - 'Hallem2006': mapping from glomeruli to chemicals, from Hallem and Carlson 2006 (https://www.cell.com/cell/abstract/S0092-8674(06)00363-1).
+            - 'Hallem2006_dilution': mapping from glomeruli to chemicals across dilution rates, from Hallem and Carlson 2006.
+            - 'Hallem2006_time': response of glomeruli to odours, across timepoints, from Hallem and Carlson 2006.
+            - 'Knaden2012_odour_valence': behavioural valence of odours, from Knaden et al. 2012 (https://www.sciencedirect.com/science/article/pii/S2211124712000733).
 
     Returns:
         pd.DataFrame: The dataset as a pandas DataFrame. For the adult, the glomeruli
@@ -87,8 +89,8 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
             - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits, from Dweck et al. 2018. Number of responses normalised to between 0 and 1.
             - 'Nern2024': columnar coordinates of individual cells from a collection of columnar cell types within the medulla of the right optic lobe, from Nern et al. 2024.
             - 'Badel2016_PN': mapping from olfactory projection neurons to odours, from Badel et al. 2016 (https://www.cell.com/neuron/fulltext/S0896-6273(16)30201-X).
-            - 'Hallem2026': mapping from glomeruli to chemicals, from Hallem and Carlson 2006 (https://www.cell.com/cell/abstract/S0092-8674(06)00363-1).
-            - 'Hallem2026_dilution': mapping from glomeruli to chemicals across dilution rates, from Hallem and Carlson 2006.
+            - 'Hallem2006': mapping from glomeruli to chemicals, from Hallem and Carlson 2006 (https://www.cell.com/cell/abstract/S0092-8674(06)00363-1).
+            - 'Hallem2006_dilution': mapping from glomeruli to chemicals across dilution rates, from Hallem and Carlson 2006.
 
         custom_experiment (pd.DataFrame): A custom experimental dataset to compare the
             connectomics data to. The row indices of this dataframe must match the row
