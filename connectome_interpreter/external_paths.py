@@ -619,12 +619,10 @@ def layered_el(
         n (int): The maximum number of hops. n=1 for direct connections.
         idx_to_group (dict): Dictionary mapping cell indices to their respective cell
             groups.
-        combining_method (str, optional): Method to combine inputs (outprop=False)
-            or outputs (outprop=True). Can be 'sum', 'mean', or 'median'. Defaults to
-            'mean'.
-        threshold (float): The threshold for the weight of the direct
-            connection between pre and post, after grouping by `idx_to_group`. Defaults
-            to 0.
+        combining_method (str, optional): Method to combine inputs (outprop=False) or
+            outputs (outprop=True). Can be 'sum', 'mean', or 'median'. Defaults to 'mean'.
+        threshold (float): The threshold for the weight of the direct connection between
+            pre and post, after grouping by `idx_to_group`. Defaults to 0.
         flow_steps (int): Number of steps for flow calculation. Defaults to 20.
         flow_thre (float): Threshold for flow calculation. Defaults to 0.1.
         flow (pd.DataFrame, optional): DataFrame containing the flow hitting time.

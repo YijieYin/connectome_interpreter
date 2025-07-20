@@ -1,4 +1,5 @@
 # Standard library imports
+from itertools import product
 import math
 from typing import List, Optional, Union
 import os
@@ -1477,7 +1478,7 @@ def contribution_by_path_lengths_data(
     """Calculates the contribution from all of inidx (grouped by inidx_map) to an
     average outidx (grouped by outidx_map) over different path lengths. Either inidx_map
     or outidx_map, but not both, should be provided. If neither is provided, presynaptic
-    neurons are grouped together. Direct connections are in path_length 1.
+    neurons are grouped taoogether. Direct connections are in path_length 1.
 
     Args:
         steps (list of scipy.sparse matrices or numpy.array): List of sparse matrices,
@@ -1674,7 +1675,7 @@ def contribution_by_path_lengths_heatmap(
     heatmaps = []
 
     for step in tqdm(steps):
-        df = result_summary(
+        df = connectivity_summary(
             step,
             inidx,
             outidx,
@@ -1722,73 +1723,143 @@ def contribution_by_path_lengths_heatmap(
     display(widgets.interactive(plot_heatmap, index=slider))
 
 
-def contribution_by_paths_of_length_data(
+def conn_by_path_length_data(
     inprop: spmatrix,
     inidx: arrayable,
     outidx: arrayable,
     n: int,
-    idx_map: dict | None = None,
+    outidx_map: Optional[dict] = None,
+    inidx_map: Optional[dict] = None,
     combining_method: str = "mean",
+    wide: bool = False,
 ):
-    """Calculates the contribution from all of inidx to an
-    average outidx (grouped by idx_map) over different path lengths. Presynaptic
-    neurons are summed over; postsynaptic neurons are grouped by idx_map. 
-    Direct connections are in path_length 1.
+    """Calculates the connectivity from all of inidx (grouped by inidx_map) to outidx
+    (grouped by outidx_map)  within `n` hops, aggregated by `combining_method`. If
+    neither is provided, presynaptic neurons are grouped together. Direct connections
+    are in path_length 1.
 
     Args:
         inprop (spmatrix): The connectivity matrix, with presynaptic in the rows.
-        inidx (int, float, list, set, numpy.ndarray, or pandas.Series): The source indices.
+        inidx (int, float, list, set, numpy.ndarray, or pandas.Series): The source
+            indices.
         outidx (int, float, list, set, numpy.ndarray, or pandas.Series): The target
             indices.
         n (int): The maximum number of hops. n=1 for direct connections.
-        idx_map (dict): Mapping from indices to neuron groups. 
+        outidx_map (dict): Mapping from indices to postsynaptic neuron groups. Only one
+            of inidx_map and outidx_map should be specified.
+        inidx_map (dict): Mapping from indices to presynaptic neuron groups. Only one of
+            inidx_map and outidx_map should be specified.
         combining_method (str, optional): Method to combine inputs or outputs. Can be
             'mean', 'median', or 'sum'. Defaults to 'mean'.
 
     Returns:
-        pd.DataFrame: A DataFrame containing the contributions from presynaptic neurons
-            to postsynaptic groups over different path lengths. The DataFrame has three
-            columns: 'path_length', 'postsynaptic_type', and 'value'.
+        List[pd.DataFrame] | pd.DataFrame: If one of outidx_map and inidx_map is
+            provided, a DataFrame containing the three columns: 'path_length', 'post'
+            (or 'pre'), and 'weight'. If both are provided, a list of DataFrames, where
+            each one is the connectivity of a specific path length.
     """
 
+    inidx = to_nparray(inidx)
+    outidx = to_nparray(outidx)
+
     from .path_finding import find_paths_of_length
-    
+
+    # if no grouping dict provided, group all together
+    if inidx_map is None:
+        inidx_map = {idx: "group" for idx in inidx}
+        inidx_map_is_none = True
+    else:
+        inidx_map_is_none = False
+
+    if outidx_map is None:
+        outidx_map = {idx: "group" for idx in outidx}
+        outidx_map_is_none = True
+    else:
+        outidx_map_is_none = False
+
     rows = []
     for i in tqdm(range(n)):
-        paths = find_paths_of_length(inprop, inidx, outidx, i+1)
+        paths = find_paths_of_length(inprop, inidx, outidx, i + 1)
 
-        if paths.empty:
-            out_group = np.unique(outidx.map(idx_map)) if idx_map is not None else np.unique(outidx)            
-            df = pd.DataFrame(
-                np.zeros((1, len(out_group))),
-                index=[0], columns=out_group,
+        if paths is not None and not paths.empty:
+            # has colunms: pre, post, weight
+            df = effective_conn_from_paths(
+                paths,
+                pre_group=inidx_map,
+                post_group=outidx_map,
+                combining_method=combining_method,
+                wide=False,
             )
-        else:
-            df = effective_conn_from_paths(paths, idx_map, idx_map, combining_method=combining_method, wide=True)
-            df = df.sum().to_frame().T
-        rows.append(df)
+            df.loc[:, ["path_length"]] = i + 1
+            rows.append(df)
 
-    contri = pd.concat(rows, ignore_index=True).melt(ignore_index=False).reset_index()
-    contri.columns = ["path_length", "postsynaptic_type", "value"]
-    contri.path_length = contri.path_length + 1
-    
-    return contri
+    contri = pd.concat(rows, ignore_index=True)
+    if inidx_map_is_none:
+        contri = contri[["path_length", "post", "weight"]]
+    elif outidx_map_is_none:
+        contri = contri[["path_length", "pre", "weight"]]
+
+    if contri.shape[1] == 3:
+        # fill the empty path_length-pre/post weight with 0
+        # first make a df of all combinations of path_length and pre/post
+        contri_full = pd.DataFrame(
+            product(range(1, n + 1), contri.iloc[:, 1].unique()),
+            columns=["path_length", contri.columns[1]],
+        )
+        contri = pd.merge(
+            contri_full,
+            contri,
+            on=["path_length", contri.columns[1]],
+            how="left",
+        )
+        contri.fillna(0, inplace=True)
+        if wide:
+            # make wider
+            contri = contri.pivot(
+                index="path_length", columns=contri.columns[1], values="weight"
+            )
+        return contri
+    else:
+        contri_all = []
+        for plength in range(1, n + 1):
+            contri_plength = contri[contri["path_length"] == plength]
+            contri_plength_allcombo = pd.DataFrame(
+                product(contri.pre.unique(), contri_plength.post.unique()),
+                columns=["pre", "post"],
+            )
+            contri_plength = pd.merge(
+                contri_plength_allcombo,
+                contri_plength,
+                on=["pre", "post"],
+                how="left",
+            )
+            contri_plength.fillna(0, inplace=True)
+            # make wider
+            if wide:
+                contri_plength = contri_plength.pivot(
+                    index="pre", columns="post", values="weight"
+                )
+            # if not wide, has columns: pre, post, weight, path_length
+            contri_all.append(contri_plength)
+
+        return contri_all
 
 
-def contribution_by_paths_of_length(
+def conn_by_path_length(
     inprop: spmatrix,
     inidx: arrayable,
     outidx: arrayable,
     n: int,
-    idx_map: dict | None = None,
+    outidx_map: Optional[dict] = None,
+    inidx_map: Optional[dict] = None,
     combining_method: str = "mean",
     width: int = 800,
     height: int = 400,
 ):
-    """Plots the connection strength from all of inidx to an
-    average outidx (grouped by idx_map) over different path lengths. Presynaptic
-    neurons are summed over; postsynaptic neurons are grouped by idx_map. 
-    Direct connections are in path_length 1.
+    """Plots the connectivity from all of inidx (grouped by inidx_map) to outidx
+    (grouped by outidx_map)  within `n` hops, aggregated by `combining_method`. Either
+    inidx_map or outidx_map, but not both, should be provided. If neither is provided,
+    presynaptic neurons are grouped together. Direct connections are in path_length 1.
 
     Args:
         inprop (spmatrix): The connectivity matrix, with presynaptic in the rows.
@@ -1796,39 +1867,167 @@ def contribution_by_paths_of_length(
         outidx (int, float, list, set, numpy.ndarray, or pandas.Series): The target
             indices.
         n (int): The maximum number of hops. n=1 for direct connections.
-        idx_map (dict): Mapping from indices to neuron groups. 
+        outidx_map (dict): Mapping from indices to postsynaptic neuron groups. Only one
+            of inidx_map and outidx_map should be specified.
+        inidx_map (dict): Mapping from indices to presynaptic neuron groups. Only one of
+            inidx_map and outidx_map should be specified.
         combining_method (str, optional): Method to combine inputs or outputs. Can be
             'mean', 'median', or 'sum'. Defaults to 'mean'.
+        width (int, optional): The width of the plot. Defaults to 800.
+        height (int, optional): The height of the plot. Defaults to 400.
 
     Returns:
         None: Displays an interactive line plot showing the connection strength from all
             of inidx to an average outidx over different path lengths.
 
     """
-    contri = contribution_by_paths_of_length_data(
-        inprop, 
-        inidx, 
-        outidx, 
-        n, 
-        idx_map=idx_map,
+
+    inidx = to_nparray(inidx)
+    outidx = to_nparray(outidx)
+
+    # check if both inidx_map and outidx_map are provided
+    if inidx_map is not None and outidx_map is not None:
+        raise ValueError(
+            "Only one of inidx_map and outidx_map should be specified. "
+            "If you want to keep both, use "
+            "contribution_by_path_lengths_heatmap()."
+        )
+
+    if inidx_map is None and outidx_map is None:
+        outidx_map = {idx: idx for idx in outidx}
+        # give message that pres are grouped together
+        print(
+            "Neither inidx_map nor outidx_map provided. By default "
+            "presynaptic neurons are grouped together."
+        )
+
+    contri = conn_by_path_length_data(
+        inprop,
+        inidx,
+        outidx,
+        n,
+        inidx_map=inidx_map,
+        outidx_map=outidx_map,
         combining_method=combining_method,
     )
 
     fig = px.line(
         contri,
         x="path_length",
-        y="value",
+        y="weight",
         color=contri.columns[1],
         width=width,
         height=height,
     )
     fig.update_layout(
         xaxis=dict(tickmode="linear", tick0=1, dtick=1),
-        yaxis=dict(tickmode="linear", tick0=0, dtick=contri.value.max() / 5),
+        yaxis=dict(tickmode="linear", tick0=0, dtick=contri.weight.max() / 5),
     )
-    # fig.show()
 
     return fig
+
+
+def conn_by_path_length_heatmap(
+    inprop: spmatrix,
+    inidx: arrayable,
+    outidx: arrayable,
+    n: int,
+    outidx_map: Optional[dict] = None,
+    inidx_map: Optional[dict] = None,
+    threshold: float = 0,
+    combining_method: str = "mean",
+    cmap="viridis",
+    annot=True,
+    figsize=(30, 15),
+):
+    """Display the connectivity from all of inidx (grouped by inidx_map) to outidx
+    (grouped by outidx_map)  within `n` hops, aggregated by `combining_method`.
+
+    Args:
+        inprop (spmatrix): The connectivity matrix, with presynaptic in the rows.
+        inidx (int, float, list, set, numpy.ndarray, or pandas.Series): The source indices.
+        outidx (int, float, list, set, numpy.ndarray, or pandas.Series): The target
+            indices.
+        n (int): The maximum number of hops. n=1 for direct connections.
+        outidx_map (dict): Mapping from indices to postsynaptic neuron groups. Only one
+            of inidx_map and outidx_map should be specified.
+        inidx_map (dict): Mapping from indices to presynaptic neuron groups. Only one of
+            inidx_map and outidx_map should be specified.
+        combining_method (str, optional): Method to combine inputs or outputs. Can be
+            'mean', 'median', or 'sum'. Defaults to 'mean'.
+        cmap (str, optional): The colormap to use for the heatmap. Defaults to 'viridis'.
+        annot (bool, optional): Whether to annotate the heatmap with the values.
+            Defaults to True.
+        figsize (tuple, optional): The size of the figure to display. Defaults to
+            (30, 15).
+
+    Returns:
+        None: Displays a heatmap showing the connection strength from all of inidx to an
+            average outidx over different path lengths with a slider.
+    """
+
+    inidx = to_nparray(inidx)
+    outidx = to_nparray(outidx)
+
+    if inidx_map is None and outidx_map is None:
+        outidx_map = {idx: idx for idx in outidx}
+        # give message that pres are grouped together
+        print(
+            "Neither inidx_map nor outidx_map provided. By default "
+            "presynaptic neurons are grouped together."
+        )
+
+    contri = conn_by_path_length_data(
+        inprop,
+        inidx,
+        outidx,
+        n,
+        inidx_map=inidx_map,
+        outidx_map=outidx_map,
+        combining_method=combining_method,
+    )  # list of dataframes with columns: path_length, pre, post, weight
+
+    if threshold != 0:
+        thresholded = pd.concat([df[df.weight >= threshold] for df in contri])
+        contri = [
+            df[(df.pre.isin(thresholded.pre)) & (df.post.isin(thresholded.post))]
+            for df in contri
+        ]
+
+    # make wider
+    contri = [df.pivot(index="pre", columns="post", values="weight") for df in contri]
+
+    slider = widgets.IntSlider(
+        value=1,
+        min=1,
+        max=len(contri),
+        step=1,
+        description="Path length",
+        continuous_update=True,
+    )
+
+    def plot_heatmap(index):
+        plt.figure(figsize=figsize)
+        # plt.imshow(heatmaps[index], cmap='viridis', aspect = 'auto')
+        # Use seaborn's heatmap function which is a higher-level API for
+        # Matplotlib's imshow
+        sns.heatmap(
+            contri[index - 1],
+            annot=annot,
+            fmt=".2f",
+            linewidths=0.5,
+            cmap=cmap,
+        )
+
+        # Rotate the tick labels for the columns to show them better
+        plt.xticks(rotation=90)
+        plt.yticks(rotation=0)
+
+        # Show the heatmap
+        plt.show()
+
+    # Link the slider to the plotting function
+    display(widgets.interactive(plot_heatmap, index=slider))
 
 
 def effective_conn_from_paths(
@@ -1879,6 +2078,10 @@ def effective_conn_from_paths(
     # --------------------------------------------------------------------- #
     # 0. preliminaries
     # --------------------------------------------------------------------- #
+    if len(paths) == 0:
+        print("No paths found, returning None.")
+        return None
+
     local_idx_dict = {
         idx: i for i, idx in enumerate(set(paths.pre).union(set(paths.post)))
     }
@@ -2054,7 +2257,7 @@ def effective_conn_from_paths(
     # --------------------------------------------------------------------- #
     from .path_finding import group_paths
 
-    if pre_group is not None and post_group is not None:
+    if pre_group is not None or post_group is not None:
         result_el = group_paths(
             result_el,
             pre_group,
@@ -2162,8 +2365,8 @@ def effective_conn_from_paths_cpu(
 
 def signed_effective_conn_from_paths(
     paths,
-    pre_group: Optional[dict],
-    post_group: Optional[dict],
+    pre_group: Optional[dict] = None,
+    post_group: Optional[dict] = None,
     intermediate_group: dict | None = None,
     wide: bool = True,
     idx_to_nt: dict = None,

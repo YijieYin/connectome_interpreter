@@ -851,18 +851,18 @@ def filter_paths(
 
 def group_paths(
     paths: pd.DataFrame,
-    pre_group: dict,
-    post_group: dict,
+    pre_group: Optional[dict] = None,
+    post_group: Optional[dict] = None,
     intermediate_group: dict | None = None,
     avg_within_connected: bool = False,
     outprop: bool = False,
     combining_method: str = "mean",
 ) -> pd.DataFrame:
     """
-    Group the paths by user-specified variable (e.g. cell type, cell class
-    etc.). Weights are summed across presynaptic neurons of the same group and
-    averaged across all postsynaptic neurons of the same group (even if some
-    postsynaptic neurons are not in `paths`).
+    Group the paths by user-specified variable (e.g. cell type, cell class etc.).
+    Weights are summed across presynaptic neurons of the same group and averaged across
+    all postsynaptic neurons of the same group (even if some postsynaptic neurons are
+    not in `paths`).
 
     Args:
         paths (pd.DataFrame): The DataFrame containing the path data, looking
@@ -894,6 +894,12 @@ def group_paths(
         "The combining_method should be either 'mean', 'sum' or 'median'. "
         f"Currently it is {combining_method}."
     )
+
+    all_nodes = set(paths["pre"]).union(set(paths["post"]))
+    if pre_group is None:
+        pre_group = {node: node for node in all_nodes}
+    if post_group is None:
+        post_group = {node: node for node in all_nodes}
 
     if intermediate_group is None:
         intermediate_group = pre_group
