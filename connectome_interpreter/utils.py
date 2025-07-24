@@ -2214,6 +2214,8 @@ def plot_paths(
     node_size: int = 500,
     node_text_size: int = 12,
     untangle_passes: int = 4,
+    pre_pad: float = 0.2,
+    post_pad: float = 0.2,
 ) -> None:
     """
     Plotting function for both layered (where layers are discrete, in `layer` column of
@@ -2273,6 +2275,10 @@ def plot_paths(
         node_size (int, optional): Size of the nodes in the plot. Defaults to 500.
         untangle_passes (int, optional): Number of passes for untangling the layout.
             Defaults to 4.
+        pre_pad (float, optional): Padding to add to the left side of the plot. Defaults
+            to 0.2.
+        post_pad (float, optional): Padding to add to the right side of the plot.
+            Defaults to 0.2.
 
     Returns:
         None: Displays the plot or creates an interactive visualization.
@@ -2538,6 +2544,12 @@ def plot_paths(
             )
         if layered_mode:
             ax.set_ylim(0, 1)
+
+        # --- expand axis limits to fit labels ---
+        x_vals = [pos[n][0] for n in G.nodes()]
+        x_min, x_max = min(x_vals), max(x_vals)
+        ax.set_xlim(x_min - pre_pad, x_max + post_pad)
+
         if save_plot:
             fig.savefig(file_name + ".pdf")
             print(f"Graph saved as {file_name}.pdf")
