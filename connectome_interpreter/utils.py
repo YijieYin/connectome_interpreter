@@ -2480,10 +2480,21 @@ def plot_paths(
             """
         )
 
-        if save_plot:
-            net.write_html(f"{file_name}.html")
-            print(f"Interactive graph saved as {file_name}.html")
-        net.show(f"{file_name}.html", notebook=False)
+        if "COLAB_GPU" in os.environ:
+            # display of plot in ipynb only works in colab
+            html = net.generate_html(notebook=True)
+            if save_plot:
+                with open(f"{file_name}.html", "w") as f:
+                    f.write(html)
+
+            display(HTML(html))
+        else:
+            # if running locally, will just open in browser
+            if save_plot:
+                net.write_html(str(file_name) + ".html")
+                print(f"Interactive graph saved as {file_name}.html")
+
+            net.show(f"{file_name}.html", notebook=False)
     else:
         fig, ax = plt.subplots(figsize=figsize)
         nx.draw(
