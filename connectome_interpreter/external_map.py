@@ -142,6 +142,7 @@ def hex_heatmap(
     global_max: Optional[float] = None,
     dataset: Optional[str] = "mcns_right",
     value_name: str = "weight",
+    colorbar: bool = True,
 ) -> go.Figure:
     """
     Generate a hexagonal heat map plot of the data. The index of the data
@@ -219,6 +220,44 @@ def hex_heatmap(
         """
         Generate a scatter plot of the data hexagons.""
         """
+        marker_config = {
+            "cmin": global_min,
+            "cmax": global_max,
+            "size": sizing["markersize"],
+            "color": aseries.values,
+            "line": {
+                "width": sizing["markerlinewidth"],
+                "color": "lightgrey",
+            },
+            "colorscale": custom_colorscale,
+        }
+
+        if colorbar:
+            marker_config["colorbar"] = {
+                "orientation": "v",
+                "outlinecolor": style["linecolor"],
+                "outlinewidth": sizing["axislinewidth"],
+                "thickness": sizing["cbar_thickness"],
+                "len": sizing["cbar_len"],
+                "tickmode": "array",
+                "ticklen": sizing["ticklen"],
+                "tickwidth": sizing["tickwidth"],
+                "tickcolor": style["linecolor"],
+                "tickfont": {
+                    "size": fsize_ticks_px,
+                    "family": style["font_type"],
+                    "color": style["linecolor"],
+                },
+                "tickformat": ".5f",
+                "title": {
+                    "font": {
+                        "family": style["font_type"],
+                        "size": fsize_title_px,
+                        "color": style["linecolor"],
+                    },
+                    "side": "right",
+                },
+            }
         goscatter = go.Scatter(
             x=x_vals,
             y=y_vals,
@@ -227,42 +266,7 @@ def hex_heatmap(
             customdata=np.stack([x_vals, y_vals, aseries.values], axis=-1),
             hovertemplate="x: %{customdata[0]}<br>y: %{customdata[1]}<br>%{text}: %{customdata[2]:.4f}",
             text=[value_name] * len(aseries),
-            marker={
-                "cmin": global_min,
-                "cmax": global_max,
-                "size": sizing["markersize"],
-                "color": aseries.values,
-                "line": {
-                    "width": sizing["markerlinewidth"],
-                    "color": "lightgrey",
-                },
-                "colorbar": {
-                    "orientation": "v",
-                    "outlinecolor": style["linecolor"],
-                    "outlinewidth": sizing["axislinewidth"],
-                    "thickness": sizing["cbar_thickness"],
-                    "len": sizing["cbar_len"],
-                    "tickmode": "array",
-                    "ticklen": sizing["ticklen"],
-                    "tickwidth": sizing["tickwidth"],
-                    "tickcolor": style["linecolor"],
-                    "tickfont": {
-                        "size": fsize_ticks_px,
-                        "family": style["font_type"],
-                        "color": style["linecolor"],
-                    },
-                    "tickformat": ".5f",
-                    "title": {
-                        "font": {
-                            "family": style["font_type"],
-                            "size": fsize_title_px,
-                            "color": style["linecolor"],
-                        },
-                        "side": "right",
-                    },
-                },
-                "colorscale": custom_colorscale,
-            },
+            marker=marker_config,
             showlegend=False,
         )
         return goscatter
@@ -570,6 +574,7 @@ def plot_mollweide_projection(
     dataset: str = "Zhao2024",
     marker_size: int = 8,
     value_name: str = "weight",
+    colorbar: bool = True,
 ) -> go.Figure:
     """
     Generates a heatmap to visualize the value of column features per column using the
@@ -700,8 +705,12 @@ def plot_mollweide_projection(
                 cmin=global_min,
                 cmax=global_max,
                 size=marker_size,
-                colorbar=dict(
-                    title=dict(text=value_name, side="right"),
+                colorbar=(
+                    None
+                    if not colorbar
+                    else dict(
+                        title=dict(text=value_name, side="right"),
+                    )
                 ),
             ),
             customdata=np.stack([x_coords, y_coords, series_data.values], axis=-1),
