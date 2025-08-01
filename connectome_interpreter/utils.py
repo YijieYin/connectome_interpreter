@@ -1958,8 +1958,9 @@ def _check_consecutive_layers(df: pd.DataFrame) -> bool:
 
 def _barycentre_order(
     layer_nodes: list[str],
-    neighbor_pos: Mapping[str, int],
-    adj: Mapping[str, set[str]],
+    normalised_node_pos: Mapping[str, int],
+    preds: Mapping[str, set[str]],
+    succs: Mapping[str, set[str]],
     fixed_nodes: set[str],
 ) -> list[str]:
     """Return order list with (non-fixed) nodes sorted by barycentre."""
@@ -1967,8 +1968,18 @@ def _barycentre_order(
     fixed = [n for n in layer_nodes if n in fixed_nodes]
     bary = {}
     for n in mobiles:
-        neigh = [neighbor_pos[p] for p in adj[n]]
-        bary[n] = float(np.mean(neigh)) if neigh else np.inf
+        if n not in preds:
+            pred_pos = []
+        else:
+            pred_pos = [normalised_node_pos[p] for p in preds[n]]
+
+        if n not in succs:
+            succ_pos = []
+        else:
+            succ_pos = [normalised_node_pos[p] for p in succs[n]]
+
+        bary[n] = float(np.mean(pred_pos + succ_pos))
+
     mobiles.sort(key=lambda x: bary.get(x, np.inf))
     return mobiles + fixed  # fixed always on top (end of list → higher y)
 
@@ -1993,7 +2004,7 @@ def _untangle_layers(
         )
 
     layers = sorted(path_df["layer"].unique())
-    n_layers = len(layers) + 1  # include input layer 0
+    n_layers = len(layers) + 1
     layer_to_nodes: dict[int, list[str]] = {i: [] for i in range(n_layers)}
     for _, r in path_df.iterrows():
         layer_to_nodes[r.layer - 1].append(r.pre_layer_id)
@@ -2052,16 +2063,26 @@ def _untangle_layers(
     # iterate forward / backward
     for _ in range(passes):
         # forward
-        for l in range(1, n_layers):
-            prev_pos = {n: i for i, n in enumerate(layer_to_nodes[l - 1])}
+        for l in range(n_layers):
+            pos = {}
+            if l != 0:
+                prev_pos = {
+                    n: i / len(layer_to_nodes[l - 1])
+                    for i, n in enumerate(layer_to_nodes[l - 1])
+                }
+                pos.update(prev_pos)
+            if l != n_layers - 1:
+                next_pos = {
+                    n: i / len(layer_to_nodes[l + 1])
+                    for i, n in enumerate(layer_to_nodes[l + 1])
+                }
+                pos.update(next_pos)
             layer_to_nodes[l] = _barycentre_order(
-                layer_to_nodes[l], prev_pos, preds, fixed_nodes=set(fixed_basenames)
-            )
-        # backward
-        for l in reversed(range(n_layers - 1)):
-            next_pos = {n: i for i, n in enumerate(layer_to_nodes[l + 1])}
-            layer_to_nodes[l] = _barycentre_order(
-                layer_to_nodes[l], next_pos, succs, fixed_nodes=set(fixed_basenames)
+                layer_to_nodes[l],
+                pos,
+                preds,
+                succs,
+                fixed_nodes=set(fixed_basenames),
             )
 
     # produce order index
@@ -2118,69 +2139,73 @@ def _find_flow_positions_tidy(
     width: float,
     df_edges: pd.DataFrame,
     sort_dict: Optional[Mapping[str, float]],
+    passes: int = 4,
+    seed: Optional[int] = None,
 ) -> dict[str, tuple[float, float]]:
     """
     Similar to original find_flow_positions but re-orders nodes in each bin by
     upstream barycentre, keeping fixed nodes (priority or sort_dict) on top.
     """
-    layer_bins = np.arange(-0.25, np.ceil(layers.max()) + 1.5, 0.5)
+    layer_bins = np.arange(-0.25, np.ceil(layers.max()) + 0.5, 0.5)
     layer_labels = layer_bins[:-1] + 0.25
     layer_binned = pd.cut(layers, bins=layer_bins, labels=layer_labels)
+    unique_layers = np.unique(sorted(layer_binned))
+    vertex_to_layer = dict(zip(vertices, layers))
 
-    fixed_basenames = set()
-    if sort_dict:
-        fixed_basenames.update(sort_dict.keys())
+    fix = list(sort_dict.keys()) if sort_dict else []
+    if len(fix) > 0:
+        fix.sort(key=lambda x: sort_dict.get(x))
 
     # build predecessors map for barycentre
     preds: dict[str, set[str]] = {}
+    succs: dict[str, set[str]] = {}
     for _, r in df_edges.iterrows():
         preds.setdefault(r.post, set()).add(r.pre)
+        succs.setdefault(r.pre, set()).add(r.post)
 
     positions = {}
     layer_w = width / layers.max()
 
-    for lb in np.unique(layer_binned):
-        idxs = np.where(layer_binned == lb)[0]
-        if len(idxs) == 0:
-            continue
-        verts = vertices[idxs]
-        heights = height / (len(verts) + 1)
+    # rng is seeded only if the caller passes a seed
+    rng = np.random.default_rng(seed)
+    # has info on layer name and order of elements
+    layer_to_nodes: dict[float, list[str]] = {}
+    for lb in unique_layers:
+        layer_to_nodes[lb] = vertices[np.where(layer_binned == lb)[0]]
+        # first suffle elemetns
+        layer_to_nodes[lb] = rng.permutation(layer_to_nodes[lb]).tolist()
+        # then put those from sort_dict at the end
+        notfixed = []
+        these_fixed = []
+        for v in layer_to_nodes[lb]:
+            if v not in fix:
+                notfixed.append(v)
+            else:
+                these_fixed.append(v)
+        layer_to_nodes[lb] = notfixed + these_fixed
 
-        # order
-        prev_layer_nodes = {
-            v: i
-            for i, v in enumerate(vertices[np.where(layer_binned == (lb - 0.5))[0]])
-        }
-        bary = {}
-        for v in verts:
-            neigh = preds.get(v, [])
-            neigh_idx = [prev_layer_nodes.get(n, 0) for n in neigh]
-            bary[v] = np.mean(neigh_idx) if neigh_idx else np.inf
+    # make normalised positions
+    normalised_node_pos = {}
+    for lb in unique_layers:
+        for i, v in enumerate(layer_to_nodes[lb]):
+            normalised_node_pos[v] = i / (len(layer_to_nodes[lb]))
 
-        fixed = [v for v in verts if v in fixed_basenames]
-        non_fixed = [v for v in verts if v not in fixed]
-
-        # non-fixed order: sort_dict value takes precedence, else barycentre
-        def _key(v):
-            return (
-                sort_dict.get(v, None)
-                if sort_dict and v in sort_dict
-                else -bary.get(v, np.inf)  # negate so bigger bary ↓
+    for _ in range(passes):
+        for lb in unique_layers:
+            layer_to_nodes[lb] = _barycentre_order(
+                layer_to_nodes[lb], normalised_node_pos, preds, succs, set(fix)
             )
+            for i, v in enumerate(layer_to_nodes[lb]):
+                normalised_node_pos[v] = i / (len(layer_to_nodes[lb]))
 
-        non_fixed.sort(key=_key)  # bigger sort_dict → top
-
-        # fixed chunk sorted by sort_dict (bigger → top)
-        if sort_dict:
-            fixed.sort(key=lambda x: sort_dict.get(_get_node(x), np.inf))
-
-        ordered = fixed + non_fixed
-
-        for j, v in enumerate(ordered, start=1):
+    for lb in unique_layers:
+        heights = height / (len(layer_to_nodes[lb]) + 1)
+        for j, v in enumerate(layer_to_nodes[lb], start=1):
             positions[v] = (
-                layers[np.where(vertices == v)[0][0]] * layer_w - width / 2,
+                vertex_to_layer[v] * layer_w - width / 2,
                 j * heights,
             )
+
     return positions
 
 
@@ -2213,9 +2238,10 @@ def plot_paths(
     default_edge_color: str = "lightgrey",
     node_size: int = 500,
     node_text_size: int = 12,
-    untangle_passes: int = 4,
+    untangle_passes: int = 20,
     pre_pad: float = 0.2,
     post_pad: float = 0.2,
+    seed: Optional[int] = None,
 ) -> None:
     """
     Plotting function for both layered (where layers are discrete, in `layer` column of
@@ -2273,12 +2299,13 @@ def plot_paths(
         default_edge_color (str, optional): Default color for edges if not specified in
             `neuron_to_sign`. Defaults to "lightgrey".
         node_size (int, optional): Size of the nodes in the plot. Defaults to 500.
-        untangle_passes (int, optional): Number of passes for untangling the layout.
-            Defaults to 4.
+        untangle_passes (int, optional): Number of passes for using positions of
+            connected neurons to determine neuron position. Defaults to 20.
         pre_pad (float, optional): Padding to add to the left side of the plot. Defaults
             to 0.2.
         post_pad (float, optional): Padding to add to the right side of the plot.
             Defaults to 0.2.
+        seed (int, optional): Random seed for reproducibility. Defaults to None.
 
     Returns:
         None: Displays the plot or creates an interactive visualization.
@@ -2372,13 +2399,20 @@ def plot_paths(
                 layers[i] = df[df.pre == v].pre_layer.values[0]
             elif v in df.post.values:
                 layers[i] = df[df.post == v].post_layer.values[0]
+
         pos = _find_flow_positions_tidy(
             verts,
             layers,
             figsize[1] / 10,
             figsize[0] / 5,
-            df[["pre", "post"]],
+            df,
             merged_sort,
+            passes=(
+                0
+                if merged_sort and len(merged_sort) == len(set(df.pre) | set(df.post))
+                else untangle_passes
+            ),
+            seed=seed,
         )
 
     # ------------------------------------------------------------------
