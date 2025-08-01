@@ -182,6 +182,9 @@ class MultilayeredNetwork(nn.Module):
             strengths. Defaults to 1.
         activation_function (Callable, optional): Custom activation function. If None,
             uses default implementation.
+        tau (float, optional): The extent to which the activation persists to the next
+            timestep. Defaults to 0 (no persistence). 0.5 means 50% of the activation is
+            carried over to the next timestep.
         device (torch.device, optional): Device for computation.
     """
 
@@ -199,6 +202,7 @@ class MultilayeredNetwork(nn.Module):
         divisive_normalization: Optional[Dict[str, List[str]]] = None,
         divisive_strength: Union[float, int, dict] = 1,
         activation_function: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+        tau: float = 0,
         device: Optional[torch.device] = None,
     ):
         super().__init__()
@@ -285,6 +289,7 @@ class MultilayeredNetwork(nn.Module):
         self.custom_activation_function = activation_function
         self.default_bias = default_bias
         self.divisive_normalization = divisive_normalization
+        self.tau = tau
 
         # Setup trainable parameters if idx_to_group is provided
         if idx_to_group is not None:
@@ -468,7 +473,8 @@ class MultilayeredNetwork(nn.Module):
             biases = self.biases[self.indices]
             biases = biases.view(-1, 1).expand(-1, x.shape[1]).to(x.device)
 
-        x = slopes * x + biases
+        x = self.tau * x_previous + slopes * x + biases
+        # x = slopes * x + biases
 
         # Thresholded relu
         x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
@@ -518,7 +524,44 @@ class MultilayeredNetwork(nn.Module):
             device=inputs.device,
             requires_grad=req_grad,
         )
-        full_input = full_input.index_add(0, self.sensory_indices, inputs[:, :, 0].t())
+
+        # # add bias - decided to not, because if added, then model gives different output depending on which neurons are 'sensory'
+        # if self.biases is None:
+        #     biases = self.default_bias
+        # else:
+        #     biases = self.biases[self.indices]
+        #     biases = (
+        #         biases.view(-1, 1)
+        #         .expand(-1, inputs.size(0))
+        #         .to(self.all_weights.device)
+        #     )
+        # full_input = full_input + biases
+
+        # replace sensory neurons activations with inputs
+        full_input = full_input.scatter(
+            0,
+            # shape: (sensory_neurons, batch_size)
+            self.sensory_indices.view(-1, 1).expand(-1, inputs.size(0)),
+            inputs[:, :, 0].t(),  # shape: (sensory_neurons, batch_size)
+        )
+        # # to illustrate how this works:
+        # dest = torch.zeros(5, 2)
+        # # sensory neurons, batch
+        # index = torch.tensor(
+        #     [
+        #         [0, 0],
+        #         [1, 1],
+        #         [3, 3],
+        #     ]
+        # )
+        # # shape: (sensory_neurons, batch)
+        # src = torch.tensor([[10, 20],
+        #                     [30, 40],
+        #                     [50, 60]
+        #                     ], dtype=dest.dtype)
+        # dest.scatter(0, index, src)
+
+        # full_input = full_input.index_add(0, self.sensory_indices, inputs[:, :, 0].t())
 
         # sparse matrix multiplication
         # shape: (all_neurons, batch_size)
@@ -535,7 +578,7 @@ class MultilayeredNetwork(nn.Module):
             # make sure the max is 1
             x = torch.where(x > 1, torch.ones_like(x), x)
 
-        acts.append(x.t())  # shape: (batch_size, all_neurons)
+        acts.append(x.t().cpu())  # shape: (batch_size, all_neurons)
 
         # Process remaining layers
         for alayer in range(1, self.num_layers):
@@ -554,7 +597,7 @@ class MultilayeredNetwork(nn.Module):
                 # make sure the max is 1
                 x = torch.where(x > 1, torch.ones_like(x), x)
 
-            acts.append(x.t())  # shape: (batch_size, all_neurons)
+            acts.append(x.t().cpu())  # shape: (batch_size, all_neurons)
 
         # Stack activations
         # shape: (batch_size, all_neurons, num_layers)
@@ -2104,6 +2147,7 @@ def plot_timeseries(
     slider_dim: Optional[str] = "batch",
     ymin: Optional[float] = None,
     ymax: Optional[float] = None,
+    scatter_mode: str = "lines",
 ) -> go.Figure:
     """
     Generate an interactive time-series plot of neural activations, based on a dataframe
@@ -2145,7 +2189,8 @@ def plot_timeseries(
             - None: no slider (all traces in one panel).
 
         ymin (Optional[float]): Minimum y-axis value. If None, set to minimum activation.
-        ymax (Optional[float]): Maximum y-axis value. If None, set to maximum activation
+        ymax (Optional[float]): Maximum y-axis value. If None, set to maximum activation.
+        scatter_mode (str): Plot mode for traces, e.g. 'lines', 'markers', 'lines+markers'.
 
     Returns:
         fig (go.Figure)
@@ -2238,7 +2283,7 @@ def plot_timeseries(
         return go.Scatter(
             x=x_vals,
             y=y,
-            mode="lines+markers",
+            mode=scatter_mode,
             name=str(name),
             legendgroup=str(name),
             line=dict(
