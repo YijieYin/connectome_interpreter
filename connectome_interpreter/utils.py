@@ -856,6 +856,7 @@ def plot_layered_paths(
     node_activation_min: float | None = None,
     node_activation_max: float | None = None,
     edge_text: bool = True,
+    edge_text_size: int = 10,
     node_text: bool = True,
     highlight_nodes: list[str] = [],
     interactive: bool = False,
@@ -923,6 +924,8 @@ def plot_layered_paths(
             None.
         edge_text (bool, optional): Whether to display edge weights as text on the plot.
             Defaults to True.
+        edge_text_size (int, optional): The font size for edge weight text. Defaults to
+            10.
         node_text (bool, optional): Whether to display node names as text on the plot.
             Defaults to True.
         highlight_nodes (list[str], optional): A list of node names to highlight bold in
@@ -1157,7 +1160,7 @@ def plot_layered_paths(
                 edge["label"] = (
                     f"{(weight_min+(weight_max - weight_min)*(edge['width']-1)/9):.{weight_decimals}f}"
                 )
-                edge["font"] = {"size": 18, "face": "arial"}
+                edge["font"] = {"size": edge_text_size, "face": "arial"}
 
         # Set physics options for the network with high spring constant
         # to keep straighter arrows when nodes are moved around
@@ -1261,7 +1264,7 @@ def plot_layered_paths(
                 pos=positions,
                 edge_labels=edge_labels,
                 label_pos=label_pos,
-                font_size=14,
+                font_size=edge_text_size,
                 rotate=False,
                 ax=ax,
             )
@@ -2228,6 +2231,7 @@ def plot_paths(
     node_activation_min: float | None = None,
     node_activation_max: float | None = None,
     edge_text: bool = True,
+    edge_text_size: int = 10,
     node_text: bool = True,
     highlight_nodes: list[str] = [],
     interactive: bool = False,
@@ -2283,6 +2287,7 @@ def plot_paths(
             used. Defaults to None.
         edge_text (bool, optional): If True, display edge weights as text on the plot.
             Defaults to True.
+        edge_text_size (int, optional): Font size for edge text. Defaults to 10.
         node_text (bool, optional): If True, display neuron identifiers as text on the
             plot. Defaults to True.
         highlight_nodes (list, optional): List of neuron identifiers to highlight in the
@@ -2502,7 +2507,7 @@ def plot_paths(
                 e["label"] = (
                     f"{(wmin + (wmax - wmin) * (e['width'] - 1) / 9):.{weight_decimals}f}"
                 )
-                e["font"] = {"size": 18, "face": "arial"}
+                e["font"] = {"size": edge_text_size, "face": "arial"}
 
         net.set_options(
             """
@@ -2583,7 +2588,7 @@ def plot_paths(
                 pos=pos,
                 edge_labels=elbl,
                 label_pos=label_pos,
-                font_size=14,
+                font_size=edge_text_size,
                 rotate=False,
                 ax=ax,
             )
