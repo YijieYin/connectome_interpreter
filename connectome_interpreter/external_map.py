@@ -35,12 +35,12 @@ def load_dataset(dataset: str) -> pd.DataFrame:
     Args:
         dataset: (str) The name of the dataset to load. Options are:
 
-            - 'DoOR_adult': mapping from glomeruli to chemicals, from Munch and Galizia DoOR dataset (https://www.nature.com/articles/srep21841).
+            - 'DoOR_adult': mapping from glomeruli to chemicals, from Munch and Galizia DoOR dataset (https://www.nature.com/articles/srep21841), a composite of multiple studies and their own data. When it's their own data (not specified), odour concentration is 10^-2.
             - 'DoOR_adult_sfr_subtracted': mapping from glomeruli to chemicals, with spontaneous firing rate subtracted. There are therefore negative values.
-            - 'Dweck_adult_chem': mapping from glomeruli to chemicals extracted from fruits, from Dweck et al. 2018 (https://www.cell.com/cell-reports/abstract/S2211-1247(18)30663-6). Firing rates normalised to between 0 and 1.
-            - 'Dweck_adult_fruit': mapping from glomeruli to fruits, from Dweck et al. 2018. Number of responses normalised to between 0 and 1.
-            - 'Dweck_larva_chem': mapping from olfactory receptors to chemicals, from Dweck et al. 2018. Firing rates normalised to between 0 and 1.
-            - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits from Dweck et al. 2018. Number of responses normalised to between 0 and 1.
+            - 'Dweck_adult_chem': mapping from glomeruli to chemicals extracted from fruits, from Dweck et al. 2018 (https://www.cell.com/cell-reports/abstract/S2211-1247(18)30663-6). Normalised maximum frequency (Hz) responses to  10-4 concentration of synthetic standards of the active compounds. Firing rates normalised to between 0 and 1.
+            - 'Dweck_adult_fruit': number of compounds in a fruit that activated a glomerulus, from Dweck et al. 2018. Not normalised because compound count is not response magnitude.
+            - 'Dweck_larva_chem': mapping from olfactory receptors to chemicals, from Dweck et al. 2018. Normalised maximum frequency (Hz) responses to  10-4 concentration of synthetic standards of the active compounds. Firing rates normalised to between 0 and 1.
+            - 'Dweck_larva_fruit': number of compounds in a fruit that activated a receptor, from Dweck et al. 2018. Not normalised because compound count is not response magnitude.
             - 'Nern2024': columnar coordinates of individual cells from a collection of columnar cell types within the medulla of the right optic lobe, from Nern et al. 2024 (https://www.biorxiv.org/content/10.1101/2024.04.16.589741v2).
             - 'Matsliah2024': columnar coordinates of individual cells from a collection of columnar cell types in the right optic lobe from FAFB, from Matsliah et al. 2024 (https://www.nature.com/articles/s41586-024-07981-1).
             - 'Badel2016_PN': mapping from olfactory projection neurons to odours, from Badel et al. 2016 (https://www.cell.com/neuron/fulltext/S0896-6273(16)30201-X).
@@ -83,10 +83,10 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
 
             - 'DoOR_adult': mapping from glomeruli to chemicals, from Munch and Galizia DoOR dataset (https://www.nature.com/articles/srep21841).
             - 'DoOR_adult_sfr_subtracted': mapping from glomeruli to chemicals, with spontaneous firing rate subtracted. There are therefore negative values.
-            - 'Dweck_adult_chem': mapping from glomeruli to chemicals extracted from fruits, from Dweck et al. 2018 (https://www.cell.com/cell-reports/abstract/S2211-1247(18)30663-6). Firing rates normalised to between 0 and 1.
-            - 'Dweck_adult_fruit': mapping from glomeruli to fruits, from Dweck et al. 2018. Number of responses normalised to between 0 and 1.
-            - 'Dweck_larva_chem': mapping from olfactory receptors to chemicals, from Dweck et al. 2018. Firing rates normalised to between 0 and 1.
-            - 'Dweck_larva_fruit': mapping from olfactory receptors to fruits, from Dweck et al. 2018. Number of responses normalised to between 0 and 1.
+            - 'Dweck_adult_chem': mapping from glomeruli to chemicals extracted from fruits, from Dweck et al. 2018 (https://www.cell.com/cell-reports/abstract/S2211-1247(18)30663-6). Normalised maximum frequency (Hz) responses to  10-4 concentration of synthetic standards of the active compounds. Firing rates normalised to between 0 and 1.
+            - 'Dweck_adult_fruit': number of compounds in a fruit that activated a glomerulus, from Dweck et al. 2018. Not normalised because compound count is not response magnitude.
+            - 'Dweck_larva_chem': mapping from olfactory receptors to chemicals, from Dweck et al. 2018. Normalised maximum frequency (Hz) responses to  10-4 concentration of synthetic standards of the active compounds. Firing rates normalised to between 0 and 1.
+            - 'Dweck_larva_fruit': number of compounds in a fruit that activated a receptor, from Dweck et al. 2018. Not normalised because compound count is not response magnitude.
             - 'Nern2024': columnar coordinates of individual cells from a collection of columnar cell types within the medulla of the right optic lobe, from Nern et al. 2024.
             - 'Badel2016_PN': mapping from olfactory projection neurons to odours, from Badel et al. 2016 (https://www.cell.com/neuron/fulltext/S0896-6273(16)30201-X).
             - 'Hallem2006': mapping from glomeruli to chemicals, from Hallem and Carlson 2006 (https://www.cell.com/cell/abstract/S0092-8674(06)00363-1).
