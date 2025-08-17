@@ -296,19 +296,37 @@ def modify_coo_matrix(
             return sparse_matrix
 
         if np.isscalar(value):
-            value = np.full(len(input_idx) * len(output_idx), value)
+            if value == 0:
+                # directly modify edges
+                edges = edges[
+                    ~(
+                        edges.input_idx.isin(input_idx)
+                        & edges.output_idx.isin(output_idx)
+                    )
+                ]
+            else:
+                value = np.full(len(input_idx) * len(output_idx), value)
+                updates_df = pd.DataFrame(
+                    {
+                        "input_idx": np.repeat(input_idx, len(output_idx)),
+                        "output_idx": np.tile(output_idx, len(input_idx)),
+                        "value": value,
+                    }
+                )
+
+                # Concatenate edges and updates_df, ensuring that updates_df is last so
+                # its values take precedence
+                combined_edges = pd.concat([edges, updates_df])
+
+                # Remove duplicates, keeping the last occurrence (from updates_df)
+                # We specify the subset to be the columns 'input_idx' and 'output_idx'
+                edges = combined_edges.drop_duplicates(
+                    subset=["input_idx", "output_idx"], keep="last"
+                )
         elif len(value) != len(input_idx) * len(output_idx):
             raise ValueError(
                 "Length of 'value' must match the product of the lengths of 'input_idx' and 'output_idx', or be one single value."
             )
-
-        updates_df = pd.DataFrame(
-            {
-                "input_idx": np.repeat(input_idx, len(output_idx)),
-                "output_idx": np.tile(output_idx, len(input_idx)),
-                "value": value,
-            }
-        )
 
     elif updates_df is not None:
         # check column names
@@ -319,24 +337,27 @@ def modify_coo_matrix(
                 "The DataFrame must contain columns ['input_idx', 'output_idx', 'value']."
             )
 
+        # Concatenate edges and updates_df, ensuring that updates_df is last so
+        # its values take precedence
+        combined_edges = pd.concat([edges, updates_df])
+
+        # Remove duplicates, keeping the last occurrence (from updates_df)
+        # We specify the subset to be the columns 'input_idx' and 'output_idx'
+        edges = combined_edges.drop_duplicates(
+            subset=["input_idx", "output_idx"], keep="last"
+        )
+
+        # in case it's not provided, make one for later
+        output_idx = to_nparray(updates_df.output_idx)
+
     else:
         raise ValueError(
             "Either ['input_idx', 'output_idx', and 'value'], or 'updates_df' must be provided."
         )
 
-    # Concatenate edges and updates_df, ensuring that updates_df is last so
-    # its values take precedence
-    combined_edges = pd.concat([edges, updates_df])
-
-    # Remove duplicates, keeping the last occurrence (from updates_df)
-    # We specify the subset to be the columns 'input_idx' and 'output_idx'
-    edges = combined_edges.drop_duplicates(
-        subset=["input_idx", "output_idx"], keep="last"
-    )
-
     if re_normalize:
         print("Re-normalizing updated columns...")
-        edge_to_normalise = edges[edges.output_idx.isin(updates_df.output_idx)]
+        edge_to_normalise = edges[edges.output_idx.isin(output_idx)]
         col_sums = edge_to_normalise.groupby("output_idx").value.sum()
         col_sums[col_sums == 0] = 1
 
@@ -346,7 +367,7 @@ def modify_coo_matrix(
 
         edges = pd.concat(
             [
-                edges[~edges.output_idx.isin(updates_df.output_idx)],
+                edges[~edges.output_idx.isin(output_idx)],
                 edge_to_normalise,
             ]
         )
@@ -2224,6 +2245,7 @@ def plot_paths(
     priority_indices: Sequence[str] | None = None,
     sort_dict: Optional[dict] = None,
     sort_by_activation: bool = False,
+    sort_by_weight: bool = False,
     weight_decimals: int = 2,
     neuron_to_sign: dict | None = None,
     sign_color_map: dict = {1: "red", -1: "blue"},
@@ -2378,11 +2400,19 @@ def plot_paths(
     else:
         act_dict = {}
 
+    if sort_by_weight:
+        weight_dict = dict(zip(df.pre_layer_id if layered_mode else df.pre, df.weight))
+        weight_dict.update(
+            zip(df.post_layer_id if layered_mode else df.post, df.weight)
+        )
+    else:
+        weight_dict = {}
+
     if priority_indices is not None:
         act_dict.update(dict.fromkeys(priority_indices, 1))
 
     # honour caller’s explicit sort_dict over activations
-    merged_sort = {**act_dict, **(sort_dict or {})} or None
+    merged_sort = {**act_dict, **weight_dict, **(sort_dict or {})} or None
 
     if layered_mode:
         pos = _create_layered_positions_tidy(
