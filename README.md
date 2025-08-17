@@ -1,3 +1,7 @@
+![Build](https://img.shields.io/github/actions/workflow/status/YijieYin/connectome_interpreter/python-app.yml?branch=main)&emsp;
+![PyPI](https://img.shields.io/pypi/v/connectome_interpreter)&emsp;
+![Docs](https://readthedocs.org/projects/connectome-interpreter/badge/?version=latest)&emsp;
+[![PyPI Downloads](https://static.pepy.tech/badge/connectome-interpreter)](https://pepy.tech/projects/connectome-interpreter)  
 This package is intended to be used for interpreting connectomics data. 
 
 To install: 
