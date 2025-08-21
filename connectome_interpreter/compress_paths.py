@@ -490,14 +490,21 @@ def compress_paths_dense_chunked(
 
 # below: not chunked version
 def compress_paths_not_chunked(
-    inprop, step_number, threshold=0, output_threshold=1e-4, root=False
+    inprop,
+    step_number,
+    threshold=0,
+    output_threshold=1e-4,
+    root=False,
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
 ):
     """As above, but without chunking.
 
     This would be more demanding for GPU RAM.
     """
     steps_fast = []
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     inprop_tensor = torch.tensor(inprop.toarray(), device=device)
 
