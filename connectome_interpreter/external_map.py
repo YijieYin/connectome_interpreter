@@ -271,6 +271,9 @@ def hex_heatmap(
         )
         return goscatter
 
+    # begin with removing nan from the index
+    df = df[(df.index != "nan") & (~df.index.isnull())]
+
     # Default styling and sizing parameters to use if not specified.
     default_style = {
         "font_type": "arial",
@@ -291,7 +294,7 @@ def hex_heatmap(
         )
 
     default_sizing = {
-        "fig_width": 260,  # units = mm
+        "fig_width": 260 if colorbar else 206,  # units = mm
         "fig_height": 220,  # units = mm
         "fig_margin": 0,
         "fsize_ticks_pt": 20,
