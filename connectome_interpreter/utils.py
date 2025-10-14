@@ -2268,6 +2268,7 @@ def plot_paths(
     pre_pad: float = 0.2,
     post_pad: float = 0.2,
     seed: Optional[int] = None,
+    edge_width_scale: float = 15,
 ) -> None:
     """
     Plotting function for both layered (where layers are discrete, in `layer` column of
@@ -2333,6 +2334,8 @@ def plot_paths(
         post_pad (float, optional): Padding to add to the right side of the plot.
             Defaults to 0.2.
         seed (int, optional): Random seed for reproducibility. Defaults to None.
+        edge_width_scale (float, optional): Scale factor for edge widths. Defaults to
+            15.
 
     Returns:
         None: Displays the plot or creates an interactive visualization.
@@ -2356,10 +2359,13 @@ def plot_paths(
     # scale weights for width
     # ------------------------------------------------------------------
     wmin, wmax = df.weight.min(), df.weight.max()
-    if wmax == wmin:
-        df["weight"] = 1
-    else:
-        df["weight"] = 1 + 9 * (df.weight - wmin) / (wmax - wmin)
+    df["weight_original"] = df.weight.copy()
+    if wmax > 1:  # for synapse numbers
+        df["weight"] = df.weight / wmax
+
+    # then scale
+    df["weight"] = np.sqrt(df["weight"])
+    df["weight"] = df["weight"] * edge_width_scale
 
     # ------------------------------------------------------------------
     # build graph
@@ -2369,7 +2375,7 @@ def plot_paths(
             df,
             source="pre_layer_id",
             target="post_layer_id",
-            edge_attr=["weight"],
+            edge_attr=["weight_original", "weight"],
             create_using=nx.DiGraph(),
         )
         label_map = dict(zip(df.pre_layer_id, df.pre))
@@ -2379,7 +2385,7 @@ def plot_paths(
             df,
             source="pre",
             target="post",
-            edge_attr=["weight"],
+            edge_attr=["weight_original", "weight"],
             create_using=nx.DiGraph(),
         )
         label_map = {v: v for v in G.nodes()}
@@ -2534,9 +2540,7 @@ def plot_paths(
             u, v = e["from"], e["to"]
             e["color"] = ec_dict[(u, v)]
             if edge_text:
-                e["label"] = (
-                    f"{(wmin + (wmax - wmin) * (e['width'] - 1) / 9):.{weight_decimals}f}"
-                )
+                e["label"] = f"{e['weight_original']:.{weight_decimals}f}"
                 e["font"] = {"size": edge_text_size, "face": "arial"}
 
         net.set_options(
@@ -2610,7 +2614,7 @@ def plot_paths(
                 (
                     u,
                     v,
-                ): f"{(wmin + (wmax - wmin) * (G[u][v]['weight'] - 1) / 9):.{weight_decimals}f}"
+                ): f"{G[u][v]['weight_original']:.{weight_decimals}f}"
                 for u, v in G.edges()
             }
             nx.draw_networkx_edge_labels(
