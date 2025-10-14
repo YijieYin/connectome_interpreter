@@ -1750,6 +1750,7 @@ def conn_by_path_length_data(
     inidx_map: Optional[dict] = None,
     combining_method: str = "mean",
     wide: bool = False,
+    chunk_size: int = 2000,
 ):
     """Calculates the connectivity from all of inidx (grouped by inidx_map) to outidx
     (grouped by outidx_map)  within `n` hops, aggregated by `combining_method`. If
@@ -1769,6 +1770,10 @@ def conn_by_path_length_data(
             inidx_map and outidx_map should be specified.
         combining_method (str, optional): Method to combine inputs or outputs. Can be
             'mean', 'median', or 'sum'. Defaults to 'mean'.
+        wide (bool, optional): Whether to return the result in wide format. If False,
+            the result will be in long format. Defaults to False.
+        chunk_size (int, optional): The chunk size to use when processing large
+            datasets. Defaults to 2000.
 
     Returns:
         List[pd.DataFrame] | pd.DataFrame: If one of outidx_map and inidx_map is
@@ -1807,6 +1812,7 @@ def conn_by_path_length_data(
                 post_group=outidx_map,
                 combining_method=combining_method,
                 wide=False,
+                chunk_size=chunk_size,
             )
             df.loc[:, ["path_length"]] = i + 1
             rows.append(df)
