@@ -192,7 +192,7 @@ def find_paths_of_length(
     elif isinstance(edgelist, spmatrix):
         edgelist = edgelist.tocoo()
         edgelist = pd.DataFrame(
-            {
+            data={
                 "pre": edgelist.row,
                 "post": edgelist.col,
                 "weight": edgelist.data,
@@ -1372,12 +1372,12 @@ def connected_components(
     threshold: float = 0,
 ) -> list:
     """
-    Find connected components in a directed graph represented by a DataFrame
-    of paths. The DataFrame should contain columns 'pre', 'post', and 'weight'.
-    The function filters the paths based on a weight threshold and then
-    constructs a directed graph using NetworkX. It identifies weakly connected
-    components in the graph and returns a list of DataFrames of paths, each
-    representing a connected component.
+    Find connected components in a directed graph represented by a DataFrame of paths.
+    The DataFrame should contain columns 'pre', 'post', 'layer', and 'weight'. The
+    function filters the paths based on a weight threshold and then constructs a
+    directed graph using NetworkX. It identifies weakly connected components in the
+    graph and returns a list of DataFrames of paths, each representing a connected
+    component.
 
     Args:
         paths (pd.DataFrame): The DataFrame containing the path data, including
@@ -1448,7 +1448,8 @@ def el_within_n_steps(
         outidx (arrayable): The output neuron indices to end the paths at.
         n (int): The maximum number of hops. n=1 for direct connections.
         threshold (float, optional): The threshold for the weight of the direct
-            connection between pre and post. Defaults to 0.
+            connection between pre and post. If `pre_group` or `post_group` are
+            provided, filtering happens after grouping. Defaults to 0.
         pre_group (dict, optional): A dictionary mapping pre neuron indices to
             their respective groups. Defaults to None.
         post_group (dict, optional): A dictionary mapping post neuron indices to
