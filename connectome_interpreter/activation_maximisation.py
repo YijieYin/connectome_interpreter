@@ -484,7 +484,11 @@ class MultilayeredNetwork(nn.Module):
 
         return x
 
-    def forward(self, inputs: torch.Tensor):
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        manipulate: Optional[Dict[int, Dict[int, float]]] = None,
+    ):
         """
         Process inputs through the network. Use matrix-matrix multiplication for batched
         processing.
@@ -492,6 +496,11 @@ class MultilayeredNetwork(nn.Module):
         Args:
             inputs (torch.Tensor): Either a 2D tensor (num_input, time_steps) or a 3D
                 tensor (batch_size, num_input, time_steps)
+            manipulate (Dict[int, Dict[int, float]], optional): A dictionary specifying the
+            activity of specified neurons. To be used like `{layer: {neuron_group: activity}}`,
+            in conjunction with `idx_to_group`, e.g. {0: {'DA1_lPN': 1.0}}. If
+            `idx_to_group` is not provided, `neuron_group` is assumed to be neuron
+            indices. Defaults to None.
 
         Returns:
             torch.Tensor: The activations of all neurons across time steps (in batches).
@@ -509,6 +518,20 @@ class MultilayeredNetwork(nn.Module):
             single_input = True
         else:
             single_input = False
+
+        if manipulate is not None:
+            if self.idx_to_group is None:
+                print("idx_to_group not provided. Assuming neuron indices are used.")
+                # make sure keys are int
+                manipulate_idx = {int(k): v for k, v in manipulate.items()}
+            else:
+                # convert group names to indices
+                manipulate_idx = {}
+                for layer, act_dict in manipulate.items():
+                    manipulate_idx[layer] = {}
+                    for idx, grp in self.idx_to_group.items():
+                        if grp in act_dict:
+                            manipulate_idx[layer][idx] = act_dict[grp]
 
         acts = []
 
@@ -578,6 +601,12 @@ class MultilayeredNetwork(nn.Module):
             # make sure the max is 1
             x = torch.where(x > 1, torch.ones_like(x), x)
 
+        if manipulate is not None:
+            if 0 in manipulate_idx:
+                x = x.clone()
+                for neuron_idx, target_act in manipulate_idx[0].items():
+                    x[neuron_idx, :] = target_act
+
         acts.append(x.t().cpu())  # shape: (batch_size, all_neurons)
 
         # Process remaining layers
@@ -596,6 +625,12 @@ class MultilayeredNetwork(nn.Module):
                 )
                 # make sure the max is 1
                 x = torch.where(x > 1, torch.ones_like(x), x)
+
+            if manipulate is not None:
+                if alayer in manipulate_idx:
+                    x = x.clone()
+                    for neuron_idx, target_act in manipulate_idx[alayer].items():
+                        x[neuron_idx, :] = target_act
 
             acts.append(x.t().cpu())  # shape: (batch_size, all_neurons)
 
@@ -1165,7 +1200,8 @@ def saliency(
         model: A MultilayeredNetwork model
         input_tensor: Input tensor to analyze
         neurons_of_interest: Dictionary mapping layer indices to lists of neuron indices
-            to analyze: {layer_idx: [neuron_indices]}
+            to analyze: {layer_idx: [neuron_indices]}. Layer_idx = 0 corresponds to the
+            first layer after the input layer.
         method: Saliency computation method ("vanilla" or "input_x_gradient")
         normalize: Whether to normalize saliency maps by their maximum value
         device: Computation device
