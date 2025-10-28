@@ -290,6 +290,7 @@ class MultilayeredNetwork(nn.Module):
         self.default_bias = default_bias
         self.divisive_normalization = divisive_normalization
         self.tau = tau
+        self.noted_grads: Dict[int, torch.Tensor] = {}
 
         # Setup trainable parameters if idx_to_group is provided
         if idx_to_group is not None:
@@ -487,7 +488,11 @@ class MultilayeredNetwork(nn.Module):
     def forward(
         self,
         inputs: torch.Tensor,
-        manipulate: Optional[Dict[int, Dict[int, float]]] = None,
+        manipulate: Optional[Dict[int, Dict[Union[int, str], float]]] = None,
+        monitor_neurons: Optional[
+            Union[List[Union[int, str]], np.ndarray, torch.Tensor]
+        ] = None,
+        monitor_layers: Optional[List[int]] = None,
     ):
         """
         Process inputs through the network. Use matrix-matrix multiplication for batched
@@ -533,6 +538,31 @@ class MultilayeredNetwork(nn.Module):
                         if grp in act_dict:
                             manipulate_idx[layer][idx] = act_dict[grp]
 
+        if monitor_neurons is not None:
+            if self.idx_to_group is None:
+                # assume monitor_neurons are indices
+                monitor_indices = torch.tensor(
+                    monitor_neurons, dtype=torch.long, device=self.all_weights.device
+                )
+            else:
+                # convert group names to indices
+                monitor_indices_list = []
+                for idx, grp in self.idx_to_group.items():
+                    if grp in monitor_neurons:
+                        monitor_indices_list.append(idx)
+                monitor_indices = torch.tensor(
+                    monitor_indices_list,
+                    dtype=torch.long,
+                    device=self.all_weights.device,
+                )
+
+        if monitor_layers is not None:
+            monitor_layers = set(
+                int(i)
+                for i in torch.as_tensor(monitor_layers, dtype=torch.long).tolist()
+            )
+
+        # actual forward
         acts = []
 
         inputs = torch.where(inputs >= self.threshold, inputs, torch.zeros_like(inputs))
@@ -607,6 +637,19 @@ class MultilayeredNetwork(nn.Module):
                 for neuron_idx, target_act in manipulate_idx[0].items():
                     x[neuron_idx, :] = target_act
 
+        if monitor_neurons is not None:
+            if monitor_layers is None:
+                print("monitor_layers not provided. Assuming all layers are monitored.")
+                monitor_layers = set(range(self.num_layers))
+            elif 0 in monitor_layers:
+
+                def _tap0(grad):
+                    self.noted_grads[0] = (
+                        grad.index_select(0, monitor_indices).detach().cpu()
+                    )
+
+                x.register_hook(_tap0)
+
         acts.append(x.t().cpu())  # shape: (batch_size, all_neurons)
 
         # Process remaining layers
@@ -631,6 +674,16 @@ class MultilayeredNetwork(nn.Module):
                     x = x.clone()
                     for neuron_idx, target_act in manipulate_idx[alayer].items():
                         x[neuron_idx, :] = target_act
+
+            # hook for this layer
+            if monitor_neurons is not None and alayer in monitor_layers:
+
+                def _tapL(grad, L=alayer):  # bind alayer to L
+                    self.noted_grads[L] = (
+                        grad.index_select(0, monitor_indices).detach().cpu()
+                    )
+
+                x.register_hook(_tapL)
 
             acts.append(x.t().cpu())  # shape: (batch_size, all_neurons)
 
@@ -1216,8 +1269,6 @@ def saliency(
     if isinstance(input_tensor, np.ndarray):
         input_tensor = torch.tensor(input_tensor, device=device)
 
-    input_tensor = input_tensor
-
     # Ensure input requires gradients
     input_tensor = input_tensor.clone().detach().to(device)
     input_tensor.requires_grad = True
@@ -1260,6 +1311,117 @@ def saliency(
             saliency_maps = saliency_maps / torch.max(saliency_maps)
 
     return saliency_maps
+
+
+def get_gradients(
+    model: MultilayeredNetwork,
+    input_tensor: torch.Tensor,
+    monitor_neurons: arrayable,
+    target_neurons: Dict[int, List[Union[int, str]]],
+    monitor_layers: Optional[List[int]] = None,
+    idx_to_group: Optional[Dict[int, str]] = None,
+    batch_names: Optional[List[str]] = None,
+    device: Optional[torch.device] = None,
+) -> Dict[int, torch.Tensor]:
+    """
+    Compute gradients of target neurons with regard to monitor neurons, i.e. the rate of
+    change of target neuron activations with respect to monitor neurons.
+
+    Args:
+        model: MultilayeredNetwork instance. Please note that model.idx_to_group should
+            be None (i.e. when the model was defined, idx_to_group was not provided).
+        input_tensor: Input tensor to the model. Shape: (batch_size, num_input_neurons,
+            num_timesteps) or (num_input_neurons, num_timesteps)
+        monitor_neurons: List of neuron indices to monitor gradients for. If
+            `idx_to_group` (e.g. idx_to_type) is provided, these should be group names.
+        target_neurons: Dictionary mapping layer/timepoint indices to lists of neurons.
+            If `idx_to_group` is provided, neurons should be group names. e.g.
+            {5: ['DA1_lPN']} means calculating gradients of layer 5 neurons in
+            group 'DA1_lPN'.
+        monitor_layers: List of layer indices to monitor gradients at. If None, monitor
+            all layers
+        idx_to_group: Optional mapping from neuron indices to group names. If provided,
+            gradients will be averaged over groups.
+        batch_names: Optional list of batch names corresponding to the input tensor.
+            If None, default names will be generated.
+        device: Optional torch device to run the computations on. If None, uses CUDA if
+            available, else CPU.
+
+    Returns:
+        DataFrame containing gradients with columns: 'group', 'batch_name', 'time_0',
+        'time_1', ..., 'time_N'
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Convert to tensor if needed
+    if isinstance(input_tensor, np.ndarray):
+        input_tensor = torch.tensor(input_tensor, device=device)
+
+    # Ensure input requires gradients
+    input_tensor = input_tensor.clone().detach().to(device)
+    input_tensor.requires_grad = True
+
+    if idx_to_group is not None:
+        # turn into indices
+        monitor_neurons = [
+            idx for idx, grp in idx_to_group.items() if grp in monitor_neurons
+        ]
+        target_neurons = {
+            layer: [idx for idx, grp in idx_to_group.items() if grp in neuron_indices]
+            for layer, neuron_indices in target_neurons.items()
+        }
+
+    # Run forward pass
+    _ = model(
+        input_tensor, monitor_neurons=monitor_neurons, monitor_layers=monitor_layers
+    )
+
+    target = []
+    for layer, neuron_indices in target_neurons.items():
+        if input_tensor.dim() == 3:  # batched input
+            target.append(model.activations[:, neuron_indices, layer])
+        else:  # single input
+            target.append(model.activations[neuron_indices, layer])
+
+    target = torch.cat(target)
+    target.mean().backward()
+
+    # prepare dataframe ----
+    if batch_names is None:
+        if input_tensor.dim() == 3:
+            batch_names = [f"batch_{i}" for i in range(input_tensor.shape[0])]
+        else:
+            batch_names = ["batch_0"]
+
+    dfs = []
+    for i in model.noted_grads.keys():  # number of timesteps/layers
+        df = pd.DataFrame(
+            model.noted_grads[i].numpy(),  # shape: (num_monitor_neurons, num_batches)
+            columns=batch_names,
+            index=monitor_neurons,
+        )
+        if idx_to_group is not None:
+            # turn back to groups
+            df.index = df.index.map(idx_to_group)
+            df = df.groupby(df.index).mean()
+
+        # longer
+        df = df.melt(
+            var_name="batch_name", value_name="grad", ignore_index=False
+        ).reset_index()
+        df.rename(columns={"index": "group"}, inplace=True)
+        df["layer"] = i
+        dfs.append(df)
+
+    dfs = pd.concat(dfs, ignore_index=True)
+    dfs = (
+        dfs.pivot(index=["group", "batch_name"], columns="layer", values="grad")
+        .reset_index()
+        .rename(columns=lambda x: f"time_{x}" if isinstance(x, int) else x)
+    )
+
+    return dfs
 
 
 def activations_to_df(

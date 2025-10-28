@@ -13,6 +13,7 @@ from connectome_interpreter.activation_maximisation import (
     activations_to_df,
     activations_to_df_batched,
     get_neuron_activation,
+    get_gradients,
 )
 
 
@@ -728,3 +729,167 @@ class TestDivisiveNormalization(unittest.TestCase):
         )
         out_no_dn = model_no_dn(inp)
         self.assertGreater(out_no_dn[1, 0].item(), 0.0)
+
+
+def _linear_activation(x):
+    # custom activation: identity; ignores x_previous
+    return x
+
+
+class TestGetGradients(unittest.TestCase):
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # network: 5 neurons total; neurons 0,1 are sensory
+        # paths: 0 -> 2 -> 4; 1 -> 3 (no path to 4)
+        self.num_neurons = 5
+        self.sensory_indices = [0, 1]
+        self.num_layers = 3
+
+        W = np.zeros((self.num_neurons, self.num_neurons), dtype=np.float32)
+        W[2, 0] = 0.7  # 0->2
+        W[3, 1] = 0.6  # 1->3
+        W[4, 2] = 0.5  # 2->4
+        # No 3->4 edge so sensor 1 has no route to neuron 4
+
+        self.all_weights = csr_matrix(W)
+
+        self.model = MultilayeredNetwork(
+            self.all_weights,
+            sensory_indices=self.sensory_indices,
+            num_layers=self.num_layers,
+            threshold=0.0,  # keep inputs as provided
+            activation_function=_linear_activation,  # linear system for deterministic grads
+        ).to(self.device)
+
+        # inputs: shape (batch, num_sensory, layers)
+        self.batch_size = 2
+        self.inputs_batched = torch.full(
+            (self.batch_size, len(self.sensory_indices), self.num_layers),
+            0.5,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        # single example: shape (num_sensory, layers)
+        self.inputs_single = torch.full(
+            (len(self.sensory_indices), self.num_layers),
+            0.5,
+            device=self.device,
+            dtype=torch.float32,
+        )
+
+    def test_returns_dataframe_shape_and_columns(self):
+        monitor = [0, 1]  # indices
+        target = {2: [4]}  # layer 2, neuron 4
+        df = get_gradients(
+            self.model,
+            self.inputs_batched,
+            monitor_neurons=monitor,
+            target_neurons=target,
+            monitor_layers=[0, 1, 2],
+            idx_to_group=None,
+            batch_names=[f"b{i}" for i in range(self.batch_size)],
+            device=self.device,
+        )
+        # expected columns
+        expected_time_cols = {f"time_{t}" for t in [0, 1, 2]}
+        self.assertTrue({"group", "batch_name"}.issubset(df.columns))
+        self.assertTrue(expected_time_cols.issubset(df.columns))
+        # two monitored neurons * two batches = 4 rows
+        self.assertEqual(len(df), 4)
+        # group column are raw indices when idx_to_group=None
+        self.assertTrue(set(df["group"].unique()).issubset({0, 1}))
+
+    def test_gradient_path_specificity(self):
+        # sensor 0 should influence target (0->2->4), sensor 1 should not
+        monitor = [0, 1]
+        target = {2: [4]}
+        df = get_gradients(
+            self.model,
+            self.inputs_single,
+            monitor_neurons=monitor,
+            target_neurons=target,
+            monitor_layers=[0, 1, 2],
+            device=self.device,
+        )
+        # convert to wide for easy checks
+        wide = df.pivot(index="group", columns="batch_name").sort_index()
+        # single input -> only "batch_0" exists
+        g0 = wide.loc[0].to_numpy()
+        # print("g0: ", g0)
+        g1 = wide.loc[1].to_numpy()
+
+        # grads should be non-zero for sensor 0 and ~0 for sensor 1
+        self.assertTrue(np.any(g0 != 0))
+        self.assertTrue(np.allclose(g1, 0.0, atol=1e-8))
+
+        # sign should be positive given positive weights
+        self.assertTrue(np.all(g0 >= 0))
+
+    def test_gradients_constant_across_batches_in_linear_case(self):
+        monitor = [0, 1]
+        target = {2: [4]}
+        # two different batches; in linear system with identity activation the gradient is input-independent
+        inp = self.inputs_batched.clone()
+        inp[1] = 0.1  # change batch 2 input
+        df = get_gradients(
+            self.model,
+            inp,
+            monitor_neurons=monitor,
+            target_neurons=target,
+            monitor_layers=[0, 1, 2],
+            batch_names=["A", "B"],
+            device=self.device,
+        )
+        a = df[df["batch_name"] == "A"].sort_values("group")
+        b = df[df["batch_name"] == "B"].sort_values("group")
+        self.assertTrue(
+            np.allclose(
+                a.filter(like="time_").to_numpy(),
+                b.filter(like="time_").to_numpy(),
+                atol=1e-10,
+            )
+        )
+
+    def test_idx_to_group_mapping_and_averaging(self):
+        # group mapping: 0->S0, 1->S1, 2->X, 3->X, 4->T
+        idx_to_group = {0: "S0", 1: "S1", 2: "X", 3: "X", 4: "T"}
+        # monitor by group names
+        monitor = ["S0", "S1"]
+        # target is neuron 4 via group "T" at layer 2
+        target = {2: ["T"]}
+
+        df = get_gradients(
+            self.model,
+            self.inputs_batched,
+            monitor_neurons=monitor,
+            target_neurons=target,
+            monitor_layers=[0, 1, 2],
+            idx_to_group=idx_to_group,
+            batch_names=["A", "B"],
+            device=self.device,
+        )
+
+        # groups in output should be group names
+        self.assertTrue(set(df["group"].unique()).issubset({"S0", "S1"}))
+
+        # S0 should have non-zero grads; S1 should be ~0
+        s0 = df[df["group"] == "S0"].filter(like="time_").to_numpy()
+        s1 = df[df["group"] == "S1"].filter(like="time_").to_numpy()
+        self.assertTrue(np.any(s0 != 0))
+        self.assertTrue(np.allclose(s1, 0.0, atol=1e-8))
+
+    def test_monitor_layers_subset(self):
+        monitor = [0, 1]
+        target = {2: [4]}
+        df = get_gradients(
+            self.model,
+            self.inputs_single,
+            monitor_neurons=monitor,
+            target_neurons=target,
+            monitor_layers=[1, 2],  # subset only
+            device=self.device,
+        )
+        self.assertIn("time_1", df.columns)
+        self.assertIn("time_2", df.columns)
+        self.assertNotIn("time_0", df.columns)
