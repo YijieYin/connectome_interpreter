@@ -1320,6 +1320,7 @@ def get_gradients(
     target_neurons: Dict[int, List[Union[int, str]]],
     monitor_layers: Optional[List[int]] = None,
     idx_to_group: Optional[Dict[int, str]] = None,
+    method: str = "vanilla",
     batch_names: Optional[List[str]] = None,
     device: Optional[torch.device] = None,
 ) -> Dict[int, torch.Tensor]:
@@ -1341,7 +1342,8 @@ def get_gradients(
         monitor_layers: List of layer indices to monitor gradients at. If None, monitor
             all layers
         idx_to_group: Optional mapping from neuron indices to group names. If provided,
-            gradients will be averaged over groups.
+            gradients will be summed over groups.
+        method: Gradient computation method. "vanilla" or "input_x_gradient".
         batch_names: Optional list of batch names corresponding to the input tensor.
             If None, default names will be generated.
         device: Optional torch device to run the computations on. If None, uses CUDA if
@@ -1354,6 +1356,11 @@ def get_gradients(
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    if method not in ["vanilla", "input_x_gradient"]:
+        raise ValueError(
+            f"Unknown gradient computation method: {method}. Supported methods are 'vanilla' and 'input_x_gradient'."
+        )
+
     # Convert to tensor if needed
     if isinstance(input_tensor, np.ndarray):
         input_tensor = torch.tensor(input_tensor, device=device)
@@ -1361,6 +1368,11 @@ def get_gradients(
     # Ensure input requires gradients
     input_tensor = input_tensor.clone().detach().to(device)
     input_tensor.requires_grad = True
+
+    monitor_neurons = to_nparray(monitor_neurons)
+    target_neurons = {
+        layer: to_nparray(neurons) for layer, neurons in target_neurons.items()
+    }
 
     if idx_to_group is not None:
         # turn into indices
@@ -1373,7 +1385,7 @@ def get_gradients(
         }
 
     # Run forward pass
-    _ = model(
+    out = model(
         input_tensor, monitor_neurons=monitor_neurons, monitor_layers=monitor_layers
     )
 
@@ -1404,7 +1416,7 @@ def get_gradients(
         if idx_to_group is not None:
             # turn back to groups
             df.index = df.index.map(idx_to_group)
-            df = df.groupby(df.index).mean()
+            df = df.groupby(df.index).sum()
 
         # longer
         df = df.melt(
@@ -1420,6 +1432,13 @@ def get_gradients(
         .reset_index()
         .rename(columns=lambda x: f"time_{x}" if isinstance(x, int) else x)
     )
+
+    if method == "input_x_gradient":
+        acts = get_neuron_activation(out, monitor_neurons, batch_names, idx_to_group)
+        dfs = (
+            dfs.set_index(["group", "batch_name"]).sort_index()
+            * acts.set_index(["group", "batch_name"]).sort_index()
+        ).reset_index()
 
     return dfs
 
@@ -1765,7 +1784,7 @@ def get_neuron_activation(
         activations = activations.cpu().detach().numpy()
 
     if idx_to_group is None:
-        idx_to_group = {idx: idx for idx in range(activations.shape[0])}
+        idx_to_group = {idx: idx for idx in range(activations.shape[-2])}
 
     if activations.ndim == 2:
         # message if batch_names is not None
