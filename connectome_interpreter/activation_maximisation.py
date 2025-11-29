@@ -488,7 +488,12 @@ class MultilayeredNetwork(nn.Module):
     def forward(
         self,
         inputs: torch.Tensor,
-        manipulate: Optional[Dict[int, Dict[Union[int, str], float]]] = None,
+        manipulate: Optional[
+            Union[
+                Dict[int, Dict[Union[int, str], float]],
+                Dict[int, Dict[int, Dict[Union[int, str], float]]],
+            ]
+        ] = None,
         monitor_neurons: Optional[
             Union[List[Union[int, str]], np.ndarray, torch.Tensor]
         ] = None,
@@ -501,11 +506,12 @@ class MultilayeredNetwork(nn.Module):
         Args:
             inputs (torch.Tensor): Either a 2D tensor (num_input, time_steps) or a 3D
                 tensor (batch_size, num_input, time_steps)
-            manipulate (Dict[int, Dict[int, float]], optional): A dictionary specifying the
-            activity of specified neurons. To be used like `{layer: {neuron_group: activity}}`,
-            in conjunction with `idx_to_group`, e.g. {0: {'DA1_lPN': 1.0}}. If
-            `idx_to_group` is not provided, `neuron_group` is assumed to be neuron
-            indices. Defaults to None.
+            manipulate (Dict[int, Dict[int, float]], optional): A dictionary specifying
+                the activity of specified neurons. To be used like
+                `{layer: {neuron_group: activity}}` or `{batch: {layer: {neuron_group: activity}}}`
+                in conjunction with `idx_to_group`, e.g. {0: {'DA1_lPN': 1.0}} for "at
+                layer/timepoint 0, make DA1_lPN's activity 1". If `idx_to_group` is not
+                provided, `neuron_group` is assumed to be neuron indices. Defaults to None.
 
         Returns:
             torch.Tensor: The activations of all neurons across time steps (in batches).
@@ -525,18 +531,35 @@ class MultilayeredNetwork(nn.Module):
             single_input = False
 
         if manipulate is not None:
+            # check if manipulate is per-batch
+            if not all(
+                isinstance(act_dict, dict)
+                for _, this_batch in manipulate.items()
+                for _, act_dict in this_batch.items()
+            ):
+                batch_manipulate = manipulate.copy()
+                # add batch dimension
+                manipulate = dict.fromkeys(range(inputs.size(0)), batch_manipulate)
+
             if self.idx_to_group is None:
                 print("idx_to_group not provided. Assuming neuron indices are used.")
                 # make sure keys are int
-                manipulate_idx = {int(k): v for k, v in manipulate.items()}
+                manipulate_idx = {
+                    int(cell): activity
+                    for b, this_batch in manipulate.items()
+                    for layer, act_dict in this_batch.items()
+                    for cell, activity in act_dict.items()
+                }
             else:
                 # convert group names to indices
                 manipulate_idx = {}
-                for layer, act_dict in manipulate.items():
-                    manipulate_idx[layer] = {}
-                    for idx, grp in self.idx_to_group.items():
-                        if grp in act_dict:
-                            manipulate_idx[layer][idx] = act_dict[grp]
+                for b, this_batch in manipulate.items():
+                    manipulate_idx[b] = {}
+                    for layer, act_dict in this_batch.items():
+                        manipulate_idx[b][layer] = {}
+                        for idx, grp in self.idx_to_group.items():
+                            if grp in act_dict:
+                                manipulate_idx[b][layer][idx] = act_dict[grp]
 
         if monitor_neurons is not None:
             if self.idx_to_group is None:
@@ -632,10 +655,11 @@ class MultilayeredNetwork(nn.Module):
             x = torch.where(x > 1, torch.ones_like(x), x)
 
         if manipulate is not None:
-            if 0 in manipulate_idx:
-                x = x.clone()
-                for neuron_idx, target_act in manipulate_idx[0].items():
-                    x[neuron_idx, :] = target_act
+            x = x.clone()
+            for b, this_batch in manipulate.items():
+                if 0 in manipulate_idx[b]:  # if layer 0 in manipulate in batch b
+                    for neuron_idx, target_act in manipulate_idx[b][0].items():
+                        x[neuron_idx, b] = target_act
 
         if monitor_neurons is not None:
             if monitor_layers is None:
@@ -670,10 +694,11 @@ class MultilayeredNetwork(nn.Module):
                 x = torch.where(x > 1, torch.ones_like(x), x)
 
             if manipulate is not None:
-                if alayer in manipulate_idx:
-                    x = x.clone()
-                    for neuron_idx, target_act in manipulate_idx[alayer].items():
-                        x[neuron_idx, :] = target_act
+                x = x.clone()
+                for b, this_batch in manipulate.items():
+                    if alayer in manipulate_idx[b]:
+                        for neuron_idx, target_act in manipulate_idx[b][alayer].items():
+                            x[neuron_idx, b] = target_act
 
             # hook for this layer
             if monitor_neurons is not None and alayer in monitor_layers:
@@ -1319,7 +1344,6 @@ def get_gradients(
     monitor_neurons: arrayable,
     target_neurons: Dict[int, List[Union[int, str]]],
     monitor_layers: Optional[List[int]] = None,
-    idx_to_group: Optional[Dict[int, str]] = None,
     method: str = "vanilla",
     batch_names: Optional[List[str]] = None,
     device: Optional[torch.device] = None,
@@ -1329,37 +1353,35 @@ def get_gradients(
     change of target neuron activations with respect to monitor neurons.
 
     Args:
-        model: MultilayeredNetwork instance. Please note that model.idx_to_group should
-            be None (i.e. when the model was defined, idx_to_group was not provided).
+        model: MultilayeredNetwork instance.
         input_tensor: Input tensor to the model. Shape: (batch_size, num_input_neurons,
             num_timesteps) or (num_input_neurons, num_timesteps)
-        monitor_neurons: List of neuron indices to monitor gradients for. If
-            `idx_to_group` (e.g. idx_to_type) is provided, these should be group names.
+        monitor_neurons: List of neuron indices to monitor gradients for. If `model`'s
+            `idx_to_group` attribute is not None (e.g. idx_to_type), these should be
+            group names.
         target_neurons: Dictionary mapping layer/timepoint indices to lists of neurons.
-            If `idx_to_group` is provided, neurons should be group names. e.g.
-            {5: ['DA1_lPN']} means calculating gradients of layer 5 neurons in
-            group 'DA1_lPN'.
+            If `model`'s `idx_to_group` attribute is not None (e.g. idx_to_type), these
+            should be group names. e.g. {5: ['DA1_lPN']} means calculating gradients of
+            layer 5 neurons in group 'DA1_lPN'.
         monitor_layers: List of layer indices to monitor gradients at. If None, monitor
-            all layers
-        idx_to_group: Optional mapping from neuron indices to group names. If provided,
-            gradients will be summed over groups.
+            all layers.
         method: Gradient computation method. "vanilla" or "input_x_gradient".
         batch_names: Optional list of batch names corresponding to the input tensor.
-            If None, default names will be generated.
+            If not provided, defaults to ["batch_0", "batch_1", ...].
         device: Optional torch device to run the computations on. If None, uses CUDA if
             available, else CPU.
 
     Returns:
-        DataFrame containing gradients with columns: 'group', 'batch_name', 'time_0',
-        'time_1', ..., 'time_N'
+        pd.DataFrame: DataFrame containing gradients with columns: 'group', 'batch_name',
+        'time_0', 'time_1', ..., 'time_N'.
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    if method not in ["vanilla", "input_x_gradient"]:
-        raise ValueError(
-            f"Unknown gradient computation method: {method}. Supported methods are 'vanilla' and 'input_x_gradient'."
-        )
+    assert method in [
+        "vanilla",
+        "input_x_gradient",
+    ], "Invalid method; choose 'vanilla' or 'input_x_gradient'."
 
     # Convert to tensor if needed
     if isinstance(input_tensor, np.ndarray):
@@ -1374,13 +1396,12 @@ def get_gradients(
         layer: to_nparray(neurons) for layer, neurons in target_neurons.items()
     }
 
-    if idx_to_group is not None:
+    if model.idx_to_group is not None:
         # turn into indices
-        monitor_neurons = [
-            idx for idx, grp in idx_to_group.items() if grp in monitor_neurons
-        ]
         target_neurons = {
-            layer: [idx for idx, grp in idx_to_group.items() if grp in neuron_indices]
+            layer: [
+                idx for idx, grp in model.idx_to_group.items() if grp in neuron_indices
+            ]
             for layer, neuron_indices in target_neurons.items()
         }
 
@@ -1407,15 +1428,20 @@ def get_gradients(
             batch_names = ["batch_0"]
 
     dfs = []
+    if model.idx_to_group is not None:
+        # turn monitor_neurons into indices
+        monitor_indices = [
+            idx for idx, grp in model.idx_to_group.items() if grp in monitor_neurons
+        ]
     for i in model.noted_grads.keys():  # number of timesteps/layers
         df = pd.DataFrame(
             model.noted_grads[i].numpy(),  # shape: (num_monitor_neurons, num_batches)
             columns=batch_names,
-            index=monitor_neurons,
+            index=monitor_neurons if model.idx_to_group is None else monitor_indices,
         )
-        if idx_to_group is not None:
+        if model.idx_to_group is not None:
             # turn back to groups
-            df.index = df.index.map(idx_to_group)
+            df.index = df.index.map(model.idx_to_group)
             df = df.groupby(df.index).sum()
 
         # longer
@@ -1434,7 +1460,9 @@ def get_gradients(
     )
 
     if method == "input_x_gradient":
-        acts = get_neuron_activation(out, monitor_neurons, batch_names, idx_to_group)
+        acts = get_neuron_activation(
+            out, monitor_neurons, batch_names, model.idx_to_group
+        )
         dfs = (
             dfs.set_index(["group", "batch_name"]).sort_index()
             * acts.set_index(["group", "batch_name"]).sort_index()

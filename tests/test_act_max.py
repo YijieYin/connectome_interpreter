@@ -779,29 +779,30 @@ class TestGetGradients(unittest.TestCase):
         )
 
     def test_returns_dataframe_shape_and_columns(self):
-        monitor = [0, 1]  # indices
+        monitor = [0, 1]  # neuron indices
         target = {2: [4]}  # layer 2, neuron 4
+
         df = get_gradients(
             self.model,
             self.inputs_batched,
             monitor_neurons=monitor,
             target_neurons=target,
             monitor_layers=[0, 1, 2],
-            idx_to_group=None,
             batch_names=[f"b{i}" for i in range(self.batch_size)],
             device=self.device,
         )
-        # expected columns
+
         expected_time_cols = {f"time_{t}" for t in [0, 1, 2]}
         self.assertTrue({"group", "batch_name"}.issubset(df.columns))
         self.assertTrue(expected_time_cols.issubset(df.columns))
+
         # two monitored neurons * two batches = 4 rows
         self.assertEqual(len(df), 4)
+
         # group column are raw indices when idx_to_group=None
         self.assertTrue(set(df["group"].unique()).issubset({0, 1}))
 
     def test_gradient_path_specificity(self):
-        # sensor 0 should influence target (0->2->4), sensor 1 should not
         monitor = [0, 1]
         target = {2: [4]}
         df = get_gradients(
@@ -810,13 +811,13 @@ class TestGetGradients(unittest.TestCase):
             monitor_neurons=monitor,
             target_neurons=target,
             monitor_layers=[0, 1, 2],
+            batch_names=None,
             device=self.device,
         )
         # convert to wide for easy checks
         wide = df.pivot(index="group", columns="batch_name").sort_index()
         # single input -> only "batch_0" exists
         g0 = wide.loc[0].to_numpy()
-        # print("g0: ", g0)
         g1 = wide.loc[1].to_numpy()
 
         # grads should be non-zero for sensor 0 and ~0 for sensor 1
@@ -829,9 +830,11 @@ class TestGetGradients(unittest.TestCase):
     def test_gradients_constant_across_batches_in_linear_case(self):
         monitor = [0, 1]
         target = {2: [4]}
+
         # two different batches; in linear system with identity activation the gradient is input-independent
         inp = self.inputs_batched.clone()
         inp[1] = 0.1  # change batch 2 input
+
         df = get_gradients(
             self.model,
             inp,
@@ -841,6 +844,7 @@ class TestGetGradients(unittest.TestCase):
             batch_names=["A", "B"],
             device=self.device,
         )
+
         a = df[df["batch_name"] == "A"].sort_values("group")
         b = df[df["batch_name"] == "B"].sort_values("group")
         self.assertTrue(
@@ -854,18 +858,28 @@ class TestGetGradients(unittest.TestCase):
     def test_idx_to_group_mapping_and_averaging(self):
         # group mapping: 0->S0, 1->S1, 2->X, 3->X, 4->T
         idx_to_group = {0: "S0", 1: "S1", 2: "X", 3: "X", 4: "T"}
+
+        # new model with group mapping
+        model_with_groups = MultilayeredNetwork(
+            self.all_weights,
+            sensory_indices=self.sensory_indices,
+            num_layers=self.num_layers,
+            threshold=0.0,
+            activation_function=_linear_activation,
+            idx_to_group=idx_to_group,
+        ).to(self.device)
+
         # monitor by group names
         monitor = ["S0", "S1"]
         # target is neuron 4 via group "T" at layer 2
         target = {2: ["T"]}
 
         df = get_gradients(
-            self.model,
+            model_with_groups,
             self.inputs_batched,
             monitor_neurons=monitor,
             target_neurons=target,
             monitor_layers=[0, 1, 2],
-            idx_to_group=idx_to_group,
             batch_names=["A", "B"],
             device=self.device,
         )
@@ -888,6 +902,7 @@ class TestGetGradients(unittest.TestCase):
             monitor_neurons=monitor,
             target_neurons=target,
             monitor_layers=[1, 2],  # subset only
+            batch_names=None,
             device=self.device,
         )
         self.assertIn("time_1", df.columns)
