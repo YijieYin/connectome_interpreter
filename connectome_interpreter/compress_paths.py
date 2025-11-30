@@ -378,8 +378,8 @@ def compress_paths_dense_chunked(
             filenames. Defaults to ``"step_"``.
 
     Returns:
-        list: A list of scipy.sparse.csc_matrix objects, each representing
-            connectivity from all neurons to all neurons n steps away.
+        list: A list of scipy.sparse.csc_matrix objects, each representing connectivity
+        from all neurons to all neurons n steps away.
 
     Note:
         This function requires PyTorch and is designed to automatically
@@ -1512,8 +1512,8 @@ def contribution_by_path_lengths_data(
 
     Returns:
         pd.DataFrame: A DataFrame containing the contributions from presynaptic neurons
-            to postsynaptic neurons over different path lengths. The DataFrame has three
-            columns: 'path_length', 'presynaptic_type' (or 'postsynaptic_type'), and 'value'.
+        to postsynaptic neurons over different path lengths. The DataFrame has three
+        columns: 'path_length', 'presynaptic_type' (or 'postsynaptic_type'), and 'value'.
     """
     # remove nan values in inidx and outidx
     inidx = to_nparray(inidx)
@@ -1607,7 +1607,7 @@ def contribution_by_path_lengths(
 
     Returns:
         None: Displays an interactive line plot showing the connection strength from all
-            of inidx to an average outidx over different path lengths.
+        of inidx to an average outidx over different path lengths.
 
     """
     contri = contribution_by_path_lengths_data(
@@ -1677,9 +1677,8 @@ def contribution_by_path_lengths_heatmap(
             to (30, 15).
 
     Returns:
-        None: Displays an interactive heatmap showing the contribution from
-            inidx to outidx, grouped by inidx_map and outidx_map, across
-            different path lengths.
+        None: Displays an interactive heatmap showing the contribution from inidx to
+        outidx, grouped by inidx_map and outidx_map, across different path lengths.
     """
 
     inidx = to_nparray(inidx)
@@ -1777,9 +1776,9 @@ def conn_by_path_length_data(
 
     Returns:
         List[pd.DataFrame] | pd.DataFrame: If one of outidx_map and inidx_map is
-            provided, a DataFrame containing the three columns: 'path_length', 'post'
-            (or 'pre'), and 'weight'. If both are provided, a list of DataFrames, where
-            each one is the connectivity of a specific path length.
+        provided, a DataFrame containing the three columns: 'path_length', 'post' (or
+        'pre'), and 'weight'. If both are provided, a list of DataFrames, where each one
+        is the connectivity of a specific path length.
     """
 
     inidx = to_nparray(inidx)
@@ -1902,7 +1901,7 @@ def conn_by_path_length(
 
     Returns:
         None: Displays an interactive line plot showing the connection strength from all
-            of inidx to an average outidx over different path lengths.
+        of inidx to an average outidx over different path lengths.
 
     """
 
@@ -2327,7 +2326,7 @@ def effective_conn_from_paths_cpu(
 
     Returns:
         pd.DataFrame: A dataframe representing the effective connectivity between groups
-            of neurons.
+        of neurons.
     """
 
     # it will get confusing if we didn't use the same mapping for all layers
@@ -2413,9 +2412,8 @@ def signed_effective_conn_from_paths(
             (inhibitory). Defaults to None.
 
     Returns:
-        list: A list of two dataframes representing the effective connectivity
-            between groups of neurons, one for effective excitation, the other
-            inhibition.
+        list: A list of two dataframes representing the effective connectivity between
+        groups of neurons, one for effective excitation, the other inhibition.
     """
 
     if ("sign" not in paths.columns) & (idx_to_nt is None):

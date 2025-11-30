@@ -1802,9 +1802,8 @@ def get_neuron_activation(
             groups. Defaults to None.
 
     Returns:
-        pd.DataFrame: The activations for the neurons, with the first
-            columns being batch_names, neuron_indices, and group. The rest
-            are the timesteps.
+        pd.DataFrame: The activations for the neurons, with the first columns being
+        batch_names, neuron_indices, and group. The rest are the timesteps.
     """
     neuron_indices = list(to_nparray(neuron_indices))
 
@@ -2039,13 +2038,13 @@ def get_input_activation(
             to 0.
 
     Notes:
-        - If there are two neurons in a cell type, one passes the activation threshold
-            and the other doesn't, only the one that passes the threshold is selected.
+
+        - If there are two neurons in a cell type, one passes the activation threshold and the other doesn't, only the one that passes the threshold is selected.
+
 
     Returns:
-        pd.DataFrame: The input activation for the model, with the first
-            columns being group and sensory_indices. The rest are the
-            timesteps.
+        pd.DataFrame: The input activation for the model, with the first columns being
+        group and sensory_indices. The rest are the timesteps.
     """
     sensory_indices = to_nparray(sensory_indices)
 
@@ -2153,8 +2152,8 @@ def activity_by_column(
 
     Returns:
         pd.DataFrame: A dataframe with columns 'normalised_column', 'cell_group',
-            'time_point', 'activation', and 'time_step'. The first timepoint of
-            `model_input` is also included if `model_input` is provided.
+        'time_point', 'activation', and 'time_step'. The first timepoint of `model_input`
+        is also included if `model_input` is provided.
     """
 
     # if one of model_input or sensory_indices is provided, the other must also be provided
