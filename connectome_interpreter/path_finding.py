@@ -160,21 +160,20 @@ def find_paths_of_length(
     pre and post.
 
     Args:
-      edgelist (Union[spmatrix, pd.DataFrame]): The edgelist of the entire graph. If
-        a DataFrame, it must contain columns "pre", "post", and "weight". If a
-        sparse matrix, the pre needs to be in the rows.
+      edgelist (Union[spmatrix, pd.DataFrame]): The edgelist of the entire graph. If a
+        DataFrame, it must contain columns "pre", "post", and "weight". If a sparse
+        matrix, the pre needs to be in the rows.
       inidx (int, float, list, set, numpy.ndarray, or pandas.Series): The source indices.
       outidx (int, float, list, set, numpy.ndarray, or pandas.Series): The target
         indices.
-      target_layer_number (int): The target layer number to examine. Must be
-        >= 1. When target_layer_number = 1, we are looking at the direct
-        synaptic connectivity.
+      target_layer_number (int): The target layer number to examine. Must be >= 1. When
+        target_layer_number = 1, we are looking at the direct synaptic connectivity.
 
     Returns:
-      pd.DataFrame: A DataFrame containing the path data, including the
-        pre-synaptic and post-synaptic neuron indices, the layer (direct
-        connections from inidx: layer = 1), and the weight (input proportion of
-        the postsynaptic neuron) of the direct connection between pre and post.
+      pd.DataFrame: A DataFrame containing the path data, including the pre-synaptic and
+        post-synaptic neuron indices, the layer (direct connections from inidx: layer =
+        1), and the weight (input proportion of the postsynaptic neuron) of the direct
+        connection between pre and post. If no path is found, returns None.
     """
 
     inidx = to_nparray(inidx)
@@ -207,6 +206,8 @@ def find_paths_of_length(
         el = edgelist[
             (edgelist["pre"].isin(inidx)) & (edgelist["post"].isin(outidx))
         ].copy()
+        if el.empty:
+            return None
         el.loc[:, ["layer"]] = 1
         return el
 
