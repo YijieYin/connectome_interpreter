@@ -1470,8 +1470,10 @@ def el_within_n_steps(
             function will return L1->Tm3 connections for *all* L1 and Tm3 neurons.
             Defaults to False.
     Returns:
-        pd.DataFrame: A DataFrame containing the edges of the paths found,
-            including columns 'pre', 'post', and 'weight'.
+        pd.DataFrame: A DataFrame containing the edges of the paths found, including
+        columns 'pre', 'post', and 'weight'. If `return_raw_el` is True, returns a
+        tuple of two DataFrames: the first is the grouped edges, and the second is the
+        raw edges before grouping. If not paths are found, returns None.
     """
 
     inidx = to_nparray(inidx)
@@ -1495,6 +1497,8 @@ def el_within_n_steps(
             )
         paths = filter_paths(paths, threshold)
         all_paths.append(paths)
+    if len(all_paths) == 0:
+        return None
     all_paths = pd.concat(all_paths, axis=0)
     el = all_paths.groupby(["pre", "post"])["weight"].max().reset_index()
 
