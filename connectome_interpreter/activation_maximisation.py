@@ -539,17 +539,16 @@ class MultilayeredNetwork(nn.Module):
             ):
                 batch_manipulate = manipulate.copy()
                 # add batch dimension
-                manipulate = dict.fromkeys(range(inputs.size(0)), batch_manipulate)
+                manipulate = dict.fromkeys(range(inputs.shape[0]), batch_manipulate)
 
             if self.idx_to_group is None:
-                print("idx_to_group not provided. Assuming neuron indices are used.")
-                # make sure keys are int
-                manipulate_idx = {
-                    int(cell): activity
-                    for b, this_batch in manipulate.items()
-                    for layer, act_dict in this_batch.items()
-                    for cell, activity in act_dict.items()
-                }
+                manipulate_idx = {}
+                for b, this_batch in manipulate.items():
+                    manipulate_idx[b] = {}
+                    for layer, act_dict in this_batch.items():
+                        manipulate_idx[b][layer] = {
+                            int(cell): activity for cell, activity in act_dict.items()
+                        }
             else:
                 # convert group names to indices
                 manipulate_idx = {}
