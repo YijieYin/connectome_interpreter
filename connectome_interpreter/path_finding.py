@@ -532,34 +532,32 @@ def remove_excess_neurons(
     target_indices=None,
     keep_targets_in_middle: bool = False,
 ) -> pd.DataFrame:
-    """After filtering, some neurons are no longer on the paths between the
-    input and output neurons. This function removes those neurons from the
-    paths.
+    """After filtering, some neurons are no longer on the paths between the input and
+    output neurons. This function removes those neurons from the paths.
 
     Args:
-        df (pd.Dataframe): a filtered dataframe with similar structure as the
-            dataframe returned by `find_path_iteratively()`.
-        keep (list, set, pd.Series, numpy.ndarray, str, optional): A list of
-            neuron indices that should be kept in the paths, even if they don't
-            connect between input and target in the last layer. Defaults to
-            None.
-        target_indices (list, set, pd.Series, numpy.ndarray, str, optional): A
-            list of target neuron indices that should be kept in the last
-            layer. Defaults to None, in which case all neurons in the last
-            layer in `df` would be kept.
-        keep_targets_in_middle (bool, optional): If True, the target_indices
-            are kept in the middle layers as well, even if they don't connect
-            between input and target in the last layer. Defaults to False.
+        df (pd.Dataframe): a filtered dataframe with similar structure as the dataframe
+            returned by `find_paths_of_length()`.
+        keep (list, set, pd.Series, numpy.ndarray, str, optional): A list of neuron
+            indices that should be kept in the paths, even if they don't connect between
+            input and target in the last layer. Defaults to None.
+        target_indices (list, set, pd.Series, numpy.ndarray, str, optional): A list of
+            target neuron indices that should be kept in the last layer. Defaults to
+            None, in which case all neurons in the last layer in `df` would be kept.
+        keep_targets_in_middle (bool, optional): If True, the target_indices are kept in
+            the middle layers as well, even if they don't connect between input and
+            target in the last layer. Defaults to False.
 
     Returns:
         pd.Dataframe: a dataframe with similar structure as the result of
-            `find_path_iteratively()`, with the excess neurons removed.
+        `find_paths_of_length()`, with the excess neurons removed. If no path is found,
+        returns None.
     """
 
     if df.shape[0] == 0:
         # raise error
         raise ValueError(
-            "There are no connections (`df` is empty)! Threshold too high?"
+            "No connections found in the input of `remove_excess_neurons()`. "
         )
 
     max_layer_num = df["layer"].max()
@@ -720,7 +718,7 @@ def remove_excess_neurons(
 
             df = pd.concat(df_layers_update)
 
-        # at this point, if no edges left: raise error
+        # at this point, if no edges left: return None
         if df.shape[0] == 0:
             print("No path found. Try relaxing the criteria for edge inclusion.")
             return
@@ -729,11 +727,10 @@ def remove_excess_neurons(
 
     # in case we removed all the connections in the last layer
     if df["layer"].max() != max_layer_num:
-        raise ValueError(
-            "No path found. Try lowering the threshold for the edges to be "
-            "included in the path. Currently no connections are found in the "
-            "last layer."
+        print(
+            "No path found. Try lowering the threshold for the edges to be included in the path."
         )
+        return
     return df
 
 
