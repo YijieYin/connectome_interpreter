@@ -2637,4 +2637,4 @@ def plot_paths(
         if save_plot:
             fig.savefig(file_name + ".pdf")
             print(f"Graph saved as {file_name}.pdf")
-        plt.show()
+        # plt.show()
