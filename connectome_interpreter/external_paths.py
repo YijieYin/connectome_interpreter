@@ -254,12 +254,12 @@ def layered_el(
 
     # get edge list, both grouped by idx_to_group, and with raw indices
     all_paths = []
-    raw_el = []
+    rawel = []
     for i in tqdm(range(n)):
         paths = find_paths_of_length(inprop, inidx, outidx, i + 1)
         if paths is None or paths.shape[0] == 0:
             continue
-        raw_el.append(paths)
+        rawel.append(paths)
         paths = group_paths(
             paths,
             idx_to_group,
@@ -289,9 +289,9 @@ def layered_el(
 
     all_paths = pd.concat(all_paths, axis=0)
     grouped = all_paths.groupby(["pre", "post"])["weight"].max().reset_index()
-    raw_el = pd.concat(raw_el, axis=0)
+    rawel = pd.concat(rawel, axis=0)
     # pre, post are single neurons, so the rows should be real duplicates
-    raw_el = raw_el.drop_duplicates(subset=["pre", "post", "weight"])
+    rawel = rawel.drop_duplicates(subset=["pre", "post", "weight"])
 
     # information flow
     if flow is None:
