@@ -222,6 +222,8 @@ def layered_el(
     """
     Similar to `el_within_n_steps` but using filter_paths_to_cumsum and layers based
     on the information flow hitting time (navis: https://github.com/navis-org/navis).
+    If thre_cumsum is None, then paths are filtered based on direct weight thre_step_min;
+    otherwise, paths are filtered such that the cumulative effective weight reaches thre_cumsum.
 
     Args:
         inprop (spmatrix): Input sparse matrix representing connections.
@@ -230,9 +232,10 @@ def layered_el(
         n (int): The maximum number of hops. n=1 for direct connections.
         idx_to_group (dict): Dictionary mapping cell indices to their respective cell
             groups.
-        thre_cumsum (float): The cumulative effective weight threshold to reach.
+        thre_cumsum (float): The cumulative effective weight threshold to reach for filtered paths.
+            Defaults to None, in which case paths are only filtered based on thre_step_min.
         thre_step_min (float, optional): The minimum threshold for the weight of the
-            direct connection between pre and post. Defaults to 0.001.
+            direct connection between pre and post. Defaults to 0.0.
         combining_method (str, optional): Method to combine inputs (outprop=False) or
             outputs (outprop=True). Can be 'sum', 'mean', or 'median'. Defaults to 'mean'.
         threshold (float): The threshold for the weight of the direct connection between
