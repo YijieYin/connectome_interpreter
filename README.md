@@ -16,7 +16,11 @@ pip install git+https://github.com/YijieYin/connectome_interpreter.git
 Documentation [here](https://connectome-interpreter.readthedocs.io/en/latest/) (with some text snippets explaining various things). 
 
 # Example notebooks 
-## Full Adult Fly Brain 
+## maleCNS, BANC, FAFB/FlyWire, Hemibrain, MANC altogether 🤯
+maleCNS obtained from [Berg et al. 2025](https://www.biorxiv.org/content/10.1101/2025.10.09.680999v2), BANC from [Bates et al. 2025](https://www.biorxiv.org/content/10.1101/2025.07.31.667571v1), FAFB/FlyWire listed below, Hemibrain from [Scheffer et al. 2020](https://doi.org/10.7554/eLife.57443), and MANC (male adult nerve cord) from [Cheong et al. 2025](https://www.biorxiv.org/content/10.1101/2023.06.07.543976v3), [Marin et al. 2024](https://www.biorxiv.org/content/10.1101/2023.06.05.543407v2), and [Takemura et al. 2024](https://elifesciences.org/reviewed-preprints/97769).
+- [single-neuron level](https://colab.research.google.com/drive/1ODzTLxnHRZOCcs0jUO4ZAvCg_Ax0qrSP?usp=sharing)
+
+## Full Adult Fly Brain (FAFB/FlyWire)
 Data obtained from [Dorkenwald et al. 2024](https://www.nature.com/articles/s41586-024-07558-y), [Schlegel et al. 2024](https://www.nature.com/articles/s41586-024-07686-5), and [Matsliah et al. 2024](https://www.nature.com/articles/s41586-024-07981-1). To visualise the neurons, you can use this url: [https://tinyurl.com/flywire783](https://tinyurl.com/flywire783). By using the connectivity information, you agree to follow the [FlyWire citation guidelines and principles](https://codex.flywire.ai/api/download).
   - [central brain, single-neuron level](https://colab.research.google.com/drive/1_beqiKPX8pC7---DWepKO8dEv1sJ2vA4?usp=sharing) (recommended. Shows a variety of capabilities)
   - [full brain, single-neuron level](https://colab.research.google.com/drive/1wHah__f5XP7hKRtZ71ObVlLkUNZGsoz1?usp=sharing)
