@@ -858,9 +858,12 @@ def group_paths(
 ) -> pd.DataFrame:
     """
     Group the paths by user-specified variable (e.g. cell type, cell class etc.).
-    Weights are summed across presynaptic neurons of the same group and averaged across
-    all postsynaptic neurons of the same group (even if some postsynaptic neurons are
-    not in `paths`).
+    If outprop=False, weights are summed across presynaptic neurons of the same group 
+    and combined across all postsynaptic neurons of the same group using combining_method
+    (even if some postsynaptic neurons are not in `paths`).
+    If outprop=True, weights are summed across postsynaptic neurons of the same group
+    and combined across all presynaptic neurons of the same group using combining_method
+    (even if some presynaptic neurons are not in `paths`).
 
     Args:
         paths (pd.DataFrame): The DataFrame containing the path data, looking
