@@ -2256,6 +2256,7 @@ def plot_paths(
     edge_text_size: int = 10,
     node_text: bool = True,
     highlight_nodes: list[str] = [],
+    show: bool = True,
     interactive: bool = False,
     save_plot: bool = False,
     file_name: str = "paths",
@@ -2315,6 +2316,8 @@ def plot_paths(
             plot. Defaults to True.
         highlight_nodes (list, optional): List of neuron identifiers to highlight in the
             plot. Defaults to an empty list.
+        show (bool, optional): If True, display the plot (when `interactive` is False).
+            If False, the function returns the figure and axis objects. Defaults to True.
         interactive (bool, optional): If True, create an interactive plot using Pyvis.
             Defaults to False.
         save_plot (bool, optional): If True, save the plot to a file. Defaults to False.
@@ -2338,7 +2341,9 @@ def plot_paths(
             15.
 
     Returns:
-        None: Displays the plot or creates an interactive visualization.
+        fig, ax:
+            Only returned when show=False and interactive=False. Otherwise, the plot is
+            either shown directly or displayed in an interactive window.
     """
     if paths.empty:
         raise ValueError("paths DataFrame is empty")
@@ -2637,4 +2642,9 @@ def plot_paths(
         if save_plot:
             fig.savefig(file_name + ".pdf")
             print(f"Graph saved as {file_name}.pdf")
-        # plt.show()
+
+        if show:
+            plt.show()
+            return None, None
+
+        return fig, ax
