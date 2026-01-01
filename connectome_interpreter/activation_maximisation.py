@@ -993,6 +993,7 @@ def activation_maximisation(
     print_output: bool = True,
     device: Optional[torch.device] = None,
     wandb: bool = False,
+    seed: Optional[int] = None,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -1002,51 +1003,50 @@ def activation_maximisation(
     List[np.ndarray],
 ]:
     """
-    Performs activation maximisation on a given model to identify input
-    patterns that result in the target activations.
+    Performs activation maximisation on a given model to identify input patterns that
+    result in the target activations.
 
-    This is done by adjusting the input tensor over `num_iterations`
-    using gradient descent, while also regularising the overall input
-    and output (to keep activated neurons sparse).
+    This is done by adjusting the input tensor over `num_iterations` using gradient
+    descent, while also regularising the overall input and output (to keep activated
+    neurons sparse).
 
     Args:
-        model: A PyTorch model with `activations`, `sensory_indices`, and
-            `threshold` attributes.
-        target_activations (TargetActivation): Target activations
-            specification.
-        input_tensor (torch.Tensor, optional): The initial tensor to optimize.
-            If None, a random tensor is created.  Defaults to None.
-        num_iterations (int, optional): The number of iterations to run the
-            optimization for. Defaults to 50.
-        learning_rate (float, optional): The learning rate for the optimizer.
-            Defaults to 0.1.
-        in_reg_lambda (float, optional): The coefficient for input
-            regularization. Defaults to 0.01.
-        out_reg_lambda (float, optional): The coefficient for output
-            regularization. Defaults to 0.01.
-        custom_reg_functions (Dict[str, Callable[[torch.Tensor]], optional):
-            A dictionary with keys 'in' and 'out' that map to functions that
-            calculate the input and output regularization losses, respectively.
-            If None, the default regularization function (L1 plus L2) is used.
-            Defaults to None.
-        early_stopping (bool, optional): Whether to stop the optimization early
-            if the difference between the biggest and the smallest loss within
-            the last n_runs falls below `stopping_threshold`. Defaults to True.
-        stopping_threshold (float, optional): The threshold for early stopping.
-            Defaults to 1e-6.
-        n_runs (int, optional): The number of runs to consider for early
-            stopping. Defaults to 10.
+        model: A PyTorch model with `activations`, `sensory_indices`, and `threshold`
+            attributes.
+        target_activations (TargetActivation): Target activations specification.
+        input_tensor (torch.Tensor, optional): The initial tensor to optimize. If None,
+            a random tensor is created.  Defaults to None.
+        num_iterations (int, optional): The number of iterations to run the optimization
+            for. Defaults to 50.
+        learning_rate (float, optional): The learning rate for the optimizer. Defaults
+            to 0.1.
+        in_reg_lambda (float, optional): The coefficient for input regularization.
+            Defaults to 0.01.
+        out_reg_lambda (float, optional): The coefficient for output regularization.
+            Defaults to 0.01.
+        custom_reg_functions (Dict[str, Callable[[torch.Tensor]], optional): A
+            dictionary with keys 'in' and 'out' that map to functions that calculate the
+            input and output regularization losses, respectively. If None, the default
+            regularization function (L1 plus L2) is used. Defaults to None.
+        early_stopping (bool, optional): Whether to stop the optimization early if the
+            difference between the biggest and the smallest loss within the last n_runs
+            falls below `stopping_threshold`. Defaults to True.
+        stopping_threshold (float, optional): The threshold for early stopping. Defaults
+            to 1e-5.
+        n_runs (int, optional): The number of runs to consider for early stopping.
+            Defaults to 10.
         use_tqdm (bool, optional): Whether to use tqdm progress bars to track
             optimization progress. Defaults to True.
         print_output (bool, optional): Whether to print loss information during
             optimization. Defaults to True.
-        report_memory_usage (bool, optional): Whether to report GPU memory
-            usage during optimization. Defaults to False.
-        device: The device to run the optimization on. If None, automatically
-            selects a device. Defaults to None.
-        wandb (bool, optional): Whether to log optimization details to Weights
-            & Biases (https://wandb.ai/site/). Defaults to True.  Requires
-            wandb to be installed.
+        report_memory_usage (bool, optional): Whether to report GPU memory usage during
+            optimization. Defaults to False.
+        device: The device to run the optimization on. If None, automatically selects a
+            device. Defaults to None.
+        wandb (bool, optional): Whether to log optimization details to Weights & Biases
+            (https://wandb.ai/site/). Defaults to True.  Requires wandb to be installed.
+        seed (int, optional): Random seed for reproducible input tensor initialization.
+            Only used when input_tensor is None. Defaults to None (no seed set).
 
     Returns:
         tuple: A tuple containing:
@@ -1130,6 +1130,10 @@ def activation_maximisation(
     batch_size = target_activations.batch_size
 
     if input_tensor is None:
+        if seed is not None:
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+
         input_tensor = torch.rand(
             (batch_size, len(model.sensory_indices), model.num_layers),
             requires_grad=True,
