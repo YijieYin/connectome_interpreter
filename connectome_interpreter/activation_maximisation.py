@@ -587,8 +587,7 @@ class MultilayeredNetwork(nn.Module):
         # actual forward
         acts = []
 
-        inputs = torch.where(inputs >= self.threshold, inputs, torch.zeros_like(inputs))
-        inputs = torch.where(inputs > 1, torch.ones_like(inputs), inputs)
+        inputs = torch.clamp(inputs, -1.0, 1.0)
 
         # check if inputs requires grad
         req_grad = inputs.requires_grad
@@ -619,6 +618,7 @@ class MultilayeredNetwork(nn.Module):
             self.sensory_indices.view(-1, 1).expand(-1, inputs.size(0)),
             inputs[:, :, 0].t(),  # shape: (sensory_neurons, batch_size)
         )
+        full_input = torch.clamp(full_input, self.threshold, 1.0)
         # # to illustrate how this works:
         # dest = torch.zeros(5, 2)
         # # sensory neurons, batch
@@ -650,8 +650,8 @@ class MultilayeredNetwork(nn.Module):
             x[self.sensory_indices, :] = (
                 x[self.sensory_indices, :] + inputs[:, :, 1].t()
             )
-            # make sure the max is 1
-            x = torch.where(x > 1, torch.ones_like(x), x)
+            # make sure x is between self.threshold and 1
+            x = torch.clamp(x, self.threshold, 1.0)
 
         if manipulate is not None:
             x = x.clone()
@@ -689,8 +689,8 @@ class MultilayeredNetwork(nn.Module):
                 x[self.sensory_indices, :] = (
                     x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
                 )
-                # make sure the max is 1
-                x = torch.where(x > 1, torch.ones_like(x), x)
+                # clamp to [threshold, 1]
+                x = torch.clamp(x, self.threshold, 1.0)
 
             if manipulate is not None:
                 x = x.clone()
@@ -1239,8 +1239,7 @@ def activation_maximisation(
         f"Final - Activation loss: {act_loss[-1]}, Input reg: {in_reg_losses[-1]}, Output reg: {out_reg_losses[-1]}"
     )
 
-    input_tensor = torch.where(input_tensor >= model.threshold, input_tensor, 0)
-    input_tensor = torch.tanh(input_tensor)
+    input_tensor = torch.clamp(input_tensor, -1.0, 1.0)
 
     output_after = model(input_tensor).cpu().detach().numpy()
     input_tensor = input_tensor.cpu().detach().numpy()
