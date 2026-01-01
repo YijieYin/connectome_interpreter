@@ -723,7 +723,7 @@ def remove_excess_neurons(
             print("No path found. Try relaxing the criteria for edge inclusion.")
             return
 
-    df.drop(columns="local_layer", inplace=True)
+    df = df.loc[:, df.columns != "local_layer"]
 
     # in case we removed all the connections in the last layer
     if df["layer"].max() != max_layer_num:

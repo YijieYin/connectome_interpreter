@@ -2110,8 +2110,8 @@ def effective_conn_from_paths(
     }
     local_to_global_idx = {i: idx for idx, i in local_idx_dict.items()}
 
-    paths["pre_idx"] = paths.pre.map(local_idx_dict)
-    paths["post_idx"] = paths.post.map(local_idx_dict)
+    paths.loc[:, ["pre_idx"]] = paths.pre.map(local_idx_dict)
+    paths.loc[:, ["post_idx"]] = paths.post.map(local_idx_dict)
 
     m = len(local_idx_dict)
     if use_gpu:
@@ -2440,7 +2440,7 @@ def signed_effective_conn_from_paths(
                 "Warning: some neurons are not in idx_to_nt. Their outputs "
                 "will be ignored"
             )
-        paths.loc[:, "sign"] = paths.pre.map(idx_to_nt)
+        paths.loc[:, ["sign"]] = paths.pre.map(idx_to_nt)
 
     # matmul with sparse matrices
     for i, layer in enumerate(sorted(paths.layer.unique())):
