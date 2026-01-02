@@ -222,7 +222,8 @@ def layered_el(
     Similar to `el_within_n_steps` but using filter_paths_to_cumsum and layers based
     on the information flow hitting time (navis: https://github.com/navis-org/navis).
     If thre_cumsum is None, then paths are filtered based on direct weight thre_step_min;
-    otherwise, paths are filtered such that the cumulative effective weight reaches thre_cumsum.
+    otherwise, paths are filtered such that the cumulative effective weight reaches
+    thre_cumsum.
 
     Args:
         inprop (spmatrix): Input sparse matrix representing connections.
@@ -237,15 +238,17 @@ def layered_el(
             direct connection between pre and post. Defaults to 0.0.
         combining_method (str, optional): Method to combine inputs (outprop=False) or
             outputs (outprop=True). Can be 'sum', 'mean', or 'median'. Defaults to 'mean'.
-        threshold (float): The threshold for the weight of the direct connection between
-            pre and post, after grouping by `idx_to_group`. Defaults to 0.
         flow_steps (int): Number of steps for flow calculation. Defaults to 20.
         flow_thre (float): Threshold for flow calculation. Defaults to 0.1.
         flow (pd.DataFrame, optional): DataFrame containing the flow hitting time.
             If provided, it should have columns 'cell_group' and 'hitting_time'.
             If None, the flow hitting time is computed from `inprop` and `idx_to_group`.
     Returns:
-        pd.DataFrame: DataFrame containing the grouped edge list with flow layers.
+        pd.DataFrame: DataFrame containing the edgelist with flow layers.
+        float: The total effective weight of the filtered paths.
+        float: The total effective weight of all paths before filtering.
+        float: The minimum edge weight threshold used to filter paths which is
+            minimally thre_step_min.
     """
 
     inidx = to_nparray(inidx)
@@ -469,3 +472,50 @@ def filter_all_paths_to_cumsum(
         w_filter += w_filter_i
 
     return all_paths, w_filter, w_all, thre_step
+
+
+def filter_paths_to_cumsum(
+    paths: pd.DataFrame,
+    thre_cumsum: float,
+    thre_step_min: float = 0.0,
+    necessary_intermediate: Dict[int, arrayable] | None = None,
+):
+    """
+    Filters paths such that intermediate neurons are specified in necessary_intermediate,
+    and that the cumulative effective weight minimally reaches thre_cumsum of the total
+    effective weight; and the minimum edge weight across the selected paths is either the
+    minimum along those remaining paths or thre_step_min.
+
+    Args:
+        paths (pd.DataFrame): DataFrame containing the path data, containing columns
+            'layer', 'pre', 'post', and 'weight'.
+        thre_cumsum (float): The cumulative effective weight threshold to reach for
+            filtered paths.
+        thre_step_min (float, optional): The minimum threshold for the weight of the
+            direct connection between pre and post. Defaults to 0.0.
+        necessary_intermediate (dict, optional): A dictionary of necessary intermediate
+            neurons, where the keys are the layer numbers (starting neurons: 1; directly
+            downstream: 2) and the values are the neuron indices (can be int, float,
+            list, set, numpy.ndarray, or pandas.Series). Defaults to None.
+
+    Returns:
+        paths (pd.DataFrame): DataFrame containing the paths that meet the criteria.
+        w_filter (float): The total effective weight of the filtered paths.
+        w_all (float): The total effective weight of all paths before filtering.
+        thre_step (float): The minimum edge weight threshold used to filter paths which is
+            minimally thre_step_min.
+    """
+    # compute total effective weight across all paths
+    w_all, w_prod, w_min = effective_conn_per_path_from_paths(paths)
+
+    # find minimum edge weight across strongest paths that make up thre_cumsum of total weight
+    # since in filter_paths, threshold > thre_step, take 99.9%, with a minimum of thre_step_min
+    idx_sort = np.argsort(-w_prod)
+    idx_thre = np.where(np.cumsum(w_prod[idx_sort] / w_all) > thre_cumsum)[0][0] + 1
+    thre_step = max(0.999 * np.min(w_min[idx_sort[:idx_thre]]), thre_step_min)
+
+    # filter paths and compute total effective weight across those paths
+    paths = filter_paths(paths, thre_step, necessary_intermediate)
+    w_filter, _, _ = effective_conn_per_path_from_paths(paths)
+
+    return paths, w_filter, w_all, thre_step
