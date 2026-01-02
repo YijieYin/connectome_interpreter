@@ -6,8 +6,7 @@ from matplotlib import pyplot as plt
 from typing import Dict, Union, Optional
 
 # Third-party package imports
-from scipy.sparse import csr_matrix, spmatrix
-from scipy.sparse.csgraph import shortest_path
+from scipy.sparse import spmatrix
 from tqdm import tqdm
 
 from .utils import to_nparray, arrayable
@@ -212,7 +211,7 @@ def layered_el(
     outidx: arrayable,
     n: int,
     idx_to_group: dict,
-    thre_cumsum: float | None=None,
+    thre_cumsum: float | None = None,
     thre_step_min: float = 0.0,
     combining_method: str = "mean",
     flow_steps: int = 20,
@@ -285,7 +284,9 @@ def layered_el(
             w_filter_i = effective_conn_from_paths(all_paths[i])
             w_filter += w_filter_i.sum().sum()
     else:
-        all_paths, w_filter, w_all, thre_step = filter_all_paths_to_cumsum(all_paths, thre_cumsum, thre_step_min)
+        all_paths, w_filter, w_all, thre_step = filter_all_paths_to_cumsum(
+            all_paths, thre_cumsum, thre_step_min
+        )
 
     all_paths = pd.concat(all_paths, axis=0)
     grouped = all_paths.groupby(["pre", "post"])["weight"].max().reset_index()
@@ -298,7 +299,9 @@ def layered_el(
         rawel["pre_type"] = rawel.pre.map(idx_to_group)
         rawel["post_type"] = rawel.post.map(idx_to_group)
         # only keep the neurons in the types that pass the threshold
-        rawel = rawel[rawel.pre_type.isin(grouped.pre) & rawel.post_type.isin(grouped.post)]
+        rawel = rawel[
+            rawel.pre_type.isin(grouped.pre) & rawel.post_type.isin(grouped.post)
+        ]
 
         # compute flow hitting time
         flow = find_instance_flow(
@@ -321,81 +324,17 @@ def layered_el(
 
     grouped["pre_layer"] = grouped.pre.map(type_layer)
     grouped["post_layer"] = grouped.post.map(type_layer)
-    #neurons that were not reached are assigned the layer flow_steps
+    # neurons that were not reached are assigned the layer flow_steps
     grouped.fillna(flow_steps, inplace=True)
 
     return grouped, w_filter, w_all, thre_step
 
 
-def find_shortest_paths(
-    paths: pd.DataFrame, start_nodes: list[str], end_nodes: list[str]
-) -> list[list[str]]:
-    """
-    Find the shortest paths between groups in start_nodes and end_nodes
-    in a paths dataframe (paths is the output of find_path_iteratively).
-
-    Args:
-        paths (pd.DataFrame): DataFrame containing the path data, including
-            columns 'weight', 'pre', and 'post'.
-        start_nodes (list): List of 'pre' groups.
-        end_nodes (list): List of 'post' groups.
-
-    Returns:
-        list: A list of shortest paths, where each path is a list of groups
-            that connect the start and end nodes (ordered from start to end).
-    """
-
-    paths_unique = paths[["weight", "pre", "post"]].drop_duplicates()
-    nodes_unique = np.unique(
-        np.concatenate([paths_unique.pre.unique(), paths_unique.post.unique()])
-    )
-    pre = np.searchsorted(nodes_unique, paths_unique.pre.values)
-    post = np.searchsorted(nodes_unique, paths_unique.post.values)
-    graph_matrix = csr_matrix(
-        (1 / paths_unique["weight"].values, (pre, post)),
-        shape=(len(nodes_unique), len(nodes_unique)),
-    )
-
-    _, predecessors = shortest_path(
-        csgraph=graph_matrix, directed=True, return_predecessors=True
-    )
-
-    def reconstruct_single_path(predecessors, start, end, node_names):
-        """
-        Helper function that reconstructs the path from start to end
-        using the predecessors array.
-        """
-        idx_start = np.where(nodes_unique == start)[0]
-        idx_end = np.where(nodes_unique == end)[0]
-        if len(idx_start) == 0 or len(idx_end) == 0:
-            return None
-        path = [node_names[idx_end[0]]]
-        i = idx_end[0]
-        while i != idx_start[0]:
-            i = predecessors[idx_start[0], i]
-            if i == -9999:  # not reached
-                return None
-            path.append(node_names[i])
-        return path[::-1]  # reverse
-
-    shortest_paths = []
-    for start_node in start_nodes:
-        for end_node in end_nodes:
-            if start_node != end_node:
-                path = reconstruct_single_path(
-                    predecessors, start_node, end_node, nodes_unique
-                )
-                if path is not None:
-                    shortest_paths.append(path)
-
-    return shortest_paths
-
-
 def effective_conn_per_path_from_paths(
-        paths_df: pd.DataFrame,
+    paths_df: pd.DataFrame,
 ) -> tuple[float, np.ndarray, np.ndarray]:
     """
-    Compute the total effective weight of each path of fixed length. 
+    Compute the total effective weight of each path of fixed length.
     Beware that this might be slow for long paths.
 
     Args:
@@ -410,54 +349,64 @@ def effective_conn_per_path_from_paths(
     """
     if paths_df.empty:
         return 0.0, [], []
-    
+
     # Convert to set for fast membership tests
-    max_layer = int(paths_df['layer'].max())
-    target_set = set(paths_df[paths_df['layer']==max_layer]['post'].unique())
+    max_layer = int(paths_df["layer"].max())
+    target_set = set(paths_df[paths_df["layer"] == max_layer]["post"].unique())
 
     # Ensure columns are the right dtype for merging speed
-    paths_df = paths_df[['layer', 'pre', 'post', 'weight']].copy()
-    paths_df['layer'] = paths_df['layer'].astype(int)
+    paths_df = paths_df[["layer", "pre", "post", "weight"]].copy()
+    paths_df["layer"] = paths_df["layer"].astype(int)
 
     # Prepare a mapping from layer -> DataFrame of edges
-    layer_edges = {l: df for l, df in paths_df.groupby('layer')}
+    layer_edges = {l: df for l, df in paths_df.groupby("layer")}
 
     # Start from input layer (layer 1 presynaptic neurons)
-    current_paths = layer_edges[1][['pre', 'post', 'weight']].copy()
-    current_paths.rename(columns={'pre': 'path_start', 'post': 'path_end'}, inplace=True)
-    current_paths['path_weight'] = current_paths['weight']
-    current_paths['min_edge_weight'] = current_paths['weight'] 
+    current_paths = layer_edges[1][["pre", "post", "weight"]].copy()
+    current_paths.rename(
+        columns={"pre": "path_start", "post": "path_end"}, inplace=True
+    )
+    current_paths["path_weight"] = current_paths["weight"]
+    current_paths["min_edge_weight"] = current_paths["weight"]
 
     # Iterate layer by layer (forward chaining)
     for layer in range(2, max_layer + 1):
         if layer not in layer_edges:
             break
-        
-        next_edges = layer_edges[layer][['pre', 'post', 'weight']]
+
+        next_edges = layer_edges[layer][["pre", "post", "weight"]]
         # Join current path ends to next layer presynaptic neurons
         merged = current_paths.merge(
-            next_edges, left_on='path_end', right_on='pre', how='inner', suffixes=('', '_next')
+            next_edges,
+            left_on="path_end",
+            right_on="pre",
+            how="inner",
+            suffixes=("", "_next"),
         )
 
         if merged.empty:
             break
 
         # Update path info
-        merged['path_end'] = merged['post']
-        merged['path_weight'] = merged['path_weight'] * merged['weight_next']
-        merged['min_edge_weight'] = merged[['min_edge_weight', 'weight_next']].min(axis=1)
+        merged["path_end"] = merged["post"]
+        merged["path_weight"] = merged["path_weight"] * merged["weight_next"]
+        merged["min_edge_weight"] = merged[["min_edge_weight", "weight_next"]].min(
+            axis=1
+        )
 
-        current_paths = merged[['path_start', 'path_end', 'path_weight', 'min_edge_weight']].copy()
-        current_paths['weight'] = current_paths['path_weight']
+        current_paths = merged[
+            ["path_start", "path_end", "path_weight", "min_edge_weight"]
+        ].copy()
+        current_paths["weight"] = current_paths["path_weight"]
 
     # Only keep paths that end in target neurons
-    final_paths = current_paths[current_paths['path_end'].isin(target_set)]
+    final_paths = current_paths[current_paths["path_end"].isin(target_set)]
     if final_paths.empty:
         return 0.0, [], []
 
     # Compute relevant effective weights
-    min_path_weights = final_paths['min_edge_weight'].to_numpy()
-    all_path_weights = final_paths['path_weight'].to_numpy()
+    min_path_weights = final_paths["min_edge_weight"].to_numpy()
+    all_path_weights = final_paths["path_weight"].to_numpy()
     total_effective_weight = all_path_weights.sum()
 
     return total_effective_weight, all_path_weights, min_path_weights
@@ -476,7 +425,7 @@ def filter_all_paths_to_cumsum(
     remaining paths or thre_step_min.
 
     Args:
-        paths (list[pd.DataFrame]): The list of DataFrames containing the path data, 
+        paths (list[pd.DataFrame]): The list of DataFrames containing the path data,
             where each DataFrame is like the output from `find_paths_of_length()`.
         thre_cumsum (float): The cumulative effective weight threshold to reach for filtered paths.
         thre_step_min (float, optional): The minimum threshold for the weight of the
@@ -509,7 +458,7 @@ def filter_all_paths_to_cumsum(
     # find minimum edge weight across strongest paths that make up thre_cumsum of total weight
     # since in filter_paths, threshold > thre_step, take 99.9%, with a minimum of thre_step_min
     idx_sort = np.argsort(-w_prod)
-    idx_thre = np.where(np.cumsum(w_prod[idx_sort]/w_all) > thre_cumsum)[0][0]+1
+    idx_thre = np.where(np.cumsum(w_prod[idx_sort] / w_all) > thre_cumsum)[0][0] + 1
     thre_step = max(0.999 * np.min(w_min[idx_sort[:idx_thre]]), thre_step_min)
 
     # filter paths and compute total effective weight across those paths
