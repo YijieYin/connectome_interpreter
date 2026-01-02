@@ -8,6 +8,7 @@ from connectome_interpreter.path_finding import (
     find_xor,
     find_paths_of_length,
     enumerate_paths,
+    find_shortest_paths,
 )
 
 import numpy as np
@@ -379,3 +380,158 @@ class TestEnumeratePathsBetweenLayers(unittest.TestCase):
         df = self.mk_df(edges)
         paths = enumerate_paths(df, 1, 2)
         self.assertEqual(paths[0], [(0, "a", 0.3), ("a", 2, 0.7)])
+
+
+class TestFindShortestPaths(unittest.TestCase):
+
+    def setUp(self):
+        # Create a simple graph with known shortest paths
+        # Graph structure:
+        #   A -> B (0.5)
+        #   A -> C (0.3)
+        #   B -> D (0.4)
+        #   C -> D (0.6)
+        #   C -> E (0.7)
+        #   D -> E (0.8)
+        # Expected shortest paths (by weight):
+        #   A -> D: A -> B -> D (product: 0.5 * 0.4 = 0.2)
+        #   A -> E: A -> C -> E (product: 0.3 * 0.7 = 0.21)
+
+        self.simple_paths = pd.DataFrame(
+            {
+                "pre": ["A", "A", "B", "C", "C", "D"],
+                "post": ["B", "C", "D", "D", "E", "E"],
+                "weight": [0.5, 0.3, 0.4, 0.6, 0.7, 0.8],
+            }
+        )
+
+    def test_single_start_single_end(self):
+        # Test finding a single shortest path
+        result = find_shortest_paths(
+            self.simple_paths, start_nodes=["A"], end_nodes=["D"]
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0], ["A", "B", "D"])
+
+    def test_single_start_multiple_ends(self):
+        # Test finding multiple shortest paths from one start node
+        result = find_shortest_paths(
+            self.simple_paths, start_nodes=["A"], end_nodes=["D", "E"]
+        )
+
+        self.assertEqual(len(result), 2)
+        # Check that both paths start with 'A'
+        self.assertTrue(all(path[0] == "A" for path in result))
+        # Check that paths end with correct nodes
+        end_nodes = {path[-1] for path in result}
+        self.assertEqual(end_nodes, {"D", "E"})
+
+    def test_multiple_starts_single_end(self):
+        # Test finding paths from multiple start nodes to one end
+        result = find_shortest_paths(
+            self.simple_paths, start_nodes=["A", "B"], end_nodes=["E"]
+        )
+
+        self.assertEqual(len(result), 2)
+        # Check that we have paths from both A and B
+        start_nodes = {path[0] for path in result}
+        self.assertEqual(start_nodes, {"A", "B"})
+
+    def test_multiple_starts_multiple_ends(self):
+        # Test finding all combinations of start and end nodes
+        result = find_shortest_paths(
+            self.simple_paths, start_nodes=["A", "B"], end_nodes=["D", "E"]
+        )
+
+        # Should have 4 paths: A->D, A->E, B->D, B->E
+        self.assertEqual(len(result), 4)
+
+    def test_no_path_exists(self):
+        # Test case where no path exists
+        result = find_shortest_paths(
+            self.simple_paths,
+            start_nodes=["D"],
+            end_nodes=["A"],  # No path from D back to A
+        )
+
+        self.assertEqual(len(result), 0)
+
+    def test_start_equals_end(self):
+        # Test that paths from a node to itself are excluded
+        result = find_shortest_paths(
+            self.simple_paths, start_nodes=["A", "B"], end_nodes=["A", "B"]
+        )
+
+        # Should only have A->B and B->A (if exists, but B->A doesn't)
+        # So we should get no self-loops
+        self.assertTrue(all(path[0] != path[-1] for path in result))
+
+    def test_nonexistent_start_node(self):
+        # Test with a start node that doesn't exist in the graph
+        result = find_shortest_paths(
+            self.simple_paths, start_nodes=["Z"], end_nodes=["D"]  # Doesn't exist
+        )
+
+        self.assertEqual(len(result), 0)
+
+    def test_nonexistent_end_node(self):
+        # Test with an end node that doesn't exist in the graph
+        result = find_shortest_paths(
+            self.simple_paths, start_nodes=["A"], end_nodes=["Z"]  # Doesn't exist
+        )
+
+        self.assertEqual(len(result), 0)
+
+    def test_empty_paths_dataframe(self):
+        # Test with an empty DataFrame
+        empty_paths = pd.DataFrame(columns=["pre", "post", "weight"])
+        result = find_shortest_paths(empty_paths, start_nodes=["A"], end_nodes=["B"])
+
+        self.assertEqual(len(result), 0)
+
+    def test_direct_connection(self):
+        # Test that direct connections are found correctly
+        result = find_shortest_paths(
+            self.simple_paths, start_nodes=["A"], end_nodes=["B"]
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0], ["A", "B"])
+
+    def test_complex_graph(self):
+        # Create a more complex graph to test robustness
+        complex_paths = pd.DataFrame(
+            {
+                "pre": ["A", "A", "B", "B", "C", "D", "E", "F"],
+                "post": ["B", "C", "D", "E", "D", "F", "F", "G"],
+                "weight": [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2],
+            }
+        )
+
+        result = find_shortest_paths(complex_paths, start_nodes=["A"], end_nodes=["G"])
+
+        # Should find at least one path from A to G
+        self.assertGreater(len(result), 0)
+        # All paths should start with A and end with G
+        for path in result:
+            self.assertEqual(path[0], "A")
+            self.assertEqual(path[-1], "G")
+
+    def test_path_ordering(self):
+        # Verify that paths are ordered correctly (start to end)
+        result = find_shortest_paths(
+            self.simple_paths, start_nodes=["A"], end_nodes=["E"]
+        )
+
+        self.assertEqual(len(result), 1)
+        path = result[0]
+        # Check that each consecutive pair exists in the original paths
+        for i in range(len(path) - 1):
+            edge_exists = any(
+                (self.simple_paths["pre"] == path[i])
+                & (self.simple_paths["post"] == path[i + 1])
+            )
+            self.assertTrue(
+                edge_exists, f"Edge {path[i]} -> {path[i+1]} not found in graph"
+            )
