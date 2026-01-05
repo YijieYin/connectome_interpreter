@@ -716,6 +716,7 @@ class TestDivisiveNormalization(unittest.TestCase):
             idx_to_group={0: "A", 1: "B", 2: "C"},
             divisive_normalization=dn,
             divisive_strength=ds,
+            threshold=0.0,
         )
         # one layer, one sensory neuron => shape (sensory, layers) = (2,2)
         inp = torch.tensor([[1.0, 0.0], [1.0, 0.0]], dtype=torch.float32)

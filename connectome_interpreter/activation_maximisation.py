@@ -618,7 +618,10 @@ class MultilayeredNetwork(nn.Module):
             self.sensory_indices.view(-1, 1).expand(-1, inputs.size(0)),
             inputs[:, :, 0].t(),  # shape: (sensory_neurons, batch_size)
         )
-        full_input = torch.clamp(full_input, self.threshold, 1.0)
+        full_input = torch.where(
+            full_input >= self.threshold, full_input, torch.zeros_like(full_input)
+        )
+        full_input = torch.clamp(full_input, max=1.0)
         # # to illustrate how this works:
         # dest = torch.zeros(5, 2)
         # # sensory neurons, batch
@@ -650,8 +653,9 @@ class MultilayeredNetwork(nn.Module):
             x[self.sensory_indices, :] = (
                 x[self.sensory_indices, :] + inputs[:, :, 1].t()
             )
-            # make sure x is between self.threshold and 1
-            x = torch.clamp(x, self.threshold, 1.0)
+            # make sure x is between self.threshold and 1, otherwise set to 0
+            x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+            x = torch.clamp(x, max=1.0)
 
         if manipulate is not None:
             x = x.clone()
@@ -689,8 +693,9 @@ class MultilayeredNetwork(nn.Module):
                 x[self.sensory_indices, :] = (
                     x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
                 )
-                # clamp to [threshold, 1]
-                x = torch.clamp(x, self.threshold, 1.0)
+                # activity between [threshold, 1]
+                x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+                x = torch.clamp(x, max=1.0)
 
             if manipulate is not None:
                 x = x.clone()
