@@ -2026,15 +2026,17 @@ def get_input_activation(
     idx_to_group: dict,
     selected_indices: arrayable | None = None,
     activation_threshold: float = 0,
+    batch_names: arrayable | None = None,
 ) -> pd.DataFrame:
     """
     Get selected input activation.
 
     Args:
         model_in (numpy.ndarray | torch.Tensor): The input to the model. Shape should be
-            (num_neurons, num_timepoints).
+            (num_neurons, num_timepoints) for 2D or (batch_size, num_neurons,
+            num_timepoints) for 3D.
         sensory_indices (arrayable): All the indices of sensory neurons. Length should
-            be equal to the first dimension of model_in.
+            be equal to the first dimension of model_in (2D) or second dimension (3D).
         idx_to_group (dict): A dictionary mapping indices from the model to the groups
             of interest (e.g. cell type). max(idx_to_group.keys()) should be equal to
             number of units in the model.
@@ -2043,6 +2045,9 @@ def get_input_activation(
         activation_threshold (float, optional): A threshold value for activation.
             Neurons with activations below this threshold are not considered. Defaults
             to 0.
+        batch_names (arrayable, optional): The names of the batches. Defaults to None.
+            If model_in.ndim == 3, then this should be supplied. If not, batch names
+            will be e.g. 'batch_0', 'batch_1', etc.
 
     Notes:
 
@@ -2050,8 +2055,9 @@ def get_input_activation(
 
 
     Returns:
-        pd.DataFrame: The input activation for the model, with the first columns being
-        group and sensory_indices. The rest are the timesteps.
+        pd.DataFrame: The input activation for the model. For 2D input, columns are
+        'group' and 'time_0', 'time_1', etc. For 3D input, columns are 'batch_name',
+        'group' and 'time_0', 'time_1', etc.
     """
     sensory_indices = to_nparray(sensory_indices)
 
@@ -2059,9 +2065,10 @@ def get_input_activation(
         model_in = model_in.cpu().detach().numpy()
 
     # check the shape of model_in, if not correct raise an error
-    if len(model_in.shape) != 2:
+    if len(model_in.shape) not in [2, 3]:
         raise ValueError(
-            f"Expected input shape (num_neurons={len(sensory_indices)}, num_timepoints)"
+            f"Expected input shape (num_neurons={len(sensory_indices)}, num_timepoints) "
+            f"or (batch_size, num_neurons={len(sensory_indices)}, num_timepoints)"
         )
 
     global2local = {glo: lo for lo, glo in enumerate(sensory_indices)}
@@ -2075,26 +2082,90 @@ def get_input_activation(
     else:
         selection_bool = np.ones(len(sensory_indices), dtype=bool)
 
-    # activation boolean
-    # if any >= threhsold for each row
-    activation_bool = np.any(model_in >= activation_threshold, axis=1)
+    # Handle 2D case
+    if model_in.ndim == 2:
+        # message if batch_names is not None
+        if batch_names is not None:
+            print("batch_names is ignored for 2D model_in.")
 
-    selection = selection_bool & activation_bool
+        # activation boolean
+        # if any >= threshold for each row
+        activation_bool = np.any(model_in >= activation_threshold, axis=1)
 
-    local_selected_indices = [
-        i for i, s in zip(range(len(sensory_indices)), selection) if s
-    ]
-    global_selected_indices = [local2global[i] for i in local_selected_indices]
-    groups = [idx_to_group[idx] for idx in global_selected_indices]
+        selection = selection_bool & activation_bool
 
-    # out dataframe
-    out = pd.DataFrame(model_in[selection, :], index=groups)
-    out.index.name = "group"
-    # group by group/index, take average
-    out = out.groupby("group").mean()
-    # change column names
-    out.columns = [f"time_{i}" for i in range(model_in.shape[1])]
-    return out
+        local_selected_indices = [
+            i for i, s in zip(range(len(sensory_indices)), selection) if s
+        ]
+        global_selected_indices = [local2global[i] for i in local_selected_indices]
+        groups = [idx_to_group[idx] for idx in global_selected_indices]
+
+        # out dataframe
+        out = pd.DataFrame(model_in[selection, :], index=groups)
+        out.index.name = "group"
+        # group by group/index, take average
+        out = out.groupby("group").mean().reset_index()
+        # change column names
+        out.columns = ["group"] + [f"time_{i}" for i in range(model_in.shape[1])]
+        return out
+
+    # Handle 3D case
+    if model_in.ndim == 3:
+        if batch_names is None:
+            # make batch names
+            batch_names = [f"batch_{i}" for i in range(model_in.shape[0])]
+
+        batch_names = list(to_nparray(batch_names, unique=False))
+
+        # make sure length matches
+        if model_in.shape[0] != len(batch_names):
+            raise ValueError(
+                "Length of batch_names has to be the same as model_in.shape[0]."
+            )
+
+        # Process each batch
+        batch_dfs = []
+        for batch_idx, batch_name in enumerate(batch_names):
+            batch_data = model_in[batch_idx]
+
+            # activation boolean for this batch
+            # if any >= threshold for each row
+            activation_bool = np.any(batch_data >= activation_threshold, axis=1)
+
+            selection = selection_bool & activation_bool
+
+            local_selected_indices = [
+                i for i, s in zip(range(len(sensory_indices)), selection) if s
+            ]
+            global_selected_indices = [local2global[i] for i in local_selected_indices]
+            groups = [idx_to_group[idx] for idx in global_selected_indices]
+
+            # out dataframe for this batch
+            if len(groups) > 0:
+                batch_df = pd.DataFrame(
+                    batch_data[selection, :],
+                    index=groups,
+                    columns=[f"time_{i}" for i in range(model_in.shape[2])],
+                )
+                batch_df.index.name = "group"
+                # group by group/index, take average
+                batch_df = batch_df.groupby("group").mean().reset_index()
+                batch_df["batch_name"] = batch_name
+                batch_dfs.append(batch_df)
+
+        if len(batch_dfs) == 0:
+            # No activations passed the threshold
+            return pd.DataFrame(
+                columns=["batch_name", "group"]
+                + [f"time_{i}" for i in range(model_in.shape[2])]
+            )
+
+        out = pd.concat(batch_dfs, ignore_index=True)
+        # change column names and reorder
+        time_cols = [f"time_{i}" for i in range(model_in.shape[2])]
+        out = out[["batch_name", "group"] + time_cols]
+
+        return out
 
 
 def add_sign(inprop: sparse.spmatrix, idx_to_sign: dict):

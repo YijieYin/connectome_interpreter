@@ -13,6 +13,7 @@ from connectome_interpreter.activation_maximisation import (
     activations_to_df,
     activations_to_df_batched,
     get_neuron_activation,
+    get_input_activation,
     get_gradients,
 )
 
@@ -306,6 +307,246 @@ class TestGetNeuronActivation(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             get_neuron_activation(output, neuron_indices, batch_names=batch_names)
+
+
+class TestGetInputActivation(unittest.TestCase):
+    """Test get_input_activation function for both 2D and 3D inputs"""
+
+    def test_2d_input_basic(self):
+        """Test 2D input with basic functionality"""
+        model_in = np.array(
+            [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9], [0.0, 0.0, 0.0]]
+        )
+        sensory_indices = [0, 1, 2, 3]
+        idx_to_group = {0: "A", 1: "B", 2: "C", 3: "D"}
+
+        df = get_input_activation(model_in, sensory_indices, idx_to_group)
+
+        # Should have all groups except D (all zeros)
+        self.assertTrue(set(df["group"].unique()).issubset({"A", "B", "C", "D"}))
+        # Should have time columns
+        self.assertTrue("time_0" in df.columns)
+        self.assertTrue("time_1" in df.columns)
+        self.assertTrue("time_2" in df.columns)
+
+    def test_2d_input_with_groups(self):
+        """Test 2D input where multiple neurons map to same group"""
+        model_in = np.array([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6], [0.7, 0.8]])
+        sensory_indices = [0, 1, 2, 3]
+        idx_to_group = {0: "A", 1: "A", 2: "B", 3: "B"}  # Two groups
+
+        df = get_input_activation(model_in, sensory_indices, idx_to_group)
+
+        expected_df = pd.DataFrame(
+            {
+                "group": ["A", "B"],
+                "time_0": [0.2, 0.6],  # Average of (0.1, 0.3) and (0.5, 0.7)
+                "time_1": [0.3, 0.7],  # Average of (0.2, 0.4) and (0.6, 0.8)
+            }
+        )
+        pd.testing.assert_frame_equal(df, expected_df, check_dtype=False)
+
+    def test_2d_input_with_threshold(self):
+        """Test 2D input with activation threshold"""
+        model_in = np.array([[0.1, 0.2], [0.0, 0.0], [0.5, 0.6]])
+        sensory_indices = [0, 1, 2]
+        idx_to_group = {0: "A", 1: "B", 2: "C"}
+
+        df = get_input_activation(
+            model_in, sensory_indices, idx_to_group, activation_threshold=0.1
+        )
+
+        # Group B should be excluded (all zeros, below threshold)
+        self.assertTrue(set(df["group"].unique()).issubset({"A", "C"}))
+        self.assertFalse("B" in df["group"].values)
+
+    def test_2d_input_with_selected_indices(self):
+        """Test 2D input with selected indices"""
+        model_in = np.array([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]])
+        sensory_indices = [0, 1, 2]
+        idx_to_group = {0: "A", 1: "B", 2: "C"}
+
+        df = get_input_activation(
+            model_in, sensory_indices, idx_to_group, selected_indices=[0, 2]
+        )
+
+        # Should only have groups A and C
+        self.assertEqual(set(df["group"].unique()), {"A", "C"})
+        self.assertFalse("B" in df["group"].values)
+
+    def test_2d_input_torch_tensor(self):
+        """Test 2D input with torch tensor"""
+        model_in = torch.tensor([[0.1, 0.2], [0.3, 0.4]])
+        sensory_indices = [0, 1]
+        idx_to_group = {0: "A", 1: "B"}
+
+        df = get_input_activation(model_in, sensory_indices, idx_to_group)
+
+        expected_df = pd.DataFrame(
+            {"group": ["A", "B"], "time_0": [0.1, 0.3], "time_1": [0.2, 0.4]}
+        )
+        pd.testing.assert_frame_equal(df, expected_df, check_dtype=False)
+
+    def test_2d_input_ignores_batch_names(self):
+        """Test that batch_names is ignored for 2D input"""
+        model_in = np.array([[0.1, 0.2], [0.3, 0.4]])
+        sensory_indices = [0, 1]
+        idx_to_group = {0: "A", 1: "B"}
+
+        # Should print a message but still work
+        df = get_input_activation(
+            model_in, sensory_indices, idx_to_group, batch_names=["batch_1"]
+        )
+
+        # Should not have batch_name column for 2D input
+        self.assertFalse("batch_name" in df.columns)
+
+    def test_3d_input_basic(self):
+        """Test 3D input with basic functionality"""
+        model_in = np.array(
+            [[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]]  # batch 0  # batch 1
+        )
+        sensory_indices = [0, 1]
+        idx_to_group = {0: "A", 1: "B"}
+
+        df = get_input_activation(model_in, sensory_indices, idx_to_group)
+
+        # Should have batch_name column
+        self.assertTrue("batch_name" in df.columns)
+        # Should have default batch names
+        self.assertEqual(set(df["batch_name"].unique()), {"batch_0", "batch_1"})
+        # Should have all groups
+        self.assertTrue(set(df["group"].unique()).issubset({"A", "B"}))
+
+    def test_3d_input_with_batch_names(self):
+        """Test 3D input with custom batch names"""
+        model_in = np.array([[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]])
+        sensory_indices = [0, 1]
+        idx_to_group = {0: "A", 1: "B"}
+        batch_names = ["odor_1", "odor_2"]
+
+        df = get_input_activation(
+            model_in, sensory_indices, idx_to_group, batch_names=batch_names
+        )
+
+        expected_df = pd.DataFrame(
+            {
+                "batch_name": ["odor_1", "odor_1", "odor_2", "odor_2"],
+                "group": ["A", "B", "A", "B"],
+                "time_0": [0.1, 0.3, 0.5, 0.7],
+                "time_1": [0.2, 0.4, 0.6, 0.8],
+            }
+        )
+        pd.testing.assert_frame_equal(df, expected_df, check_dtype=False)
+
+    def test_3d_input_with_groups(self):
+        """Test 3D input where multiple neurons map to same group"""
+        model_in = np.array(
+            [
+                [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6], [0.7, 0.8]],  # batch 0
+            ]
+        )
+        sensory_indices = [0, 1, 2, 3]
+        idx_to_group = {0: "A", 1: "A", 2: "B", 3: "B"}
+
+        df = get_input_activation(model_in, sensory_indices, idx_to_group)
+
+        # Should average within groups
+        expected_df = pd.DataFrame(
+            {
+                "batch_name": ["batch_0", "batch_0"],
+                "group": ["A", "B"],
+                "time_0": [0.2, 0.6],  # Average of (0.1, 0.3) and (0.5, 0.7)
+                "time_1": [0.3, 0.7],  # Average of (0.2, 0.4) and (0.6, 0.8)
+            }
+        )
+        pd.testing.assert_frame_equal(df, expected_df, check_dtype=False)
+
+    def test_3d_input_with_threshold(self):
+        """Test 3D input with activation threshold"""
+        model_in = np.array(
+            [
+                [[0.1, 0.2], [0.0, 0.0]],  # batch 0: neuron 1 below threshold
+                [[0.0, 0.0], [0.5, 0.6]],  # batch 1: neuron 0 below threshold
+            ]
+        )
+        sensory_indices = [0, 1]
+        idx_to_group = {0: "A", 1: "B"}
+
+        df = get_input_activation(
+            model_in, sensory_indices, idx_to_group, activation_threshold=0.1
+        )
+
+        # Batch 0 should have only A, batch 1 should have only B
+        batch_0 = df[df["batch_name"] == "batch_0"]
+        batch_1 = df[df["batch_name"] == "batch_1"]
+
+        self.assertTrue("A" in batch_0["group"].values)
+        self.assertFalse("B" in batch_0["group"].values)
+        self.assertTrue("B" in batch_1["group"].values)
+        self.assertFalse("A" in batch_1["group"].values)
+
+    def test_3d_input_with_selected_indices(self):
+        """Test 3D input with selected indices"""
+        model_in = np.array([[[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]])
+        sensory_indices = [0, 1, 2]
+        idx_to_group = {0: "A", 1: "B", 2: "C"}
+
+        df = get_input_activation(
+            model_in, sensory_indices, idx_to_group, selected_indices=[0, 2]
+        )
+
+        # Should only have groups A and C
+        self.assertEqual(set(df["group"].unique()), {"A", "C"})
+
+    def test_3d_input_empty_result(self):
+        """Test 3D input where no activations pass threshold"""
+        model_in = np.array([[[0.0, 0.0], [0.0, 0.0]], [[0.0, 0.0], [0.0, 0.0]]])
+        sensory_indices = [0, 1]
+        idx_to_group = {0: "A", 1: "B"}
+
+        df = get_input_activation(
+            model_in, sensory_indices, idx_to_group, activation_threshold=0.1
+        )
+
+        # Should return empty dataframe with correct columns
+        self.assertEqual(len(df), 0)
+        self.assertTrue("batch_name" in df.columns)
+        self.assertTrue("group" in df.columns)
+        self.assertTrue("time_0" in df.columns)
+
+    def test_3d_batch_names_mismatch(self):
+        """Test 3D input with mismatched batch names length"""
+        model_in = np.array([[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]])
+        sensory_indices = [0, 1]
+        idx_to_group = {0: "A", 1: "B"}
+        batch_names = ["batch_1"]  # Only 1 name for 2 batches
+
+        with self.assertRaises(ValueError):
+            get_input_activation(
+                model_in, sensory_indices, idx_to_group, batch_names=batch_names
+            )
+
+    def test_invalid_shape(self):
+        """Test that invalid input shape raises error"""
+        model_in = np.array([0.1, 0.2, 0.3])  # 1D array
+        sensory_indices = [0, 1, 2]
+        idx_to_group = {0: "A", 1: "B", 2: "C"}
+
+        with self.assertRaises(ValueError):
+            get_input_activation(model_in, sensory_indices, idx_to_group)
+
+    def test_3d_input_torch_tensor(self):
+        """Test 3D input with torch tensor"""
+        model_in = torch.tensor([[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]])
+        sensory_indices = [0, 1]
+        idx_to_group = {0: "A", 1: "B"}
+
+        df = get_input_activation(model_in, sensory_indices, idx_to_group)
+
+        # Should convert to numpy and work correctly
+        self.assertEqual(len(df), 4)  # 2 batches * 2 groups
+        self.assertTrue("batch_name" in df.columns)
 
 
 # Add these test classes to your existing test file
