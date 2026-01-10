@@ -98,6 +98,638 @@ class TargetActivation:
         return result
 
 
+class LinearNetwork(nn.Module):
+    """
+    A PyTorch module representing a multilayered neural network model with trainable
+    parameters and flexible activation functions.
+
+    This network architecture is designed to process temporal sequences of input data
+    through multiple synaptic hops, with the initial layer handling only external inputs
+    and subsequent layers processing external+internal input.
+
+    Excitabililty is implemented as the slope of the tanh activation function. Users can
+    specify default excitability (tanh_steepness) for all neurons, as well as specific
+    excitabilities for neuron groups. In training, the excitabilities are shared per
+    group specified by `idx_to_group`.
+
+    Baseline activity is taken into account through biases. Users can specify default
+    biases for all neurons, as well as specific biases for neuron groups. In training,
+    the biases are shared per group specified by `idx_to_group`.
+
+    In divisive normalisation, the synaptic connections specified in
+    `divisive_normalization` no longer participate in the normal subtractive inhibition.
+    Rather, they are used to change the slope of the post-synaptic neuron: the new slope
+    is: max(0, original_slope * (1 + pre_post_weight * pre_activation *
+    divisive_strength)). `divisive_strength` is a parameter the user can set, to specity
+    how strong the divisive normalization is. `max(0, ...)` is to ensure that the slope
+    does not become negative.
+
+    Attributes:
+        all_weights (torch.nn.Parameter): The connectome. Input neurons are in
+            the columns.
+        sensory_indices (list[int]): Indices indicating which rows/columns in
+            the all_weights matrix correspond to sensory neurons.
+        num_layers (int): The number of layers in the network.
+        threshold (float): The activation threshold for neurons in the network.
+        activations (numpy.ndarray): An array storing the activations of all (batches of)
+            neurons (rows) across time steps (columns).
+        custom_activation_function (Callable): A custom activation function to use
+            instead of the default.
+        default_bias (float): Default bias value for all neurons.
+        slope (torch.nn.Parameter): Trainable parameter for the steepness of the tanh
+            activation function, grouped by neuron type.
+        raw_biases (torch.nn.Parameter): Trainable parameter for the biases of neurons,
+            grouped by neuron type.
+        indices (torch.Tensor): Indices mapping each neuron to its group for parameter
+            sharing.
+        divisive_strength (torch.nn.Parameter): Trainable parameter for the strength of
+            divisive normalization, if applicable. In training, the parameter is shared
+            per group specified by idx_to_group. This parameter only exists for the pres
+            in divisive_normalization.
+        divisive_normalization (Dict[str, List[str]]): A dictionary where keys are
+            pre-synaptic neuron groups and values are lists of post-synaptic neuron
+            groups. These *inhibitory* connections are implemented divisively instead of
+            subtractively.
+
+
+    Args:
+        all_weights (Union[torch.Tensor, scipy.sparse.spmatrix]): The connectome. Input
+            neurons are in the columns.
+        sensory_indices (list[int]): A list indicating the indices of sensory neurons
+            within the network.
+        num_layers (int, optional): The number of temporal layers to unroll the network
+            through.  Defaults to 2.
+        threshold (float, optional): The threshold for activation of neurons. Defaults
+            to 0.01.
+        tanh_steepness (float, optional): Default steepness for tanh activation.
+            Defaults to 5.
+        idx_to_group (dict, optional): Mapping from neuron indices to group names for
+            parameter sharing (all neurons in the same group share the same parameter).
+            Defaults to None (no parameter sharing).
+        default_bias (float, optional): Default bias value for all groups. Defaults to
+            0.0.
+        bias_dict (dict, optional): Dict mapping group names to bias values. Defaults to
+            None (uses default_bias).
+        slope_dict (dict, optional): Dict mapping group names to slope values. Uses
+            tanh_steepness if None.
+        divisive_normalization (Dict[str, List[str]], optional): A dictionary where keys
+            are pre-synaptic neuron groups and values are lists of post-synaptic neuron
+            groups. These *inhibitory* connections are implemented divisively instead of
+            subtractively. Defaults to None.
+        divisive_strength (Union[float, int, dict], optional): The strength of the
+            divisive normalization. If a float or int, it applies to all connections.
+            If a dict, it maps pre-synaptic neuron groups to their specific divisive
+            strengths. Defaults to 1.
+        activation_function (Callable, optional): Custom activation function. If None,
+            uses default implementation.
+        tau (float, optional): The extent to which the activation persists to the next
+            timestep. Defaults to 0 (no persistence). 0.5 means 50% of the activation is
+            carried over to the next timestep.
+        device (torch.device, optional): Device for computation.
+    """
+
+    def __init__(
+        self,
+        all_weights: Union[torch.Tensor, sparse.spmatrix],
+        sensory_indices: arrayable,
+        num_layers: int = 2,
+        threshold: float = 0.01,
+        tanh_steepness: float = 5,
+        idx_to_group: Optional[dict] = None,
+        default_bias: float = 0.0,
+        bias_dict: Optional[dict] = None,
+        slope_dict: Optional[dict] = None,
+        divisive_normalization: Optional[Dict[str, List[str]]] = None,
+        divisive_strength: Union[float, int, dict] = 1,
+        activation_function: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+        tau: float = 0,
+        device: Optional[torch.device] = None,
+    ):
+        super().__init__()
+
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        if isinstance(all_weights, np.ndarray):
+            # convert to sp.sparse matrix
+            all_weights = coo_matrix(all_weights)
+
+        # Convert all_weights to a sparse tensor if it is a scipy sparse matrix
+        if isinstance(all_weights, sparse.spmatrix):
+            all_weights = scipy_sparse_to_pytorch(all_weights)
+        elif isinstance(all_weights, torch.Tensor):
+            # if torch tensor, ensure it is sparse
+            if not all_weights.is_sparse:
+                all_weights = all_weights.to_sparse()
+        else:
+            raise TypeError(
+                "all_weights must be a scipy sparse matrix, numpy array, or torch tensor."
+            )
+
+        # change the synaptic weight to 0 for the divisive normalization pairs
+        if divisive_normalization is not None:
+            # idx_to_group must also be provided
+            assert (
+                idx_to_group is not None
+            ), "idx_to_group must be provided for divisive normalization."
+
+            pres_indices = []
+            posts_indices = []
+            for pre, posts in divisive_normalization.items():
+                pre_idx = [idx for idx, group in idx_to_group.items() if group == pre]
+                for post in posts:
+                    post_idx = [
+                        idx for idx, group in idx_to_group.items() if group == post
+                    ]
+                    # get all combinations of pre and post indices
+                    these_pre, these_post = zip(
+                        *[(apre, apost) for apre in pre_idx for apost in post_idx]
+                    )
+                    pres_indices.extend(these_pre)
+                    posts_indices.extend(these_post)
+
+            # note that post are in rows in the model
+            remove_set = set(zip(posts_indices, pres_indices))
+
+            xs, ys = all_weights._indices().cpu().numpy()
+
+            keep = []
+            for x, y in zip(xs, ys):
+                if (x, y) not in remove_set:
+                    keep.append(True)
+                else:
+                    keep.append(False)
+
+            keep = np.array(keep)
+            self.divnorm_indices = all_weights._indices()[:, ~keep]
+            self.divnorm_weights = all_weights._values()[~keep]
+            # sanity check: all values should be negative
+            # which index of divnorm_weights is positive?
+            posidx = torch.where(self.divnorm_weights > 0)[0]
+            # posidx = np.where(self.divnorm_weights > 0)[0]
+            if len(posidx) > 0:
+                raise ValueError(
+                    "Divisive normalization weights should be negative, "
+                    f"but found positive weights at indices: {self.divnorm_indices[posidx,:]}."
+                )
+
+            all_weights = torch.sparse_coo_tensor(
+                all_weights._indices()[:, keep],
+                all_weights._values()[keep],
+                size=all_weights.shape,
+            )
+
+        self.all_weights = all_weights.to(device)
+        self.sensory_indices = torch.tensor(sensory_indices, device=device)
+        self.num_layers = num_layers
+        self.threshold = threshold
+        self.tanh_steepness = tanh_steepness
+        self.idx_to_group = idx_to_group
+        self.activations = []
+        self.custom_activation_function = activation_function
+        self.default_bias = default_bias
+        self.divisive_normalization = divisive_normalization
+        self.tau = tau
+        self.noted_grads: Dict[int, torch.Tensor] = {}
+
+        # Setup trainable parameters if idx_to_group is provided
+        if idx_to_group is not None:
+            self._setup_trainable_parameters(
+                idx_to_group, bias_dict, slope_dict, divisive_strength, device
+            )
+        else:
+            # For backward compatibility - no trainable parameters
+            self.slope = None
+            self.raw_biases = None
+            self.indices = None
+            self.divisive_strength = None
+
+    def _setup_trainable_parameters(
+        self, idx_to_group: dict, bias_dict, slope_dict, divisive_strength, device
+    ):
+        """Setup trainable slope and bias parameters grouped by neuron type."""
+        all_types = sorted(set(idx_to_group.values()))
+        num_types = len(all_types)
+        type2idx = {t: i for i, t in enumerate(all_types)}
+
+        # Setup slope values----
+        if slope_dict is None:
+            slope_init = torch.full(
+                (num_types,), self.tanh_steepness, dtype=torch.float32
+            )
+        else:  # dict
+            slope_init = torch.zeros(num_types, dtype=torch.float32)
+            for group_name, slope_val in slope_dict.items():
+                if group_name in type2idx:
+                    slope_init[type2idx[group_name]] = slope_val
+            # Fill missing values with default
+            for i, group_name in enumerate(all_types):
+                if group_name not in slope_dict:
+                    slope_init[type2idx[group_name]] = self.tanh_steepness
+
+        # Setup bias values----
+        if bias_dict is None:
+            bias_init = torch.full((num_types,), self.default_bias, dtype=torch.float32)
+        else:  # dict
+            bias_init = torch.zeros(num_types, dtype=torch.float32)
+            for group_name, bias_val in bias_dict.items():
+                if group_name in type2idx:
+                    bias_init[type2idx[group_name]] = bias_val
+            # Fill missing values with default
+            for group_name in all_types:
+                if group_name not in bias_dict:
+                    bias_init[type2idx[group_name]] = self.default_bias
+
+        # Setup divisive normalization strength----
+        if self.divisive_normalization is not None:
+            # divisive_init has the same length as the number of pres in divisive_normalization
+            # it's not set for all cell types which is the case for slope and bias
+            # because so far we believe that this is relatively rare, so the parameter
+            # will only be set for the pres in divisive_normalization for their connections with the post
+            # So for training, these particular connections are assumed to be only divisive normalising
+            # and their divisive_strength is strained.
+            divnorm_list = []
+            type2div_strength = {}
+            for pre, _ in self.divisive_normalization.items():
+                this_strength = (
+                    divisive_strength
+                    if isinstance(divisive_strength, (int, float))
+                    else divisive_strength[pre]
+                )
+                divnorm_list.extend([this_strength])
+                type2div_strength[pre] = this_strength
+
+            divisive_init = torch.tensor(
+                divnorm_list, dtype=torch.float32, device=device
+            )
+            # a parameter that applies separately to each pre type in divisive_normalization, and no one else
+            self.divisive_strength = nn.Parameter(
+                divisive_init.to(device), requires_grad=False
+            )
+            self.type2div_strength = type2div_strength
+        else:
+            self.divisive_strength = None
+
+        self.slope = nn.Parameter(slope_init.to(device), requires_grad=False)
+        self.raw_biases = nn.Parameter(bias_init.to(device), requires_grad=False)
+        # note indices only apply to slope and biases, not divisive normalization
+        self.indices = torch.tensor(
+            [type2idx[idx_to_group[i]] for i in range(self.all_weights.shape[0])],
+            device=device,
+        )
+
+    def set_param_grads(self, slopes=False, raw_biases=False, divisive_strength=False):
+        """Set requires_grad for specific parameters."""
+        if self.slope is not None:
+            self.slope.requires_grad_(slopes)
+        if self.raw_biases is not None:
+            self.raw_biases.requires_grad_(raw_biases)
+        if self.divisive_strength is not None:
+            self.divisive_strength.requires_grad_(divisive_strength)
+
+    @property
+    def biases(self):
+        """
+        Get the biases of the neurons, applying absolute value if raw_biases
+        are provided. If raw_biases is None, returns None.
+
+        Returns:
+            torch.Tensor or None: The biases of the neurons, or None if raw_biases
+            is not set.
+        """
+        if self.raw_biases is None:
+            return None
+        return torch.abs(self.raw_biases)
+
+    def divnorm(
+        self, slopes: Union[float, torch.Tensor], x_previous: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Change the slopes based on divisive normalization. The new slope bewteen pre and
+        post is: original_slope * (1 - pre_post_weight * pre_activation *
+        divisive_strength).
+
+        Args:
+            slopes (Union[float, torch.Tensor]): The slopes to be normalized.
+                If a float, it is assumed to be the same for all neurons.
+            x_previous (torch.Tensor): The previous activations of the neurons.
+
+        Returns:
+            torch.Tensor: The output tensor after applying divisive normalization.
+        """
+        if self.divisive_normalization is None:
+            return slopes
+
+        if isinstance(slopes, float):
+            # turn to the same shape as x
+            slopes = torch.full(x_previous.shape, slopes, device=x_previous.device)
+
+        slopes = slopes.clone()  # ← clone here to break any aliasing but keep grad_fn
+
+        for i, (apost, apre) in enumerate(self.divnorm_indices.T):
+            new_slope = slopes[apost] * (
+                1
+                # used + because the weights are negative
+                + self.divnorm_weights[i]  # weight between pre (divisive norm) and post
+                * x_previous[apre]  # activation of pre
+                * self.type2div_strength[
+                    self.idx_to_group[int(apre.cpu().numpy())]
+                ]  # divisive strength for this pre
+            )
+            slopes[apost] = torch.max(
+                torch.tensor(0.0, device=slopes.device), new_slope
+            )
+
+        return slopes
+
+    def activation_function(
+        self, x: torch.Tensor, x_previous=Optional[torch.Tensor]
+    ) -> torch.Tensor:
+        """
+        Apply the activation function to the input tensor. Currently it is
+        tanh(relu(slope * x + bias)). x = weights @ inputs (done outside the activation
+        function).
+
+        Args:
+            x (torch.Tensor): The input tensor to the activation function.
+
+        Returns:
+            torch.Tensor: The output tensor after applying the activation function.
+        """
+        if self.custom_activation_function is not None:
+            return self.custom_activation_function(x)
+
+        if self.slope is None:
+            slopes = self.tanh_steepness
+        else:
+            slopes = self.slope[self.indices]  # shape: (num_neurons,)
+            # shape: (num_neurons, batch_size)
+            slopes = slopes.view(-1, 1).expand(-1, x.shape[1]).to(x.device)
+
+        slopes = self.divnorm(slopes, x_previous)
+
+        if self.biases is None:
+            biases = self.default_bias
+        else:
+            biases = self.biases[self.indices]
+            biases = biases.view(-1, 1).expand(-1, x.shape[1]).to(x.device)
+
+        x = self.tau * x_previous + slopes * x + biases
+        # x = slopes * x + biases
+
+        # # Thresholded relu
+        # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+
+        # # Tanh activation
+        # x = torch.tanh(x)
+
+        return x
+
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        manipulate: Optional[
+            Union[
+                Dict[int, Dict[Union[int, str], float]],
+                Dict[int, Dict[int, Dict[Union[int, str], float]]],
+            ]
+        ] = None,
+        monitor_neurons: Optional[
+            Union[List[Union[int, str]], np.ndarray, torch.Tensor]
+        ] = None,
+        monitor_layers: Optional[List[int]] = None,
+    ):
+        """
+        Process inputs through the network. Use matrix-matrix multiplication for batched
+        processing.
+
+        Args:
+            inputs (torch.Tensor): Either a 2D tensor (num_input, time_steps) or a 3D
+                tensor (batch_size, num_input, time_steps)
+            manipulate (Dict[int, Dict[int, float]], optional): A dictionary specifying
+                the activity of specified neurons. To be used like
+                `{layer: {neuron_group: activity}}` or `{batch: {layer: {neuron_group: activity}}}`
+                in conjunction with `idx_to_group`, e.g. {0: {'DA1_lPN': 1.0}} for "at
+                layer/timepoint 0, make DA1_lPN's activity 1". If `idx_to_group` is not
+                provided, `neuron_group` is assumed to be neuron indices. Defaults to None.
+
+        Returns:
+            torch.Tensor: The activations of all neurons across time steps (in batches).
+        """
+
+        # if inputs is numpy, convert to tensor
+        if isinstance(inputs, np.ndarray):
+            inputs = torch.tensor(inputs, device=self.all_weights.device)
+        elif isinstance(inputs, torch.Tensor):
+            inputs = inputs.to(self.all_weights.device)
+
+        # Handle 2D inputs by expanding to 3D
+        if inputs.dim() == 2:
+            inputs = inputs.unsqueeze(0)  # Add batch dimension
+            single_input = True
+        else:
+            single_input = False
+
+        if manipulate is not None:
+            # check if manipulate is per-batch
+            if not all(
+                isinstance(act_dict, dict)
+                for _, this_batch in manipulate.items()
+                for _, act_dict in this_batch.items()
+            ):
+                batch_manipulate = manipulate.copy()
+                # add batch dimension
+                manipulate = dict.fromkeys(range(inputs.shape[0]), batch_manipulate)
+
+            if self.idx_to_group is None:
+                manipulate_idx = {}
+                for b, this_batch in manipulate.items():
+                    manipulate_idx[b] = {}
+                    for layer, act_dict in this_batch.items():
+                        manipulate_idx[b][layer] = {
+                            int(cell): activity for cell, activity in act_dict.items()
+                        }
+            else:
+                # convert group names to indices
+                manipulate_idx = {}
+                for b, this_batch in manipulate.items():
+                    manipulate_idx[b] = {}
+                    for layer, act_dict in this_batch.items():
+                        manipulate_idx[b][layer] = {}
+                        for idx, grp in self.idx_to_group.items():
+                            if grp in act_dict:
+                                manipulate_idx[b][layer][idx] = act_dict[grp]
+
+        if monitor_neurons is not None:
+            if self.idx_to_group is None:
+                # assume monitor_neurons are indices
+                monitor_indices = torch.tensor(
+                    monitor_neurons, dtype=torch.long, device=self.all_weights.device
+                )
+            else:
+                # convert group names to indices
+                monitor_indices_list = []
+                for idx, grp in self.idx_to_group.items():
+                    if grp in monitor_neurons:
+                        monitor_indices_list.append(idx)
+                monitor_indices = torch.tensor(
+                    monitor_indices_list,
+                    dtype=torch.long,
+                    device=self.all_weights.device,
+                )
+
+        if monitor_layers is not None:
+            monitor_layers = set(
+                int(i)
+                for i in torch.as_tensor(monitor_layers, dtype=torch.long).tolist()
+            )
+
+        # actual forward
+        acts = []
+
+        # inputs = torch.clamp(inputs, -1.0, 1.0)
+
+        # check if inputs requires grad
+        req_grad = inputs.requires_grad
+        # shape: (all_neurons, batch_size)
+        full_input = torch.zeros(
+            self.all_weights.size(1),
+            inputs.size(0),
+            device=inputs.device,
+            requires_grad=req_grad,
+        )
+
+        # # add bias - decided to not, because if added, then model gives different output depending on which neurons are 'sensory'
+        # if self.biases is None:
+        #     biases = self.default_bias
+        # else:
+        #     biases = self.biases[self.indices]
+        #     biases = (
+        #         biases.view(-1, 1)
+        #         .expand(-1, inputs.size(0))
+        #         .to(self.all_weights.device)
+        #     )
+        # full_input = full_input + biases
+
+        # replace sensory neurons activations with inputs
+        full_input = full_input.scatter(
+            0,
+            # shape: (sensory_neurons, batch_size)
+            self.sensory_indices.view(-1, 1).expand(-1, inputs.size(0)),
+            inputs[:, :, 0].t(),  # shape: (sensory_neurons, batch_size)
+        )
+        # full_input = torch.where(
+        #     full_input >= self.threshold, full_input, torch.zeros_like(full_input)
+        # )
+        # full_input = torch.clamp(full_input, max=1.0)
+        # # to illustrate how this works:
+        # dest = torch.zeros(5, 2)
+        # # sensory neurons, batch
+        # index = torch.tensor(
+        #     [
+        #         [0, 0],
+        #         [1, 1],
+        #         [3, 3],
+        #     ]
+        # )
+        # # shape: (sensory_neurons, batch)
+        # src = torch.tensor([[10, 20],
+        #                     [30, 40],
+        #                     [50, 60]
+        #                     ], dtype=dest.dtype)
+        # dest.scatter(0, index, src)
+
+        # full_input = full_input.index_add(0, self.sensory_indices, inputs[:, :, 0].t())
+
+        # sparse matrix multiplication
+        # shape: (all_neurons, batch_size)
+        x = torch.sparse.mm(self.all_weights, full_input)
+        x = self.activation_function(x, x_previous=full_input)
+
+        # add external input to sensory neurons
+        # so the output activation includes the external input as well
+        if self.num_layers > 1:
+            x = x.clone()
+            x[self.sensory_indices, :] = (
+                x[self.sensory_indices, :] + inputs[:, :, 1].t()
+            )
+            # # make sure x is between self.threshold and 1, otherwise set to 0
+            # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+            # x = torch.clamp(x, max=1.0)
+
+        if manipulate is not None:
+            x = x.clone()
+            for b, this_batch in manipulate.items():
+                if 0 in manipulate_idx[b]:  # if layer 0 in manipulate in batch b
+                    for neuron_idx, target_act in manipulate_idx[b][0].items():
+                        x[neuron_idx, b] = target_act
+
+        if monitor_neurons is not None:
+            if monitor_layers is None:
+                print("monitor_layers not provided. Assuming all layers are monitored.")
+                monitor_layers = set(range(self.num_layers))
+            elif 0 in monitor_layers:
+
+                def _tap0(grad):
+                    self.noted_grads[0] = (
+                        grad.index_select(0, monitor_indices).detach().cpu()
+                    )
+
+                x.register_hook(_tap0)
+
+        acts.append(x.t().cpu())  # shape: (batch_size, all_neurons)
+
+        # Process remaining layers
+        for alayer in range(1, self.num_layers):
+            x_previous = x.clone()  # save previous activations
+            # shape: (all_neurons, batch_size)
+            x = torch.sparse.mm(self.all_weights, x)
+            # thresholded relu and tanh
+            x = self.activation_function(x, x_previous=x_previous)
+
+            # add external input to sensory neurons, if not the last layer
+            if alayer != self.num_layers - 1:
+                x = x.clone()  # need to do this to avoid in-place operation
+                x[self.sensory_indices, :] = (
+                    x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
+                )
+                # # activity between [threshold, 1]
+                # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+                # x = torch.clamp(x, max=1.0)
+
+            if manipulate is not None:
+                x = x.clone()
+                for b, this_batch in manipulate.items():
+                    if alayer in manipulate_idx[b]:
+                        for neuron_idx, target_act in manipulate_idx[b][alayer].items():
+                            x[neuron_idx, b] = target_act
+
+            # hook for this layer
+            if monitor_neurons is not None and alayer in monitor_layers:
+
+                def _tapL(grad, L=alayer):  # bind alayer to L
+                    self.noted_grads[L] = (
+                        grad.index_select(0, monitor_indices).detach().cpu()
+                    )
+
+                x.register_hook(_tapL)
+
+            acts.append(x.t().cpu())  # shape: (batch_size, all_neurons)
+
+        # Stack activations
+        # shape: (batch_size, all_neurons, num_layers)
+        self.activations = torch.stack(acts, dim=-1)
+        # free up memory as much as possible
+        del inputs
+        del x
+        del acts
+        torch.cuda.empty_cache()
+
+        if single_input:
+            self.activations = self.activations.squeeze(0)
+        return self.activations
+
+
 class MultilayeredNetwork(nn.Module):
     """
     A PyTorch module representing a multilayered neural network model with trainable
@@ -999,6 +1631,7 @@ def activation_maximisation(
     device: Optional[torch.device] = None,
     wandb: bool = False,
     seed: Optional[int] = None,
+    normalize_gradients: bool = False,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -1052,6 +1685,12 @@ def activation_maximisation(
             (https://wandb.ai/site/). Defaults to True.  Requires wandb to be installed.
         seed (int, optional): Random seed for reproducible input tensor initialization.
             Only used when input_tensor is None. Defaults to None (no seed set).
+        normalize_gradients (bool, optional): Whether to normalize gradients per
+            timepoint to mitigate vanishing gradients for longer path lengths. When
+            True, gradients are normalized by their L2 norm for each timepoint
+            independently. This helps ensure that inputs targeting neurons at deeper
+            layers receive comparable gradient magnitudes to those at earlier layers.
+            Defaults to False.
 
     Returns:
         tuple: A tuple containing:
@@ -1228,6 +1867,15 @@ def activation_maximisation(
 
         # Backward pass and optimization
         loss.backward()
+
+        # Normalize gradients per timepoint to mitigate vanishing gradients
+        if normalize_gradients:
+            with torch.no_grad():
+                # Compute L2 norm per timepoint (last dim), keepdim for broadcasting
+                # input_tensor.grad shape: (batch, neurons, timepoints)
+                norms = input_tensor.grad.norm(dim=(0, 1), keepdim=True) + 1e-8
+                input_tensor.grad.div_(norms)
+
         optimizer.step()
 
         if print_output and iteration % 10 == 0:
@@ -1688,8 +2336,8 @@ def activations_to_df_batched(
         sensory_indices (list of int): A list of indices corresponding to
             sensory neurons in `inprop`.
         inidx_mapping (dict, optional): A dictionary mapping indices in
-            `inprop` to new indices. If None, indices are not remapped.
-            Defaults to None.
+            `inprop` to new indices (e.g. cell type). If None, indices are
+            not remapped. Defaults to None.
         outidx_mapping (dict, optional): A dictionary mapping indices in `out`
             to new indices. If None, `inidx_mapping` is used for mapping.
             Defaults to None.

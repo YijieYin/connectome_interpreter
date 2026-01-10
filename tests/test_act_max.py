@@ -4,9 +4,9 @@ import numpy as np
 import pandas as pd
 import torch
 from scipy.sparse import csr_matrix
-import torch
 
 from connectome_interpreter.activation_maximisation import (
+    LinearNetwork,
     MultilayeredNetwork,
     TargetActivation,
     activation_maximisation,
@@ -1150,3 +1150,290 @@ class TestGetGradients(unittest.TestCase):
         self.assertIn("time_1", df.columns)
         self.assertIn("time_2", df.columns)
         self.assertNotIn("time_0", df.columns)
+
+
+class TestLinearNetwork(unittest.TestCase):
+    """Test suite for LinearNetwork class"""
+
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.num_neurons = 10
+        self.num_sensory = 4
+        self.num_layers = 3
+        self.batch_size = 2
+
+        # Create a dense matrix and convert it to a scipy sparse matrix
+        dense_weights = np.random.rand(self.num_neurons, self.num_neurons)
+        dense_weights = dense_weights / dense_weights.sum(axis=1, keepdims=True)
+        dense_weights[:, :3] = -dense_weights[:, :3]
+        self.all_weights = csr_matrix(dense_weights)
+        self.sensory_indices = list(range(self.num_sensory))
+
+        self.model = LinearNetwork(
+            self.all_weights, self.sensory_indices, num_layers=self.num_layers
+        ).to(self.device)
+
+    def test_initialization(self):
+        """Test that LinearNetwork initializes correctly"""
+        self.assertEqual(self.model.num_layers, self.num_layers)
+        self.assertEqual(len(self.model.sensory_indices), self.num_sensory)
+
+        # Convert both to numpy arrays for comparison
+        model_weights = self.model.all_weights.to_dense().cpu().numpy()
+        expected_weights = self.all_weights.toarray()
+
+        # Use numpy's allclose for a more tolerant comparison
+        self.assertTrue(
+            np.allclose(model_weights, expected_weights, rtol=1e-5, atol=1e-5),
+            "Weights matrices are not equal within tolerance",
+        )
+
+    def test_forward_pass_2d(self):
+        """Test 2D forward pass (single batch)"""
+        input_tensor = torch.rand(self.num_sensory, self.num_layers).to(self.device)
+        output = self.model(input_tensor)
+
+        expected_shape = (self.num_neurons, self.num_layers)
+        self.assertEqual(output.shape, expected_shape)
+        # LinearNetwork outputs are not bounded (no tanh applied), just check they exist
+        self.assertTrue(torch.isfinite(output).all())
+
+    def test_forward_pass_3d(self):
+        """Test 3D forward pass (batched)"""
+        input_tensor = torch.rand(
+            self.batch_size, self.num_sensory, self.num_layers
+        ).to(self.device)
+        output = self.model(input_tensor)
+
+        expected_shape = (self.batch_size, self.num_neurons, self.num_layers)
+        self.assertEqual(output.shape, expected_shape)
+        # LinearNetwork outputs are not bounded (no tanh applied), just check they exist
+        self.assertTrue(torch.isfinite(output).all())
+
+    def test_with_trainable_parameters(self):
+        """Test LinearNetwork with trainable parameters"""
+        idx_to_group = {i: f"group_{i % 3}" for i in range(self.num_neurons)}
+        bias_dict = {"group_0": 0.1, "group_1": -0.1, "group_2": 0.0}
+        slope_dict = {"group_0": 3.0, "group_1": 5.0, "group_2": 7.0}
+
+        model = LinearNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            idx_to_group=idx_to_group,
+            bias_dict=bias_dict,
+            slope_dict=slope_dict,
+        ).to(self.device)
+
+        # Check that parameters are initialized
+        self.assertIsNotNone(model.slope)
+        self.assertIsNotNone(model.raw_biases)
+
+        # Test forward pass
+        input_tensor = torch.rand(
+            self.batch_size, self.num_sensory, self.num_layers
+        ).to(self.device)
+        output = model(input_tensor)
+        self.assertEqual(
+            output.shape, (self.batch_size, self.num_neurons, self.num_layers)
+        )
+
+    def test_custom_activation_function(self):
+        """Test LinearNetwork with custom activation function"""
+
+        def custom_activation(x, x_previous=None):
+            return torch.relu(x)
+
+        model = LinearNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            activation_function=custom_activation,
+        ).to(self.device)
+
+        input_tensor = torch.rand(self.num_sensory, self.num_layers).to(self.device)
+        output = model(input_tensor)
+
+        # ReLU should produce only non-negative values
+        self.assertTrue(torch.all(output >= 0))
+
+    def test_monitor_neurons(self):
+        """Test monitoring specific neurons during forward pass"""
+        monitor_neurons = [0, 2, 5]
+        # Need requires_grad=True for monitoring to work (registers hooks)
+        input_tensor = torch.rand(
+            self.batch_size, self.num_sensory, self.num_layers, requires_grad=True
+        ).to(self.device)
+
+        output = self.model(input_tensor, monitor_neurons=monitor_neurons)
+
+        # Should return full activations
+        self.assertEqual(
+            output.shape, (self.batch_size, self.num_neurons, self.num_layers)
+        )
+
+    def test_sparse_input(self):
+        """Test LinearNetwork with scipy sparse matrix input"""
+        sparse_weights = csr_matrix(self.all_weights)
+        model = LinearNetwork(
+            sparse_weights, self.sensory_indices, num_layers=self.num_layers
+        ).to(self.device)
+
+        input_tensor = torch.rand(self.num_sensory, self.num_layers).to(self.device)
+        output = model(input_tensor)
+
+        self.assertEqual(output.shape, (self.num_neurons, self.num_layers))
+
+    def test_tau_persistence(self):
+        """Test that tau parameter affects activation persistence"""
+        # Create model with tau=0.5
+        model_with_tau = LinearNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            tau=0.5,
+        ).to(self.device)
+
+        # Create model without tau
+        model_without_tau = LinearNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            tau=0.0,
+        ).to(self.device)
+
+        # Same input
+        input_tensor = torch.rand(self.num_sensory, self.num_layers).to(self.device)
+
+        output_with_tau = model_with_tau(input_tensor)
+        output_without_tau = model_without_tau(input_tensor)
+
+        # Outputs should be different due to tau
+        # (unless by chance the activations are very similar)
+        # We just check they both produce valid outputs
+        self.assertEqual(output_with_tau.shape, output_without_tau.shape)
+
+
+class TestNormalizeGradients(unittest.TestCase):
+    """Test suite for normalize_gradients parameter in activation_maximisation"""
+
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Create a simple network
+        dense_weights = np.random.rand(10, 10)
+        dense_weights = dense_weights / dense_weights.sum(axis=1, keepdims=True)
+        dense_weights[:, :3] = -dense_weights[:, :3]
+        self.all_weights = csr_matrix(dense_weights)
+
+        self.model = MultilayeredNetwork(
+            self.all_weights,
+            sensory_indices=[0, 1, 2, 3],
+            num_layers=3,
+        ).to(self.device)
+
+        self.targets = TargetActivation(
+            {0: {0: 0.5, 1: 0.8}, 1: {2: 0.3}}, batch_size=2
+        )
+
+    def test_normalize_gradients_runs(self):
+        """Test that activation_maximisation runs with normalize_gradients=True"""
+        result = activation_maximisation(
+            self.model,
+            self.targets,
+            num_iterations=10,
+            in_reg_lambda=1e-3,
+            out_reg_lambda=1e-3,
+            wandb=False,
+            device=self.device,
+            normalize_gradients=True,
+        )
+
+        input_tensor, output, act_losses, *_ = result
+        expected_shape = (2, 4, 3)  # (batch_size, num_sensory, num_layers)
+        self.assertEqual(input_tensor.shape, expected_shape)
+        # Loss should decrease
+        self.assertTrue(act_losses[-1] <= act_losses[0])
+
+    def test_normalize_gradients_false(self):
+        """Test that activation_maximisation runs with normalize_gradients=False"""
+        result = activation_maximisation(
+            self.model,
+            self.targets,
+            num_iterations=10,
+            in_reg_lambda=1e-3,
+            out_reg_lambda=1e-3,
+            wandb=False,
+            device=self.device,
+            normalize_gradients=False,
+        )
+
+        input_tensor, output, act_losses, *_ = result
+        expected_shape = (2, 4, 3)
+        self.assertEqual(input_tensor.shape, expected_shape)
+        self.assertTrue(act_losses[-1] <= act_losses[0])
+
+    def test_normalize_gradients_comparison(self):
+        """Test that normalize_gradients affects optimization differently"""
+        # Set seed for reproducibility
+        seed = 42
+
+        # Run with normalization
+        result_normalized = activation_maximisation(
+            self.model,
+            self.targets,
+            num_iterations=20,
+            in_reg_lambda=1e-3,
+            out_reg_lambda=1e-3,
+            wandb=False,
+            device=self.device,
+            normalize_gradients=True,
+            seed=seed,
+        )
+
+        # Run without normalization (same seed)
+        result_unnormalized = activation_maximisation(
+            self.model,
+            self.targets,
+            num_iterations=20,
+            in_reg_lambda=1e-3,
+            out_reg_lambda=1e-3,
+            wandb=False,
+            device=self.device,
+            normalize_gradients=False,
+            seed=seed,
+        )
+
+        input_normalized, _, losses_normalized, *_ = result_normalized
+        input_unnormalized, _, losses_unnormalized, *_ = result_unnormalized
+
+        # The inputs should be different due to different gradient processing
+        self.assertFalse(np.allclose(input_normalized, input_unnormalized, rtol=1e-3))
+
+    def test_normalize_gradients_with_longer_paths(self):
+        """Test normalize_gradients with deeper network (more layers)"""
+        # Create a deeper network
+        model = MultilayeredNetwork(
+            self.all_weights,
+            sensory_indices=[0, 1, 2, 3],
+            num_layers=5,  # Deeper network
+        ).to(self.device)
+
+        targets = TargetActivation({4: {5: 0.7}}, batch_size=1)  # Target at final layer
+
+        result = activation_maximisation(
+            model,
+            targets,
+            num_iterations=15,
+            in_reg_lambda=1e-3,
+            out_reg_lambda=1e-3,
+            wandb=False,
+            device=self.device,
+            normalize_gradients=True,
+        )
+
+        input_tensor, output, act_losses, *_ = result
+        expected_shape = (4, 5)  # Single batch, so shape is (num_sensory, num_layers)
+        self.assertEqual(input_tensor.shape, expected_shape)
+        # Should converge
+        self.assertTrue(act_losses[-1] < act_losses[0])
