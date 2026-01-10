@@ -1,7 +1,7 @@
 # Standard library imports
 import itertools
 from dataclasses import dataclass
-from typing import Dict, List, Union, Tuple, Optional
+from typing import Dict, List, Union, Tuple, Optional, Generator
 from collections import defaultdict
 
 # Third-party package imports
@@ -299,7 +299,11 @@ def enumerate_paths(
     edgelist: pd.DataFrame,
     start_layer: int = 1,
     end_layer: Optional[int] = None,
-) -> List[List[Tuple[Union[str, int], Union[str, int], float]]]:
+    return_generator: bool = False,
+) -> Union[
+    List[List[Tuple[Union[str, int], Union[str, int], float]]],
+    Generator[List[Tuple[Union[str, int], Union[str, int], float]], None, None],
+]:
     """
     Finds all paths that begin with an edge in start_layer and end with an edge in
     end_layer, assuming valid paths proceed layer-by-layer without skipping.
@@ -311,10 +315,13 @@ def enumerate_paths(
       start_layer (int): The layer from which all paths must begin. Must be <= end_layer.
       end_layer (int): The layer at which all paths must terminate. If None, defaults to
         the maximum layer in the edgelist.
+      return_generator (bool, optional): If True, returns a generator instead of a list.
+        Useful for large graphs to avoid memory issues. Defaults to False.
 
     Returns:
-      List[List[Tuple[Union[str, int], Union[str, int], float]]]: A list of valid paths.
-        Each path is a list of (pre, post, weight) tuples, ordered from start to end.
+      Union[List[List[Tuple]], Generator]: If return_generator is False, returns a list
+        of valid paths. If True, returns a generator. Each path is a list of
+        (pre, post, weight) tuples, ordered from start to end.
     """
     if end_layer is None:
         end_layer = edgelist["layer"].max()
@@ -329,26 +336,49 @@ def enumerate_paths(
     for _, row in edgelist.iterrows():
         adj[row["layer"]][row["pre"]].append((row["post"], row["weight"]))
 
-    # list of paths
-    # path: list of edges (pre, post, weight)
-    paths: List[List[Tuple[Union[str, int], Union[str, int], float]]] = []
+    if return_generator:
+        # Generator version - yields paths as they are found
+        def generate_paths():
+            def dfs(
+                node: Union[str, int],
+                layer: int,
+                path: List[Tuple[Union[str, int], Union[str, int], float]],
+            ):
+                if layer == end_layer:
+                    yield path.copy()  # yield a copy to avoid mutation issues
+                    return
+                for post, wt in adj.get(layer + 1, {}).get(node, []):
+                    path.append((node, post, wt))
+                    yield from dfs(post, layer + 1, path)
+                    path.pop()
 
-    def dfs(
-        node: Union[str, int],
-        layer: int,
-        path: List[Tuple[Union[str, int], Union[str, int], float]],
-    ):
-        if layer == end_layer:
-            paths.append(path)
-            return
-        for post, wt in adj.get(layer + 1, {}).get(node, []):
-            dfs(post, layer + 1, path + [(node, post, wt)])
+            for pre, edges in adj.get(start_layer, {}).items():
+                for post, wt in edges:
+                    yield from dfs(post, start_layer, [(pre, post, wt)])
 
-    for pre, edges in adj.get(start_layer, {}).items():
-        for post, wt in edges:
-            dfs(post, start_layer, [(pre, post, wt)])
+        return generate_paths()
+    else:
+        # List version - uses mutable path for efficiency (append/pop instead of copying)
+        paths: List[List[Tuple[Union[str, int], Union[str, int], float]]] = []
 
-    return paths
+        def dfs(
+            node: Union[str, int],
+            layer: int,
+            path: List[Tuple[Union[str, int], Union[str, int], float]],
+        ):
+            if layer == end_layer:
+                paths.append(path.copy())  # append a copy to avoid mutation
+                return
+            for post, wt in adj.get(layer + 1, {}).get(node, []):
+                path.append((node, post, wt))
+                dfs(post, layer + 1, path)
+                path.pop()
+
+        for pre, edges in adj.get(start_layer, {}).items():
+            for post, wt in edges:
+                dfs(post, start_layer, [(pre, post, wt)])
+
+        return paths
 
 
 def find_path_iteratively(
@@ -858,7 +888,7 @@ def group_paths(
 ) -> pd.DataFrame:
     """
     Group the paths by user-specified variable (e.g. cell type, cell class etc.).
-    If outprop=False, weights are summed across presynaptic neurons of the same group 
+    If outprop=False, weights are summed across presynaptic neurons of the same group
     and combined across all postsynaptic neurons of the same group using combining_method
     (even if some postsynaptic neurons are not in `paths`).
     If outprop=True, weights are summed across postsynaptic neurons of the same group
@@ -1528,3 +1558,58 @@ def el_within_n_steps(
         return el, raw_el
     else:
         return el
+
+
+def count_paths(
+    edgelist: pd.DataFrame,
+    start_layer: int = 1,
+    end_layer: Optional[int] = None,
+) -> int:
+    """
+    Counts all paths without materializing them in memory.
+    Uses memoization to avoid redundant computation.
+
+    Args:
+      edgelist (pd.DataFrame): Must contain "layer", "pre", "post" columns.
+      start_layer (int): Starting layer.
+      end_layer (int): Ending layer. If None, uses max layer.
+
+    Returns:
+      int: Total number of valid paths.
+    """
+    if end_layer is None:
+        end_layer = edgelist["layer"].max()
+    if start_layer > end_layer:
+        raise ValueError("start_layer must be less than or equal to end_layer.")
+
+    # Build adjacency
+    adj: Dict[int, Dict[Union[str, int], List]] = defaultdict(lambda: defaultdict(list))
+    for _, row in edgelist.iterrows():
+        adj[row["layer"]][row["pre"]].append(row["post"])
+
+    memo = {}
+
+    def dfs(node: Union[str, int], layer: int) -> int:
+        # Memoization - crucial for graphs with convergent paths
+        if (node, layer) in memo:
+            return memo[(node, layer)]
+
+        # add 1 when reaches the end
+        if layer == end_layer:
+            return 1
+
+        count = 0
+        # iterate over all postsynaptic nodes
+        for post in adj.get(layer + 1, {}).get(node, []):
+            # iterate over their postsynaptic nodes
+            count += dfs(post, layer + 1)
+
+        memo[(node, layer)] = count
+        return count
+
+    path_count = 0
+    for pre in adj.get(start_layer, {}):
+        for post in adj.get(start_layer, {}).get(pre, []):
+            path_count += dfs(post, start_layer)
+
+    return path_count
