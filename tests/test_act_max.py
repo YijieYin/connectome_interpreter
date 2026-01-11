@@ -1420,13 +1420,14 @@ class TestNormalizeGradients(unittest.TestCase):
         ).to(self.device)
 
         targets = TargetActivation({4: {5: 0.7}}, batch_size=1)  # Target at final layer
+        print("LOOK HERE!")
 
         result = activation_maximisation(
             model,
             targets,
             num_iterations=15,
-            in_reg_lambda=1e-3,
-            out_reg_lambda=1e-3,
+            in_reg_lambda=1e-6,
+            out_reg_lambda=1e-6,
             wandb=False,
             device=self.device,
             normalize_gradients=True,
