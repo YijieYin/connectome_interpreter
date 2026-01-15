@@ -1432,7 +1432,7 @@ class TestNormalizeGradients(unittest.TestCase):
             in_reg_lambda=1e-3,
             out_reg_lambda=1e-3,
             wandb=False,
-            device=self.device,
+            device="cpu",  # Use CPU for consistency
             normalize_gradients=True,
             seed=42,  # Add seed for reproducibility across platforms
             print_output=False,  # Reduce test output
