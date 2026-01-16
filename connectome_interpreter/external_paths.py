@@ -416,21 +416,25 @@ def effective_conn_per_path_from_paths(
 
 
 def filter_all_paths_to_cumsum(
-    all_paths: list[pd.DataFrame],
-    thre_cumsum: float,
+    all_paths: pd.DataFrame | list[pd.DataFrame],
+    thre_cumsum: float = 0.5,
     thre_step_min: float = 0.0,
     necessary_intermediate: Dict[int, arrayable] | None = None,
 ):
     """
     Filters paths such that intermediate neurons are specified in necessary_intermediate and the
-    cumulative effective weight minimally reaches thre_cumsum of the total effective weight
-    and the minimum edge weight across the selected paths is either the minimum along those
-    remaining paths or thre_step_min.
+    filtered cumulative effective weight > thre_cumsum of the total effective weight;
+    the minimum edge weight across the selected paths is either the minimum along those filtered
+    paths or the minimum threshold thre_step_min, whichever is larger.
+    As a rough guide on how to set thre_cumsum, it can be set larger for fewer paths in all_paths,
+    and smaller for more paths.
 
     Args:
-        paths (list[pd.DataFrame]): The list of DataFrames containing the path data,
-            where each DataFrame is like the output from `find_paths_of_length()`.
-        thre_cumsum (float): The cumulative effective weight threshold to reach for filtered paths.
+        all_paths (pd.DataFrame | list[pd.DataFrame]): The DataFrame or list of DataFrames containing the path data,
+            where each DataFrame is like the output from `find_paths_of_length()`, i.e., contains paths of a 
+            specific length.
+        thre_cumsum (float): The cumulative effective weight threshold to reach for filtered paths. 
+            Should be a number between 0 and 1. Defaults to 0.5.
         thre_step_min (float, optional): The minimum threshold for the weight of the
             direct connection between pre and post. Defaults to 0.0.
         necessary_intermediate (dict, optional): A dictionary of necessary
@@ -446,23 +450,28 @@ def filter_all_paths_to_cumsum(
         thre_step (float): The minimum edge weight threshold used to filter paths which is
             minimally thre_step_min.
     """
+    df_bool = False
+    if isinstance(all_paths, pd.DataFrame):
+        df_bool = True
+        all_paths = [all_paths]
+
     # compute total effective weight across all paths
     w_all = 0.0
-    w_prop = []
+    w_prod = []
     w_min = []
     for i in range(len(all_paths)):
         w_all_i, w_prod_i, w_min_i = effective_conn_per_path_from_paths(all_paths[i])
         w_all += w_all_i
-        w_prop.append(w_prod_i)
+        w_prod.append(w_prod_i)
         w_min.append(w_min_i)
-    w_prod = np.concatenate(w_prop, axis=0)
+    w_prod = np.concatenate(w_prod, axis=0)
     w_min = np.concatenate(w_min, axis=0)
 
     # find minimum edge weight across strongest paths that make up thre_cumsum of total weight
-    # since in filter_paths, threshold > thre_step, take 99.9%, with a minimum of thre_step_min
     idx_sort = np.argsort(-w_prod)
-    idx_thre = np.where(np.cumsum(w_prod[idx_sort] / w_all) > thre_cumsum)[0][0] + 1
-    thre_step = max(0.999 * np.min(w_min[idx_sort[:idx_thre]]), thre_step_min)
+    idx_thre = np.where(np.cumsum(w_prod[idx_sort] / w_all) > thre_cumsum)[0][0]
+    # since in filter_paths, threshold > thre_step, take 99.9%, with a minimum of thre_step_min
+    thre_step = max(0.999 * np.min(w_min[idx_sort[:idx_thre + 1]]), thre_step_min)
 
     # filter paths and compute total effective weight across those paths
     w_filter = 0.0
@@ -471,51 +480,7 @@ def filter_all_paths_to_cumsum(
         w_filter_i, _, _ = effective_conn_per_path_from_paths(all_paths[i])
         w_filter += w_filter_i
 
+    if df_bool:
+        all_paths = all_paths[0]
+
     return all_paths, w_filter, w_all, thre_step
-
-
-def filter_paths_to_cumsum(
-    paths: pd.DataFrame,
-    thre_cumsum: float,
-    thre_step_min: float = 0.0,
-    necessary_intermediate: Dict[int, arrayable] | None = None,
-):
-    """
-    Filters paths such that intermediate neurons are specified in necessary_intermediate,
-    and that the cumulative effective weight minimally reaches thre_cumsum of the total
-    effective weight; and the minimum edge weight across the selected paths is either the
-    minimum along those remaining paths or thre_step_min.
-
-    Args:
-        paths (pd.DataFrame): DataFrame containing the path data, containing columns
-            'layer', 'pre', 'post', and 'weight'.
-        thre_cumsum (float): The cumulative effective weight threshold to reach for
-            filtered paths.
-        thre_step_min (float, optional): The minimum threshold for the weight of the
-            direct connection between pre and post. Defaults to 0.0.
-        necessary_intermediate (dict, optional): A dictionary of necessary intermediate
-            neurons, where the keys are the layer numbers (starting neurons: 1; directly
-            downstream: 2) and the values are the neuron indices (can be int, float,
-            list, set, numpy.ndarray, or pandas.Series). Defaults to None.
-
-    Returns:
-        paths (pd.DataFrame): DataFrame containing the paths that meet the criteria.
-        w_filter (float): The total effective weight of the filtered paths.
-        w_all (float): The total effective weight of all paths before filtering.
-        thre_step (float): The minimum edge weight threshold used to filter paths which is
-            minimally thre_step_min.
-    """
-    # compute total effective weight across all paths
-    w_all, w_prod, w_min = effective_conn_per_path_from_paths(paths)
-
-    # find minimum edge weight across strongest paths that make up thre_cumsum of total weight
-    # since in filter_paths, threshold > thre_step, take 99.9%, with a minimum of thre_step_min
-    idx_sort = np.argsort(-w_prod)
-    idx_thre = np.where(np.cumsum(w_prod[idx_sort] / w_all) > thre_cumsum)[0][0] + 1
-    thre_step = max(0.999 * np.min(w_min[idx_sort[:idx_thre]]), thre_step_min)
-
-    # filter paths and compute total effective weight across those paths
-    paths = filter_paths(paths, thre_step, necessary_intermediate)
-    w_filter, _, _ = effective_conn_per_path_from_paths(paths)
-
-    return paths, w_filter, w_all, thre_step
