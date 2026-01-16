@@ -350,7 +350,7 @@ def effective_conn_per_path_from_paths(
         all_path_weights (np.array): Array of weights for each individual path.
         min_path_weights (np.array): Array of minimum edge weights for each individual path.
     """
-    if paths_df.empty:
+    if paths_df is None or paths_df.empty:
         return 0.0, [], []
 
     # Convert to set for fast membership tests
