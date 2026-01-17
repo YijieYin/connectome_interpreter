@@ -10,8 +10,9 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import pandas as pd
-from scipy.sparse import issparse, spmatrix
+from scipy.sparse import issparse, spmatrix, csr_matrix
 from tqdm import tqdm
+from scipy.sparse.csgraph import shortest_path
 
 from .utils import (
     arrayable,
@@ -1588,6 +1589,80 @@ def el_within_n_steps(
         return el
 
 
+def find_shortest_paths(
+    paths: pd.DataFrame, start_nodes: list[str], end_nodes: list[str]
+) -> list[list[str]]:
+    """
+    Find the shortest paths between groups in start_nodes and end_nodes
+    in a paths dataframe (paths is the output of find_path_iteratively).
+
+    Args:
+        paths (pd.DataFrame): DataFrame containing the path data, including
+            columns 'weight', 'pre', and 'post'.
+        start_nodes (list): List of 'pre' groups.
+        end_nodes (list): List of 'post' groups.
+
+    Returns:
+        list: A list of shortest paths, where each path is a list of groups
+            that connect the start and end nodes (ordered from start to end).
+    """
+
+    if paths.shape[0] == 0:
+        return []
+
+    paths_unique = paths[["weight", "pre", "post"]].drop_duplicates()
+    nodes_unique = np.unique(
+        np.concatenate([paths_unique.pre.unique(), paths_unique.post.unique()])
+    )
+    pre = np.searchsorted(nodes_unique, paths_unique.pre.values)
+    post = np.searchsorted(nodes_unique, paths_unique.post.values)
+    graph_matrix = csr_matrix(
+        (1 / paths_unique["weight"].values, (pre, post)),
+        shape=(len(nodes_unique), len(nodes_unique)),
+    )
+
+    def reconstruct_single_path(start_idx, end_idx):
+        """Compute shortest path for a single start-end pair."""
+        # Compute shortest path only from this start node
+        _, pred = shortest_path(
+            csgraph=graph_matrix,
+            directed=True,
+            indices=start_idx,
+            return_predecessors=True,
+        )
+
+        if pred[end_idx] == -9999:  # not reached
+            return None
+
+        path = [nodes_unique[end_idx]]
+        i = end_idx
+        while i != start_idx:
+            i = pred[i]
+            if i == -9999:
+                return None
+            path.append(nodes_unique[i])
+        return path[::-1]
+
+    shortest_paths = []
+    for start_node in start_nodes:
+        idx_start = np.where(nodes_unique == start_node)[0]
+        if len(idx_start) == 0:
+            continue
+        start_idx = idx_start[0]
+
+        for end_node in end_nodes:
+            if start_node != end_node:
+                idx_end = np.where(nodes_unique == end_node)[0]
+                if len(idx_end) == 0:
+                    continue
+
+                path = reconstruct_single_path(start_idx, idx_end[0])
+                if path is not None:
+                    shortest_paths.append(path)
+
+    return shortest_paths
+  
+  
 def count_paths(
     edgelist: pd.DataFrame,
     start_layer: int = 1,

@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 import os
 from matplotlib import pyplot as plt
-from typing import Optional, Union
+from typing import Dict, Union, Optional
 
 # Third-party package imports
-from scipy.sparse import csr_matrix, spmatrix
-from scipy.sparse.csgraph import shortest_path
-import networkx as nx
-from IPython.display import display, HTML
+from scipy.sparse import spmatrix
+from tqdm import tqdm
 
 from .utils import to_nparray, arrayable
-from .path_finding import el_within_n_steps
+from .path_finding import group_paths, filter_paths, find_paths_of_length
+from .compress_paths import effective_conn_from_paths
 
 
 def compute_flow_hitting_time(
@@ -206,411 +205,25 @@ def find_instance_flow(
     return flow_type_df
 
 
-def find_shortest_paths(
-    paths: pd.DataFrame, start_nodes: list[str], end_nodes: list[str]
-) -> list[list[str]]:
-    """
-    Find the shortest paths between groups in start_nodes and end_nodes
-    in a paths dataframe (paths is the output of find_path_iteratively).
-
-    Args:
-        paths (pd.DataFrame): DataFrame containing the path data, including
-            columns 'weight', 'pre', and 'post'.
-        start_nodes (list): List of 'pre' groups.
-        end_nodes (list): List of 'post' groups.
-
-    Returns:
-        list: A list of shortest paths, where each path is a list of groups
-            that connect the start and end nodes (ordered from start to end).
-    """
-
-    paths_unique = paths[["weight", "pre", "post"]].drop_duplicates()
-    nodes_unique = np.unique(
-        np.concatenate([paths_unique.pre.unique(), paths_unique.post.unique()])
-    )
-    pre = np.searchsorted(nodes_unique, paths_unique.pre.values)
-    post = np.searchsorted(nodes_unique, paths_unique.post.values)
-    graph_matrix = csr_matrix(
-        (1 / paths_unique["weight"].values, (pre, post)),
-        shape=(len(nodes_unique), len(nodes_unique)),
-    )
-
-    _, predecessors = shortest_path(
-        csgraph=graph_matrix, directed=True, return_predecessors=True
-    )
-
-    def reconstruct_single_path(predecessors, start, end, node_names):
-        """
-        Helper function that reconstructs the path from start to end
-        using the predecessors array.
-        """
-        idx_start = np.where(nodes_unique == start)[0]
-        idx_end = np.where(nodes_unique == end)[0]
-        if len(idx_start) == 0 or len(idx_end) == 0:
-            return None
-        path = [node_names[idx_end[0]]]
-        i = idx_end[0]
-        while i != idx_start[0]:
-            i = predecessors[idx_start[0], i]
-            if i == -9999:  # not reached
-                return None
-            path.append(node_names[i])
-        return path[::-1]  # reverse
-
-    shortest_paths = []
-    for start_node in start_nodes:
-        for end_node in end_nodes:
-            if start_node != end_node:
-                path = reconstruct_single_path(
-                    predecessors, start_node, end_node, nodes_unique
-                )
-                if path is not None:
-                    shortest_paths.append(path)
-
-    return shortest_paths
-
-
-def plot_flow_layered_paths(
-    paths: pd.DataFrame,
-    figsize: tuple = (10, 8),
-    weight_decimals: int = 2,
-    neuron_to_sign: dict | None = None,
-    sign_color_map: dict = {1: "red", -1: "blue"},
-    neuron_to_color: dict | None = None,
-    edge_text: bool = True,
-    node_text: bool = True,
-    highlight_nodes: list[str] = [],
-    interactive: bool = True,
-    save_plot: bool = False,
-    file_name: str = "layered_paths",
-    label_pos: float = 0.7,
-    default_neuron_color: str = "lightblue",
-    default_edge_color: str = "lightgrey",
-    node_size: int = 500,
-) -> None:
-    """
-    Plots a directed graph of layered paths based on flow layers.
-    Similar to the `plot_layered_paths` function, but the x-axis is defined by the
-    flow layers of the nodes.
-
-    Args:
-        paths (pandas.DataFrame): A dataframe containing the columns 'pre', 'post',
-            'weight', 'pre_layer', and 'post_layer'. Each row represents an edge in the
-            graph. The 'pre' and 'post' columns refer to the source and target nodes,
-            respectively, and 'weight' indicates the edge weight. 'pre_layer' and
-            'post_layer' are the flow layers of the corresponding nodes.
-        figsize (tuple, optional): A tuple indicating the size of the matplotlib figure.
-            Defaults to (10, 8).
-        weight_decimals (int, optional): The number of decimal places to display for
-            edge weights. Defaults to 2.
-        neuron_to_sign (dict, optional): A dictionary mapping neuron names (as they
-            appear in path_df) to their signs (e.g. {'KCg-m': 1, 'Delta7': -1}).
-            Can also use a dictionary to map neuron names to their neurotransmitter name.
-            Defaults to None.
-        sign_color_map (dict, optional): A dictionary used to color edges. Defaults is
-            lightgrey but if `neuron_to_sign` is provided, the default is to color edges
-            red if the pre-neuron is excitatory, and blue if inhibitory.
-            If the `neuron_to_sign` values are neurotransmitter names, then provide
-            a dictionary that maps neurotransmitter names to colors.
-            If the keys of `sign_color_map` do not match the values of `neuron_to_sign`,
-            a warning is printed and the default color is used for the difference.
-        neuron_to_color (dict, optional): A dictionary mapping neuron names to colors.
-            If not provided, a default color is used for all nodes. The keys should
-            match the node names ('pre' and 'post') in paths. The difference is given
-            the default color.
-        edge_text (bool, optional): Whether to display edge weights as text on the plot.
-            Defaults to True.
-        node_text (bool, optional): Whether to display node names as text on the plot.
-            Defaults to True.
-        highlight_nodes (list[str], optional): A list of node names to highlight bold in
-            the plot. Defaults to an empty list.
-        interactive (bool, optional): Whether to create an interactive plot using pyvis.
-            Defaults to False. If False, a static matplotlib plot is created.
-        save_plot (bool, optional): Whether to save the plot to a file. Defaults to False.
-        file_name (str, optional): The name of the file to save the plot. Defaults to
-            "layered_paths" in the local directory (.html if interactive and .pdf if
-            static).
-        label_pos (float, optional): The position of the edge labels. Defaults to 0.7.
-            Bigger values move the labels closer to the left of the edge.
-            Only works if `interactive` is False.
-        default_neuron_color (str, optional): The default color for nodes if no
-            specific color is provided in `neuron_to_color`. Defaults to "lightblue".
-        default_edge_color (str, optional): The default color for edges if no specific
-            color is provided. Defaults to "lightgrey".
-        node_size (int, optional): The size of the nodes in the plot. Defaults to 500.
-
-    Returns:
-        None: This function does not return a value. It generates a plot using
-            matplotlib or pyvis.
-
-    Note:
-        The positions of the nodes are determined by a custom positioning function
-            (`find_flow_positions`).
-        This function requires the networkx library for graph operations and matplotlib
-            for plotting. For interactive plots, it requires the pyvis library (where
-            the node label has to be underneath the node).
-    """
-
-    def find_flow_positions(
-        vertices: np.array, layers: np.array, height: float, width: float
-    ) -> dict:
-        """
-        Find positions for the nodes depending on the layer flow.
-        """
-        # +0.5 at the end to make sure the max(layers) is included
-        layer_bins = np.arange(-0.5 / 2, np.ceil(max(layers)) + 0.5, 1 / 2)
-        layer_labels = layer_bins[1:] + layer_bins[0]
-        layer_binned = pd.cut(layers, bins=layer_bins, labels=layer_labels)
-
-        layer_w = width / max(layers)
-        xy_pos = np.zeros((len(vertices), 2))
-        for layer_b in np.unique(layer_binned):
-            layer = layers[layer_binned == layer_b]
-            layer_vertices = vertices[layer_binned == layer_b]
-            if len(layer_vertices) > 0:
-                # +1 so that when there aren't many vertices, they are in the middle
-                layer_h = height / (len(layer_vertices) + 1)
-                for index, v in enumerate(layer_vertices):
-                    idx = np.where(vertices == v)[0][0]
-                    xy_pos[idx, 1] = (index + 1) * layer_h
-                    xy_pos[idx, 0] = layer[index] * layer_w - width / 2
-
-        positions = dict(zip(vertices, xy_pos))
-
-        return positions
-
-    if paths.shape[0] == 0:
-        raise ValueError("The provided DataFrame is empty.")
-
-    path_df = paths.copy()
-
-    # Rescale weights to be between 1 and 10
-    weight_min = path_df.weight.min()
-    weight_max = path_df.weight.max()
-    if weight_max == weight_min:
-        path_df["weight"] = 1
-    else:
-        path_df["weight"] = 1 + 9 * (path_df["weight"].values - weight_min) / (
-            weight_max - weight_min
-        )
-
-    # Create the graph
-    G = nx.from_pandas_edgelist(
-        path_df,
-        source="pre",
-        target="post",
-        edge_attr=True,
-        create_using=nx.DiGraph(),
-    )
-
-    # Labels for nodes
-    labels = {v: v for v in G.nodes()}
-
-    # Generate positions
-    layers = np.zeros(len(labels))
-    for index, v in enumerate(labels):
-        if v in path_df.pre.values:
-            layers[index] = path_df[path_df.pre == v].pre_layer.values[0]
-        elif v in path_df.post.values:
-            layers[index] = path_df[path_df.post == v].post_layer.values[0]
-    positions = find_flow_positions(
-        np.array(list(labels.values())), layers, figsize[1] / 10, figsize[0] / 5
-    )
-
-    # Default color for nodes if not provided otherwise
-    if neuron_to_color is None:
-        neuron_to_color = {label: default_neuron_color for label in labels.values()}
-    else:
-        # Ensure neuron_to_color has all labels, even if not in the dictionary
-        nodediff = set(labels.values()) - set(neuron_to_color.keys())
-        if len(nodediff) > 0:
-            neuron_to_color.update(dict.fromkeys(nodediff, default_neuron_color))
-
-    node_colors = []
-    for v in G.nodes():
-        node_colors.append(neuron_to_color[labels[v]])
-
-    if neuron_to_sign is not None:
-        signdiff = set(neuron_to_sign.values()) - set(sign_color_map.keys())
-        if len(signdiff) > 0:
-            print(
-                "Warning: Some values in neuron_to_sign are not in the keys of sign_color_map. Using default color for those edges."
-            )
-            # this is taken care of below with sign_color_map.get(pre_neuron, default_edge_color)
-
-    # Specify edge colour based on pre-neuron sign, if available
-    edge_colors = []
-    for u, _ in G.edges():
-        pre_neuron = labels[u]
-        if neuron_to_sign and pre_neuron in neuron_to_sign:
-            edge_colors.append(
-                sign_color_map.get(neuron_to_sign[pre_neuron], default_edge_color)
-            )
-        else:
-            edge_colors.append(default_edge_color)
-
-    if interactive:
-        try:
-            from pyvis.network import Network
-        except ImportError as e:
-            raise ImportError(
-                "Please install pyvis for interactive plots: pip install pyvis"
-            ) from e
-
-        # create pyvis graph
-        net2 = Network(
-            directed=True, layout=False, notebook=True, cdn_resources="in_line"
-        )
-        canvas_h_px = int(figsize[1] * 80)  # tweak the multiplier if needed
-        net2.height = f"{canvas_h_px}px"  # explicit px keeps Colab happy
-        net2.width = "100%"  # stretch side-to-side
-        net2.from_nx(G)
-
-        node_colors_dict = dict(zip(G.nodes(), node_colors))
-        edge_colors_dict = dict(zip(G.edges(), edge_colors))
-        for v in net2.nodes:
-            v["x"], v["y"] = positions.get(v["id"])
-            v["x"] = v["x"] * int(figsize[0] * 80)
-            v["y"] = v["y"] * canvas_h_px
-            if node_text:
-                v["label"] = labels[v["id"]]
-            else:
-                v["label"] = ""
-            v["color"] = node_colors_dict[v["id"]]
-            v["size"] = node_size / 50
-            v["font"] = {"size": 24}
-            if labels[v["id"]] in highlight_nodes:
-                v["font"] = {"face": "arial black"}
-            else:
-                v["font"] = {"face": "arial"}
-
-        for edge in net2.edges:
-            u, v = edge["from"], edge["to"]
-            edge["color"] = edge_colors_dict[(u, v)]
-            if edge_text:
-                edge["label"] = (
-                    f"{(weight_min+(weight_max - weight_min)*(edge['width']-1)/9):.{weight_decimals}f}"
-                )
-                edge["font"] = {"size": 18, "face": "arial"}
-
-        # Set physics options for the network with high spring constant
-        # to keep straighter arrows when nodes are moved around
-        net2.set_options(
-            """
-        var options = {
-        "physics": {
-            "enabled": true,
-            "solver": "forceAtlas2Based",
-            "forceAtlas2Based": {
-            "springConstant": 0.1
-            },
-            "minVelocity": 0.1
-        },
-        "nodes": {
-            "physics": false
-        }
-        }
-        """
-        )
-        if "COLAB_GPU" in os.environ:
-            # display of plot in ipynb only works in colab
-            html = net2.generate_html(notebook=True)
-            if save_plot:
-                with open(f"{file_name}.html", "w") as f:
-                    f.write(html)
-
-            display(HTML(html))
-        else:
-            # if running locally, will just open in browser
-            if save_plot:
-                net2.write_html(str(file_name) + ".html")
-                print(f"Interactive graph saved as {file_name}.html")
-
-            net2.show(str(file_name) + ".html", notebook=False)
-
-    else:
-
-        fig, ax = plt.subplots(figsize=figsize)
-        nx.draw(
-            G,
-            pos=positions,
-            with_labels=False,
-            node_size=node_size,
-            node_color=node_colors,
-            arrows=True,
-            arrowstyle="-|>",
-            arrowsize=10,
-            width=[G[u][v]["weight"] for u, v in G.edges()],
-            edge_color=edge_colors,
-            ax=ax,
-        )
-
-        if node_text:
-            # label highlighted and normal nodes separately
-            bold_nodes = [n for n in G.nodes() if labels[n] in highlight_nodes]
-            normal_nodes = [n for n in G.nodes() if labels[n] not in highlight_nodes]
-
-            nx.draw_networkx_labels(
-                G,
-                pos=positions,
-                labels={n: labels[n] for n in normal_nodes},
-                font_family="sans-serif",
-                font_weight="normal",
-                font_size=14,
-                ax=ax,
-            )
-            nx.draw_networkx_labels(
-                G,
-                pos=positions,
-                labels={n: labels[n] for n in bold_nodes},
-                font_family="sans-serif",
-                font_weight="bold",
-                font_size=14,
-                ax=ax,
-            )
-
-        if edge_text:
-            edge_labels = {
-                (
-                    u,
-                    v,
-                    # transform back to the original weight values
-                ): f"{(weight_min+(weight_max - weight_min)*(G[u][v]['weight']-1)/9):.{weight_decimals}f}"
-                for u, v in G.edges()
-            }
-            nx.draw_networkx_edge_labels(
-                G,
-                pos=positions,
-                edge_labels=edge_labels,
-                label_pos=label_pos,
-                font_size=14,
-                rotate=False,
-                ax=ax,
-            )
-
-        # ax.set_ylim(0, 1)
-        if save_plot:
-            fig.savefig(file_name + ".pdf")
-            print(f"Graph saved as {file_name}.pdf")
-        plt.show()
-
-
 def layered_el(
     inprop: spmatrix,
     inidx: arrayable,
     outidx: arrayable,
     n: int,
     idx_to_group: dict,
+    thre_cumsum: float | None = None,
+    thre_step_min: float = 0.0,
     combining_method: str = "mean",
-    threshold: float = 0,
     flow_steps: int = 20,
     flow_thre: float = 0.1,
     flow: pd.DataFrame | None = None,
 ):
     """
-    First finds paths within `n` steps, given the `threshold` (applied to direct
-    connections), grouped by `idx_to_group`, and adds flow layers to the edge list based
+    Similar to `el_within_n_steps` but using filter_paths_to_cumsum and layers based
     on the information flow hitting time (navis: https://github.com/navis-org/navis).
+    If thre_cumsum is None, then paths are filtered based on direct weight thre_step_min;
+    otherwise, paths are filtered such that the cumulative effective weight reaches
+    thre_cumsum.
 
     Args:
         inprop (spmatrix): Input sparse matrix representing connections.
@@ -619,41 +232,80 @@ def layered_el(
         n (int): The maximum number of hops. n=1 for direct connections.
         idx_to_group (dict): Dictionary mapping cell indices to their respective cell
             groups.
+        thre_cumsum (float): The cumulative effective weight threshold to reach for filtered paths.
+            Defaults to None, in which case paths are only filtered based on thre_step_min.
+        thre_step_min (float, optional): The minimum threshold for the weight of the
+            direct connection between pre and post. Defaults to 0.0.
         combining_method (str, optional): Method to combine inputs (outprop=False) or
             outputs (outprop=True). Can be 'sum', 'mean', or 'median'. Defaults to 'mean'.
-        threshold (float): The threshold for the weight of the direct connection between
-            pre and post, after grouping by `idx_to_group`. Defaults to 0.
         flow_steps (int): Number of steps for flow calculation. Defaults to 20.
         flow_thre (float): Threshold for flow calculation. Defaults to 0.1.
         flow (pd.DataFrame, optional): DataFrame containing the flow hitting time.
             If provided, it should have columns 'cell_group' and 'hitting_time'.
             If None, the flow hitting time is computed from `inprop` and `idx_to_group`.
     Returns:
-        pd.DataFrame: DataFrame containing the grouped edge list with flow layers.
+        pd.DataFrame: DataFrame containing the edgelist with flow layers.
+        float: The total effective weight of the filtered paths.
+        float: The total effective weight of all paths before filtering.
+        float: The minimum edge weight threshold used to filter paths which is
+            minimally thre_step_min.
     """
 
     inidx = to_nparray(inidx)
     outidx = to_nparray(outidx)
 
     # get edge list, both grouped by idx_to_group, and with raw indices
-    grouped, rawel = el_within_n_steps(
-        inprop,
-        inidx,
-        outidx,
-        n,
-        threshold,
-        idx_to_group,
-        idx_to_group,
-        return_raw_el=True,
-        combining_method=combining_method,
-    )
-    rawel["pre_type"] = rawel.pre.map(idx_to_group)
-    rawel["post_type"] = rawel.post.map(idx_to_group)
-    # only keep the neurons in the types that pass the threshold
-    rawel = rawel[rawel.pre_type.isin(grouped.pre) & rawel.post_type.isin(grouped.post)]
+    all_paths = []
+    rawel = []
+    for i in tqdm(range(n)):
+        paths = find_paths_of_length(inprop, inidx, outidx, i + 1)
+        if paths is None or paths.shape[0] == 0:
+            continue
+        rawel.append(paths)
+        paths = group_paths(
+            paths,
+            idx_to_group,
+            idx_to_group,
+            combining_method=combining_method,
+        )
+        if paths is None or paths.shape[0] == 0:
+            continue
+        all_paths.append(paths)
+    if len(all_paths) == 0:
+        return None, 0, 0
+
+    if thre_cumsum is None:
+        w_all = 0
+        w_filter = 0
+        for i in range(len(all_paths)):
+            thre_step = thre_step_min
+            w_all_i = effective_conn_from_paths(all_paths[i])
+            w_all += w_all_i.sum().sum()
+            all_paths[i] = filter_paths(all_paths[i], thre_step_min)
+            if all_paths[i] is None or all_paths[i].shape[0] == 0:
+                continue
+            w_filter_i = effective_conn_from_paths(all_paths[i])
+            w_filter += w_filter_i.sum().sum()
+    else:
+        all_paths, w_filter, w_all, thre_step = filter_all_paths_to_cumsum(
+            all_paths, thre_cumsum, thre_step_min
+        )
+
+    all_paths = pd.concat(all_paths, axis=0)
+    grouped = all_paths.groupby(["pre", "post"])["weight"].max().reset_index()
+    rawel = pd.concat(rawel, axis=0)
+    # pre, post are single neurons, so the rows should be real duplicates
+    rawel = rawel.drop_duplicates(subset=["pre", "post", "weight"])
 
     # information flow
     if flow is None:
+        rawel["pre_type"] = rawel.pre.map(idx_to_group)
+        rawel["post_type"] = rawel.post.map(idx_to_group)
+        # only keep the neurons in the types that pass the threshold
+        rawel = rawel[
+            rawel.pre_type.isin(grouped.pre) & rawel.post_type.isin(grouped.post)
+        ]
+
         # compute flow hitting time
         flow = find_instance_flow(
             rawel,
@@ -675,6 +327,160 @@ def layered_el(
 
     grouped["pre_layer"] = grouped.pre.map(type_layer)
     grouped["post_layer"] = grouped.post.map(type_layer)
-    grouped.fillna(0, inplace=True)
+    # neurons that were not reached are assigned the layer flow_steps
+    grouped.fillna(flow_steps, inplace=True)
 
-    return grouped
+    return grouped, w_filter, w_all, thre_step
+
+
+def effective_conn_per_path_from_paths(
+    paths_df: pd.DataFrame,
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """
+    Compute the total effective weight of each path of fixed length.
+    Beware that this might be slow for long paths.
+
+    Args:
+        paths_df (pd.DataFrame): DataFrame containing the path data with columns
+            'layer', 'pre', 'post', and 'weight'.
+
+    Returns:
+        total_effective_weight (float): Total effective weight of all paths
+            ending in target group.
+        all_path_weights (np.array): Array of weights for each individual path.
+        min_path_weights (np.array): Array of minimum edge weights for each individual path.
+    """
+    if paths_df is None or paths_df.empty:
+        return 0.0, [], []
+
+    # Convert to set for fast membership tests
+    max_layer = int(paths_df["layer"].max())
+    target_set = set(paths_df[paths_df["layer"] == max_layer]["post"].unique())
+
+    # Ensure columns are the right dtype for merging speed
+    paths_df = paths_df[["layer", "pre", "post", "weight"]].copy()
+    paths_df["layer"] = paths_df["layer"].astype(int)
+
+    # Prepare a mapping from layer -> DataFrame of edges
+    layer_edges = {l: df for l, df in paths_df.groupby("layer")}
+
+    # Start from input layer (layer 1 presynaptic neurons)
+    current_paths = layer_edges[1][["pre", "post", "weight"]].copy()
+    current_paths.rename(
+        columns={"pre": "path_start", "post": "path_end"}, inplace=True
+    )
+    current_paths["path_weight"] = current_paths["weight"]
+    current_paths["min_edge_weight"] = current_paths["weight"]
+
+    # Iterate layer by layer (forward chaining)
+    for layer in range(2, max_layer + 1):
+        if layer not in layer_edges:
+            break
+
+        next_edges = layer_edges[layer][["pre", "post", "weight"]]
+        # Join current path ends to next layer presynaptic neurons
+        merged = current_paths.merge(
+            next_edges,
+            left_on="path_end",
+            right_on="pre",
+            how="inner",
+            suffixes=("", "_next"),
+        )
+
+        if merged.empty:
+            break
+
+        # Update path info
+        merged["path_end"] = merged["post"]
+        merged["path_weight"] = merged["path_weight"] * merged["weight_next"]
+        merged["min_edge_weight"] = merged[["min_edge_weight", "weight_next"]].min(
+            axis=1
+        )
+
+        current_paths = merged[
+            ["path_start", "path_end", "path_weight", "min_edge_weight"]
+        ].copy()
+        current_paths["weight"] = current_paths["path_weight"]
+
+    # Only keep paths that end in target neurons
+    final_paths = current_paths[current_paths["path_end"].isin(target_set)]
+    if final_paths.empty:
+        return 0.0, [], []
+
+    # Compute relevant effective weights
+    min_path_weights = final_paths["min_edge_weight"].to_numpy()
+    all_path_weights = final_paths["path_weight"].to_numpy()
+    total_effective_weight = all_path_weights.sum()
+
+    return total_effective_weight, all_path_weights, min_path_weights
+
+
+def filter_all_paths_to_cumsum(
+    all_paths: pd.DataFrame | list[pd.DataFrame],
+    thre_cumsum: float = 0.5,
+    thre_step_min: float = 0.0,
+    necessary_intermediate: Dict[int, arrayable] | None = None,
+):
+    """
+    Filters paths such that intermediate neurons are specified in necessary_intermediate and the
+    filtered cumulative effective weight > thre_cumsum of the total effective weight;
+    the minimum edge weight across the selected paths is either the minimum along those filtered
+    paths or the minimum threshold thre_step_min, whichever is larger.
+    As a rough guide on how to set thre_cumsum, it can be set larger for fewer paths in all_paths,
+    and smaller for more paths.
+
+    Args:
+        all_paths (pd.DataFrame | list[pd.DataFrame]): The DataFrame or list of DataFrames containing the path data,
+            where each DataFrame is like the output from `find_paths_of_length()`, i.e., contains paths of a 
+            specific length.
+        thre_cumsum (float): The cumulative effective weight threshold to reach for filtered paths. 
+            Should be a number between 0 and 1. Defaults to 0.5.
+        thre_step_min (float, optional): The minimum threshold for the weight of the
+            direct connection between pre and post. Defaults to 0.0.
+        necessary_intermediate (dict, optional): A dictionary of necessary
+            intermediate neurons, where the keys are the layer numbers
+            (starting neurons: 1; directly downstream: 2) and the values are
+            the neuron indices (can be int, float, list, set, numpy.ndarray,
+            or pandas.Series). Defaults to None.
+
+    Returns:
+        paths (list[pd.DataFrame]): List of DataFrames containing the paths that meet the criteria.
+        w_filter (float): The total effective weight of the filtered paths.
+        w_all (float): The total effective weight of all paths before filtering.
+        thre_step (float): The minimum edge weight threshold used to filter paths which is
+            minimally thre_step_min.
+    """
+    df_bool = False
+    if isinstance(all_paths, pd.DataFrame):
+        df_bool = True
+        all_paths = [all_paths]
+
+    # compute total effective weight across all paths
+    w_all = 0.0
+    w_prod = []
+    w_min = []
+    for i in range(len(all_paths)):
+        w_all_i, w_prod_i, w_min_i = effective_conn_per_path_from_paths(all_paths[i])
+        w_all += w_all_i
+        w_prod.append(w_prod_i)
+        w_min.append(w_min_i)
+    w_prod = np.concatenate(w_prod, axis=0)
+    w_min = np.concatenate(w_min, axis=0)
+
+    # find minimum edge weight across strongest paths that make up thre_cumsum of total weight
+    idx_sort = np.argsort(-w_prod)
+    idx_thre = np.where(np.cumsum(w_prod[idx_sort] / w_all) > thre_cumsum)[0][0]
+    # since in filter_paths, threshold > thre_step, take 99.9%, with a minimum of thre_step_min
+    thre_step = max(0.999 * np.min(w_min[idx_sort[:idx_thre + 1]]), thre_step_min)
+
+    # filter paths and compute total effective weight across those paths
+    w_filter = 0.0
+    for i in range(len(all_paths)):
+        all_paths[i] = filter_paths(all_paths[i], thre_step, necessary_intermediate)
+        w_filter_i, _, _ = effective_conn_per_path_from_paths(all_paths[i])
+        w_filter += w_filter_i
+
+    if df_bool:
+        all_paths = all_paths[0]
+
+    return all_paths, w_filter, w_all, thre_step
