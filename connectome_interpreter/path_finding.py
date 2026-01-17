@@ -1665,12 +1665,13 @@ def find_shortest_paths(
                     shortest_paths.append(path)
 
     return shortest_paths
-  
-  
+
+
 def count_paths(
     edgelist: pd.DataFrame,
     start_layer: int = 1,
     end_layer: Optional[int] = None,
+    include_loops: bool = True,
 ) -> int:
     """
     Counts all paths without materializing them in memory.
@@ -1680,6 +1681,11 @@ def count_paths(
       edgelist (pd.DataFrame): Must contain "layer", "pre", "post" columns.
       start_layer (int): Starting layer.
       end_layer (int): Ending layer. If None, uses max layer.
+      include_loops (bool, optional): If True (default), counts all paths including
+        those with loops (nodes that appear more than once in the middle of the path).
+        If False, only counts loop-free paths. Note: a node appearing at both the
+        start and end of a path is allowed (e.g., A-B-C-D-A is not considered a loop),
+        but a node appearing again in the middle is a loop (e.g., A-B-C-A-A has a loop).
 
     Returns:
       int: Total number of valid paths.
@@ -1694,29 +1700,70 @@ def count_paths(
     for _, row in edgelist.iterrows():
         adj[row["layer"]][row["pre"]].append(row["post"])
 
-    memo = {}
+    if include_loops:
+        # Original memoized approach when loops are allowed
+        memo = {}
 
-    def dfs(node: Union[str, int], layer: int) -> int:
-        # Memoization - crucial for graphs with convergent paths
-        if (node, layer) in memo:
-            return memo[(node, layer)]
+        def dfs(node: Union[str, int], layer: int) -> int:
+            # Memoization - crucial for graphs with convergent paths
+            if (node, layer) in memo:
+                return memo[(node, layer)]
 
-        # add 1 when reaches the end
-        if layer == end_layer:
-            return 1
+            # add 1 when reaches the end
+            if layer == end_layer:
+                return 1
 
-        count = 0
-        # iterate over all postsynaptic nodes
-        for post in adj.get(layer + 1, {}).get(node, []):
-            # iterate over their postsynaptic nodes
-            count += dfs(post, layer + 1)
+            count = 0
+            # iterate over all postsynaptic nodes
+            for post in adj.get(layer + 1, {}).get(node, []):
+                # iterate over their postsynaptic nodes
+                count += dfs(post, layer + 1)
 
-        memo[(node, layer)] = count
-        return count
+            memo[(node, layer)] = count
+            return count
 
-    path_count = 0
-    for pre in adj.get(start_layer, {}):
-        for post in adj.get(start_layer, {}).get(pre, []):
-            path_count += dfs(post, start_layer)
+        path_count = 0
+        for pre in adj.get(start_layer, {}):
+            for post in adj.get(start_layer, {}).get(pre, []):
+                path_count += dfs(post, start_layer)
 
-    return path_count
+        return path_count
+    else:
+        # When loops are not allowed, track visited nodes per path
+        # Cannot use memoization because path validity depends on history
+        def dfs_no_loops(
+            node: Union[str, int], layer: int, visited: set, start_node: Union[str, int]
+        ) -> int:
+            # Check if we've seen this node before in the current path
+            # Allow the node to appear at the end even if it was the start node
+            if node in visited:
+                # If we're at the end layer and this node is the start node, that's OK
+                if layer == end_layer and node == start_node:
+                    return 1
+                # Otherwise, this is a loop
+                return 0
+
+            # add 1 when reaches the end
+            if layer == end_layer:
+                return 1
+
+            # Add current node to visited set for this path
+            visited.add(node)
+            count = 0
+
+            # iterate over all postsynaptic nodes
+            for post in adj.get(layer + 1, {}).get(node, []):
+                # recursively count paths from post
+                count += dfs_no_loops(post, layer + 1, visited, start_node)
+
+            # Remove node from visited when backtracking
+            visited.remove(node)
+            return count
+
+        path_count = 0
+        for pre in adj.get(start_layer, {}):
+            for post in adj.get(start_layer, {}).get(pre, []):
+                # Start with pre node in visited set, and track which node started the path
+                path_count += dfs_no_loops(post, start_layer, {pre}, pre)
+
+        return path_count

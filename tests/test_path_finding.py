@@ -381,7 +381,7 @@ class TestEnumeratePathsBetweenLayers(unittest.TestCase):
         df = self.mk_df(edges)
         paths = enumerate_paths(df, 1, 2)
         self.assertEqual(paths[0], [(0, "a", 0.3), ("a", 2, 0.7)])
-    
+
     # ------------------------ generator tests
     def test_generator_simple_chain(self):
         edges = [
@@ -605,7 +605,8 @@ class TestFindShortestPaths(unittest.TestCase):
             self.assertTrue(
                 edge_exists, f"Edge {path[i]} -> {path[i+1]} not found in graph"
             )
-    
+
+
 class TestCountPaths(unittest.TestCase):
     # -------------------------- helpers
     @staticmethod
@@ -712,6 +713,105 @@ class TestCountPaths(unittest.TestCase):
         paths = enumerate_paths(df, 1, 3)
 
         self.assertEqual(count, len(paths))
+
+    def test_include_loops_true(self):
+        """Test that include_loops=True counts all paths including loops"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("b", "a", 1.0, 2),  # Creates a loop back to 'a'
+            ("a", "c", 1.0, 3),
+        ]
+        df = self.mk_df(edges)
+        count = count_paths(df, 1, 3, include_loops=True)
+        # Path: a->b->a->c (this has a loop)
+        self.assertEqual(count, 1)
+
+    def test_include_loops_false_with_loop(self):
+        """Test that include_loops=False excludes paths with loops in the middle"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("b", "a", 1.0, 2),  # Creates a loop back to 'a'
+            ("a", "c", 1.0, 3),
+        ]
+        df = self.mk_df(edges)
+        count = count_paths(df, 1, 3, include_loops=False)
+        # Path a->b->a->c should be excluded (a appears at start and in middle)
+        self.assertEqual(count, 0)
+
+    def test_include_loops_false_start_equals_end_allowed(self):
+        """Test that a node appearing at start and end is allowed (not a loop)"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("b", "c", 1.0, 2),
+            ("c", "a", 1.0, 3),  # Returns to 'a' at the end
+        ]
+        df = self.mk_df(edges)
+        count = count_paths(df, 1, 3, include_loops=False)
+        # Path: a->b->c->a is allowed (a only at start and end)
+        self.assertEqual(count, 1)
+
+    def test_include_loops_false_multiple_same_node_at_end(self):
+        """Test A-B-C-A-A case: loop because A appears in middle then again"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("b", "c", 1.0, 2),
+            ("c", "a", 1.0, 3),
+            ("a", "a", 1.0, 4),  # A appears again after returning
+        ]
+        df = self.mk_df(edges)
+        count = count_paths(df, 1, 4, include_loops=False)
+        # Path a->b->c->a->a has a loop (a appears at positions 0, 3, 4)
+        self.assertEqual(count, 0)
+
+    def test_include_loops_false_no_loop(self):
+        """Test that include_loops=False allows paths without loops"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("b", "c", 1.0, 2),
+            ("c", "d", 1.0, 3),
+        ]
+        df = self.mk_df(edges)
+        count_with_loops = count_paths(df, 1, 3, include_loops=True)
+        count_without_loops = count_paths(df, 1, 3, include_loops=False)
+        # No loops exist, so counts should be the same
+        self.assertEqual(count_with_loops, count_without_loops)
+        self.assertEqual(count_without_loops, 1)
+
+    def test_include_loops_false_diamond_pattern(self):
+        """Test diamond pattern without loops is counted correctly"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("a", "c", 1.0, 1),
+            ("b", "d", 1.0, 2),
+            ("c", "d", 1.0, 2),
+        ]
+        df = self.mk_df(edges)
+        count = count_paths(df, 1, 2, include_loops=False)
+        # Two paths: a->b->d and a->c->d, neither has loops
+        self.assertEqual(count, 2)
+
+    def test_include_loops_complex_with_some_loops(self):
+        """Test complex graph where some paths have loops and some don't"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("a", "c", 1.0, 1),
+            ("b", "d", 1.0, 2),
+            ("c", "d", 1.0, 2),
+            ("d", "b", 1.0, 3),  # Creates loop back to b
+            ("d", "e", 1.0, 3),  # Non-loop path
+        ]
+        df = self.mk_df(edges)
+        count_with_loops = count_paths(df, 1, 3, include_loops=True)
+        count_without_loops = count_paths(df, 1, 3, include_loops=False)
+        # With loops: a->b->d->b, a->b->d->e, a->c->d->b, a->c->d->e = 4
+        # Without loops:
+        #   - a->b->d->b has loop (b appears at position 1 and 3)
+        #   - a->b->d->e is OK
+        #   - a->c->d->b is OK (b only at end)
+        #   - a->c->d->e is OK
+        # So 3 paths without loops
+        self.assertEqual(count_with_loops, 4)
+        self.assertEqual(count_without_loops, 3)
 
     def test_large_branching_factor(self):
         """Test with many branches to verify efficiency"""
