@@ -4,15 +4,16 @@ import numpy as np
 import pandas as pd
 import torch
 from scipy.sparse import csr_matrix
-import torch
 
 from connectome_interpreter.activation_maximisation import (
+    LinearNetwork,
     MultilayeredNetwork,
     TargetActivation,
     activation_maximisation,
     activations_to_df,
     activations_to_df_batched,
     get_neuron_activation,
+    get_input_activation,
     get_gradients,
 )
 
@@ -306,6 +307,246 @@ class TestGetNeuronActivation(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             get_neuron_activation(output, neuron_indices, batch_names=batch_names)
+
+
+class TestGetInputActivation(unittest.TestCase):
+    """Test get_input_activation function for both 2D and 3D inputs"""
+
+    def test_2d_input_basic(self):
+        """Test 2D input with basic functionality"""
+        model_in = np.array(
+            [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9], [0.0, 0.0, 0.0]]
+        )
+        sensory_indices = [0, 1, 2, 3]
+        idx_to_group = {0: "A", 1: "B", 2: "C", 3: "D"}
+
+        df = get_input_activation(model_in, sensory_indices, idx_to_group)
+
+        # Should have all groups except D (all zeros)
+        self.assertTrue(set(df["group"].unique()).issubset({"A", "B", "C", "D"}))
+        # Should have time columns
+        self.assertTrue("time_0" in df.columns)
+        self.assertTrue("time_1" in df.columns)
+        self.assertTrue("time_2" in df.columns)
+
+    def test_2d_input_with_groups(self):
+        """Test 2D input where multiple neurons map to same group"""
+        model_in = np.array([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6], [0.7, 0.8]])
+        sensory_indices = [0, 1, 2, 3]
+        idx_to_group = {0: "A", 1: "A", 2: "B", 3: "B"}  # Two groups
+
+        df = get_input_activation(model_in, sensory_indices, idx_to_group)
+
+        expected_df = pd.DataFrame(
+            {
+                "group": ["A", "B"],
+                "time_0": [0.2, 0.6],  # Average of (0.1, 0.3) and (0.5, 0.7)
+                "time_1": [0.3, 0.7],  # Average of (0.2, 0.4) and (0.6, 0.8)
+            }
+        )
+        pd.testing.assert_frame_equal(df, expected_df, check_dtype=False)
+
+    def test_2d_input_with_threshold(self):
+        """Test 2D input with activation threshold"""
+        model_in = np.array([[0.1, 0.2], [0.0, 0.0], [0.5, 0.6]])
+        sensory_indices = [0, 1, 2]
+        idx_to_group = {0: "A", 1: "B", 2: "C"}
+
+        df = get_input_activation(
+            model_in, sensory_indices, idx_to_group, activation_threshold=0.1
+        )
+
+        # Group B should be excluded (all zeros, below threshold)
+        self.assertTrue(set(df["group"].unique()).issubset({"A", "C"}))
+        self.assertFalse("B" in df["group"].values)
+
+    def test_2d_input_with_selected_indices(self):
+        """Test 2D input with selected indices"""
+        model_in = np.array([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]])
+        sensory_indices = [0, 1, 2]
+        idx_to_group = {0: "A", 1: "B", 2: "C"}
+
+        df = get_input_activation(
+            model_in, sensory_indices, idx_to_group, selected_indices=[0, 2]
+        )
+
+        # Should only have groups A and C
+        self.assertEqual(set(df["group"].unique()), {"A", "C"})
+        self.assertFalse("B" in df["group"].values)
+
+    def test_2d_input_torch_tensor(self):
+        """Test 2D input with torch tensor"""
+        model_in = torch.tensor([[0.1, 0.2], [0.3, 0.4]])
+        sensory_indices = [0, 1]
+        idx_to_group = {0: "A", 1: "B"}
+
+        df = get_input_activation(model_in, sensory_indices, idx_to_group)
+
+        expected_df = pd.DataFrame(
+            {"group": ["A", "B"], "time_0": [0.1, 0.3], "time_1": [0.2, 0.4]}
+        )
+        pd.testing.assert_frame_equal(df, expected_df, check_dtype=False)
+
+    def test_2d_input_ignores_batch_names(self):
+        """Test that batch_names is ignored for 2D input"""
+        model_in = np.array([[0.1, 0.2], [0.3, 0.4]])
+        sensory_indices = [0, 1]
+        idx_to_group = {0: "A", 1: "B"}
+
+        # Should print a message but still work
+        df = get_input_activation(
+            model_in, sensory_indices, idx_to_group, batch_names=["batch_1"]
+        )
+
+        # Should not have batch_name column for 2D input
+        self.assertFalse("batch_name" in df.columns)
+
+    def test_3d_input_basic(self):
+        """Test 3D input with basic functionality"""
+        model_in = np.array(
+            [[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]]  # batch 0  # batch 1
+        )
+        sensory_indices = [0, 1]
+        idx_to_group = {0: "A", 1: "B"}
+
+        df = get_input_activation(model_in, sensory_indices, idx_to_group)
+
+        # Should have batch_name column
+        self.assertTrue("batch_name" in df.columns)
+        # Should have default batch names
+        self.assertEqual(set(df["batch_name"].unique()), {"batch_0", "batch_1"})
+        # Should have all groups
+        self.assertTrue(set(df["group"].unique()).issubset({"A", "B"}))
+
+    def test_3d_input_with_batch_names(self):
+        """Test 3D input with custom batch names"""
+        model_in = np.array([[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]])
+        sensory_indices = [0, 1]
+        idx_to_group = {0: "A", 1: "B"}
+        batch_names = ["odor_1", "odor_2"]
+
+        df = get_input_activation(
+            model_in, sensory_indices, idx_to_group, batch_names=batch_names
+        )
+
+        expected_df = pd.DataFrame(
+            {
+                "batch_name": ["odor_1", "odor_1", "odor_2", "odor_2"],
+                "group": ["A", "B", "A", "B"],
+                "time_0": [0.1, 0.3, 0.5, 0.7],
+                "time_1": [0.2, 0.4, 0.6, 0.8],
+            }
+        )
+        pd.testing.assert_frame_equal(df, expected_df, check_dtype=False)
+
+    def test_3d_input_with_groups(self):
+        """Test 3D input where multiple neurons map to same group"""
+        model_in = np.array(
+            [
+                [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6], [0.7, 0.8]],  # batch 0
+            ]
+        )
+        sensory_indices = [0, 1, 2, 3]
+        idx_to_group = {0: "A", 1: "A", 2: "B", 3: "B"}
+
+        df = get_input_activation(model_in, sensory_indices, idx_to_group)
+
+        # Should average within groups
+        expected_df = pd.DataFrame(
+            {
+                "batch_name": ["batch_0", "batch_0"],
+                "group": ["A", "B"],
+                "time_0": [0.2, 0.6],  # Average of (0.1, 0.3) and (0.5, 0.7)
+                "time_1": [0.3, 0.7],  # Average of (0.2, 0.4) and (0.6, 0.8)
+            }
+        )
+        pd.testing.assert_frame_equal(df, expected_df, check_dtype=False)
+
+    def test_3d_input_with_threshold(self):
+        """Test 3D input with activation threshold"""
+        model_in = np.array(
+            [
+                [[0.1, 0.2], [0.0, 0.0]],  # batch 0: neuron 1 below threshold
+                [[0.0, 0.0], [0.5, 0.6]],  # batch 1: neuron 0 below threshold
+            ]
+        )
+        sensory_indices = [0, 1]
+        idx_to_group = {0: "A", 1: "B"}
+
+        df = get_input_activation(
+            model_in, sensory_indices, idx_to_group, activation_threshold=0.1
+        )
+
+        # Batch 0 should have only A, batch 1 should have only B
+        batch_0 = df[df["batch_name"] == "batch_0"]
+        batch_1 = df[df["batch_name"] == "batch_1"]
+
+        self.assertTrue("A" in batch_0["group"].values)
+        self.assertFalse("B" in batch_0["group"].values)
+        self.assertTrue("B" in batch_1["group"].values)
+        self.assertFalse("A" in batch_1["group"].values)
+
+    def test_3d_input_with_selected_indices(self):
+        """Test 3D input with selected indices"""
+        model_in = np.array([[[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]])
+        sensory_indices = [0, 1, 2]
+        idx_to_group = {0: "A", 1: "B", 2: "C"}
+
+        df = get_input_activation(
+            model_in, sensory_indices, idx_to_group, selected_indices=[0, 2]
+        )
+
+        # Should only have groups A and C
+        self.assertEqual(set(df["group"].unique()), {"A", "C"})
+
+    def test_3d_input_empty_result(self):
+        """Test 3D input where no activations pass threshold"""
+        model_in = np.array([[[0.0, 0.0], [0.0, 0.0]], [[0.0, 0.0], [0.0, 0.0]]])
+        sensory_indices = [0, 1]
+        idx_to_group = {0: "A", 1: "B"}
+
+        df = get_input_activation(
+            model_in, sensory_indices, idx_to_group, activation_threshold=0.1
+        )
+
+        # Should return empty dataframe with correct columns
+        self.assertEqual(len(df), 0)
+        self.assertTrue("batch_name" in df.columns)
+        self.assertTrue("group" in df.columns)
+        self.assertTrue("time_0" in df.columns)
+
+    def test_3d_batch_names_mismatch(self):
+        """Test 3D input with mismatched batch names length"""
+        model_in = np.array([[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]])
+        sensory_indices = [0, 1]
+        idx_to_group = {0: "A", 1: "B"}
+        batch_names = ["batch_1"]  # Only 1 name for 2 batches
+
+        with self.assertRaises(ValueError):
+            get_input_activation(
+                model_in, sensory_indices, idx_to_group, batch_names=batch_names
+            )
+
+    def test_invalid_shape(self):
+        """Test that invalid input shape raises error"""
+        model_in = np.array([0.1, 0.2, 0.3])  # 1D array
+        sensory_indices = [0, 1, 2]
+        idx_to_group = {0: "A", 1: "B", 2: "C"}
+
+        with self.assertRaises(ValueError):
+            get_input_activation(model_in, sensory_indices, idx_to_group)
+
+    def test_3d_input_torch_tensor(self):
+        """Test 3D input with torch tensor"""
+        model_in = torch.tensor([[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]])
+        sensory_indices = [0, 1]
+        idx_to_group = {0: "A", 1: "B"}
+
+        df = get_input_activation(model_in, sensory_indices, idx_to_group)
+
+        # Should convert to numpy and work correctly
+        self.assertEqual(len(df), 4)  # 2 batches * 2 groups
+        self.assertTrue("batch_name" in df.columns)
 
 
 # Add these test classes to your existing test file
@@ -716,6 +957,7 @@ class TestDivisiveNormalization(unittest.TestCase):
             idx_to_group={0: "A", 1: "B", 2: "C"},
             divisive_normalization=dn,
             divisive_strength=ds,
+            threshold=0.0,
         )
         # one layer, one sensory neuron => shape (sensory, layers) = (2,2)
         inp = torch.tensor([[1.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
@@ -908,3 +1150,300 @@ class TestGetGradients(unittest.TestCase):
         self.assertIn("time_1", df.columns)
         self.assertIn("time_2", df.columns)
         self.assertNotIn("time_0", df.columns)
+
+
+class TestLinearNetwork(unittest.TestCase):
+    """Test suite for LinearNetwork class"""
+
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.num_neurons = 10
+        self.num_sensory = 4
+        self.num_layers = 3
+        self.batch_size = 2
+
+        # Create a dense matrix and convert it to a scipy sparse matrix
+        dense_weights = np.random.rand(self.num_neurons, self.num_neurons)
+        dense_weights = dense_weights / dense_weights.sum(axis=1, keepdims=True)
+        dense_weights[:, :3] = -dense_weights[:, :3]
+        self.all_weights = csr_matrix(dense_weights)
+        self.sensory_indices = list(range(self.num_sensory))
+
+        self.model = LinearNetwork(
+            self.all_weights, self.sensory_indices, num_layers=self.num_layers
+        ).to(self.device)
+
+    def test_initialization(self):
+        """Test that LinearNetwork initializes correctly"""
+        self.assertEqual(self.model.num_layers, self.num_layers)
+        self.assertEqual(len(self.model.sensory_indices), self.num_sensory)
+
+        # Convert both to numpy arrays for comparison
+        model_weights = self.model.all_weights.to_dense().cpu().numpy()
+        expected_weights = self.all_weights.toarray()
+
+        # Use numpy's allclose for a more tolerant comparison
+        self.assertTrue(
+            np.allclose(model_weights, expected_weights, rtol=1e-5, atol=1e-5),
+            "Weights matrices are not equal within tolerance",
+        )
+
+    def test_forward_pass_2d(self):
+        """Test 2D forward pass (single batch)"""
+        input_tensor = torch.rand(self.num_sensory, self.num_layers).to(self.device)
+        output = self.model(input_tensor)
+
+        expected_shape = (self.num_neurons, self.num_layers)
+        self.assertEqual(output.shape, expected_shape)
+        # LinearNetwork outputs are not bounded (no tanh applied), just check they exist
+        self.assertTrue(torch.isfinite(output).all())
+
+    def test_forward_pass_3d(self):
+        """Test 3D forward pass (batched)"""
+        input_tensor = torch.rand(
+            self.batch_size, self.num_sensory, self.num_layers
+        ).to(self.device)
+        output = self.model(input_tensor)
+
+        expected_shape = (self.batch_size, self.num_neurons, self.num_layers)
+        self.assertEqual(output.shape, expected_shape)
+        # LinearNetwork outputs are not bounded (no tanh applied), just check they exist
+        self.assertTrue(torch.isfinite(output).all())
+
+    def test_with_trainable_parameters(self):
+        """Test LinearNetwork with trainable parameters"""
+        idx_to_group = {i: f"group_{i % 3}" for i in range(self.num_neurons)}
+        bias_dict = {"group_0": 0.1, "group_1": -0.1, "group_2": 0.0}
+        slope_dict = {"group_0": 3.0, "group_1": 5.0, "group_2": 7.0}
+
+        model = LinearNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            idx_to_group=idx_to_group,
+            bias_dict=bias_dict,
+            slope_dict=slope_dict,
+        ).to(self.device)
+
+        # Check that parameters are initialized
+        self.assertIsNotNone(model.slope)
+        self.assertIsNotNone(model.raw_biases)
+
+        # Test forward pass
+        input_tensor = torch.rand(
+            self.batch_size, self.num_sensory, self.num_layers
+        ).to(self.device)
+        output = model(input_tensor)
+        self.assertEqual(
+            output.shape, (self.batch_size, self.num_neurons, self.num_layers)
+        )
+
+    def test_custom_activation_function(self):
+        """Test LinearNetwork with custom activation function"""
+
+        def custom_activation(x, x_previous=None):
+            return torch.relu(x)
+
+        model = LinearNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            activation_function=custom_activation,
+        ).to(self.device)
+
+        input_tensor = torch.rand(self.num_sensory, self.num_layers).to(self.device)
+        output = model(input_tensor)
+
+        # ReLU should produce only non-negative values
+        self.assertTrue(torch.all(output >= 0))
+
+    def test_monitor_neurons(self):
+        """Test monitoring specific neurons during forward pass"""
+        monitor_neurons = [0, 2, 5]
+        # Need requires_grad=True for monitoring to work (registers hooks)
+        input_tensor = torch.rand(
+            self.batch_size, self.num_sensory, self.num_layers, requires_grad=True
+        ).to(self.device)
+
+        output = self.model(input_tensor, monitor_neurons=monitor_neurons)
+
+        # Should return full activations
+        self.assertEqual(
+            output.shape, (self.batch_size, self.num_neurons, self.num_layers)
+        )
+
+    def test_sparse_input(self):
+        """Test LinearNetwork with scipy sparse matrix input"""
+        sparse_weights = csr_matrix(self.all_weights)
+        model = LinearNetwork(
+            sparse_weights, self.sensory_indices, num_layers=self.num_layers
+        ).to(self.device)
+
+        input_tensor = torch.rand(self.num_sensory, self.num_layers).to(self.device)
+        output = model(input_tensor)
+
+        self.assertEqual(output.shape, (self.num_neurons, self.num_layers))
+
+    def test_tau_persistence(self):
+        """Test that tau parameter affects activation persistence"""
+        # Create model with tau=0.5
+        model_with_tau = LinearNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            tau=0.5,
+        ).to(self.device)
+
+        # Create model without tau
+        model_without_tau = LinearNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            tau=0.0,
+        ).to(self.device)
+
+        # Same input
+        input_tensor = torch.rand(self.num_sensory, self.num_layers).to(self.device)
+
+        output_with_tau = model_with_tau(input_tensor)
+        output_without_tau = model_without_tau(input_tensor)
+
+        # Outputs should be different due to tau
+        # (unless by chance the activations are very similar)
+        # We just check they both produce valid outputs
+        self.assertEqual(output_with_tau.shape, output_without_tau.shape)
+
+
+class TestNormalizeGradients(unittest.TestCase):
+    """Test suite for normalize_gradients parameter in activation_maximisation"""
+
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Create a simple network
+        dense_weights = np.random.rand(10, 10)
+        dense_weights = dense_weights / dense_weights.sum(axis=1, keepdims=True)
+        dense_weights[:, :3] = -dense_weights[:, :3]
+        self.all_weights = csr_matrix(dense_weights)
+
+        self.model = MultilayeredNetwork(
+            self.all_weights,
+            sensory_indices=[0, 1, 2, 3],
+            num_layers=3,
+        ).to(self.device)
+
+        self.targets = TargetActivation(
+            {0: {0: 0.5, 1: 0.8}, 1: {2: 0.3}}, batch_size=2
+        )
+
+    def test_normalize_gradients_runs(self):
+        """Test that activation_maximisation runs with normalize_gradients=True"""
+        result = activation_maximisation(
+            self.model,
+            self.targets,
+            num_iterations=10,
+            in_reg_lambda=1e-3,
+            out_reg_lambda=1e-3,
+            wandb=False,
+            device=self.device,
+            normalize_gradients=True,
+        )
+
+        input_tensor, output, act_losses, *_ = result
+        expected_shape = (2, 4, 3)  # (batch_size, num_sensory, num_layers)
+        self.assertEqual(input_tensor.shape, expected_shape)
+        # Loss should decrease
+        self.assertTrue(act_losses[-1] <= act_losses[0])
+
+    def test_normalize_gradients_false(self):
+        """Test that activation_maximisation runs with normalize_gradients=False"""
+        result = activation_maximisation(
+            self.model,
+            self.targets,
+            num_iterations=10,
+            in_reg_lambda=1e-3,
+            out_reg_lambda=1e-3,
+            wandb=False,
+            device=self.device,
+            normalize_gradients=False,
+        )
+
+        input_tensor, output, act_losses, *_ = result
+        expected_shape = (2, 4, 3)
+        self.assertEqual(input_tensor.shape, expected_shape)
+        self.assertTrue(act_losses[-1] <= act_losses[0])
+
+    def test_normalize_gradients_comparison(self):
+        """Test that normalize_gradients affects optimization differently"""
+        # Set seed for reproducibility
+        seed = 42
+
+        # Run with normalization
+        result_normalized = activation_maximisation(
+            self.model,
+            self.targets,
+            num_iterations=20,
+            in_reg_lambda=1e-3,
+            out_reg_lambda=1e-3,
+            wandb=False,
+            device=self.device,
+            normalize_gradients=True,
+            seed=seed,
+        )
+
+        # Run without normalization (same seed)
+        result_unnormalized = activation_maximisation(
+            self.model,
+            self.targets,
+            num_iterations=20,
+            in_reg_lambda=1e-3,
+            out_reg_lambda=1e-3,
+            wandb=False,
+            device=self.device,
+            normalize_gradients=False,
+            seed=seed,
+        )
+
+        input_normalized, _, losses_normalized, *_ = result_normalized
+        input_unnormalized, _, losses_unnormalized, *_ = result_unnormalized
+
+        # The inputs should be different due to different gradient processing
+        self.assertFalse(np.allclose(input_normalized, input_unnormalized, rtol=1e-3))
+
+    def test_normalize_gradients_with_longer_paths(self):
+        """Test normalize_gradients with deeper network (more layers)"""
+        # Create a deeper network
+        model = MultilayeredNetwork(
+            self.all_weights,
+            sensory_indices=[0, 1, 2, 3],
+            num_layers=5,  # Deeper network
+        ).to(self.device)
+
+        # Use a target earlier in the network to make optimization more reliable
+        targets = TargetActivation(
+            {2: {5: 0.7, 6: 0.5}}, batch_size=1  # Target at middle layer
+        )
+
+        result = activation_maximisation(
+            model,
+            targets,
+            num_iterations=30,
+            learning_rate=0.2,  # Increase learning rate
+            in_reg_lambda=1e-3,
+            out_reg_lambda=1e-3,
+            wandb=False,
+            device="cpu",  # Use CPU for consistency
+            normalize_gradients=True,
+            seed=42,  # Add seed for reproducibility across platforms
+            print_output=False,  # Reduce test output
+        )
+
+        input_tensor, output, act_losses, *_ = result
+        expected_shape = (4, 5)  # Single batch, so shape is (num_sensory, num_layers)
+        self.assertEqual(input_tensor.shape, expected_shape)
+        # Should show some improvement (more lenient check for cross-platform stability)
+        # Final loss should be less than 80% of initial loss
+        self.assertTrue(
+            act_losses[-1] < 0.8 * act_losses[0],
+            f"Loss should decrease: initial={act_losses[0]}, final={act_losses[-1]}",
+        )

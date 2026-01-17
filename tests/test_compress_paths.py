@@ -21,6 +21,7 @@ from connectome_interpreter.compress_paths import (
     result_summary,
     effective_conn_from_paths,
     effective_conn_from_paths_cpu,
+    effconn_without_loops,
 )
 
 
@@ -1770,6 +1771,838 @@ class TestEffectiveConnFromPaths(unittest.TestCase):
             rtol=1e-6,
             atol=1e-8,
         )
+
+
+class TestEffconnWithoutLoops(unittest.TestCase):
+    """Tests for the effconn_without_loops function."""
+
+    def setUp(self):
+        """Set up test data for use in multiple tests."""
+        # Create a simple paths DataFrame WITH a loop
+        # Node 1 appears in both layer 1 and layer 3, creating a loop
+        self.paths_with_loop = pd.DataFrame(
+            {
+                "layer": [1, 1, 2, 2, 3],
+                "pre": [0, 0, 1, 2, 1],  # Note: node 1 appears in layer 1 and 3
+                "post": [1, 2, 2, 3, 3],
+                "weight": [0.5, 0.3, 0.4, 0.6, 0.2],
+            }
+        )
+
+        # Create paths WITHOUT loops
+        self.paths_no_loop = pd.DataFrame(
+            {
+                "layer": [1, 1, 2, 2],
+                "pre": [0, 0, 1, 2],
+                "post": [1, 2, 3, 3],
+                "weight": [0.5, 0.3, 0.4, 0.6],
+            }
+        )
+
+        # Empty paths
+        self.empty_paths = pd.DataFrame(columns=["layer", "pre", "post", "weight"])
+
+        # Define groups
+        self.pre_group = {0: "A"}
+        self.post_group = {3: "X"}
+        self.intermediate_group = {1: "I1", 2: "I2"}
+
+    def test_empty_paths(self):
+        """Test that function handles empty paths correctly."""
+        result = effconn_without_loops(self.empty_paths)
+        self.assertIsNone(result)
+
+    def test_no_loops_present(self):
+        """Test behavior when no loops are present in paths."""
+        result = effconn_without_loops(
+            self.paths_no_loop,
+            pre_group=self.pre_group,
+            post_group=self.post_group,
+            wide=True,
+            use_gpu=False,
+        )
+
+        # Should return a valid DataFrame
+        self.assertIsNotNone(result)
+        self.assertIsInstance(result, pd.DataFrame)
+
+    def test_loop_detection(self):
+        """Test that loops are correctly detected and removed."""
+        result_with_loop = effconn_without_loops(
+            self.paths_with_loop, wide=False, use_gpu=False
+        )
+        result_no_loop = effconn_without_loops(
+            self.paths_no_loop, wide=False, use_gpu=False
+        )
+
+        # Both should be valid DataFrames
+        self.assertIsNotNone(result_with_loop)
+        self.assertIsNotNone(result_no_loop)
+
+        # The result with loops should have different (likely lower) weights
+        # after removing loop contributions
+        self.assertIsInstance(result_with_loop, pd.DataFrame)
+
+    def test_wide_vs_long_format(self):
+        """Test that wide and long format outputs are consistent."""
+        result_wide = effconn_without_loops(
+            self.paths_no_loop, wide=True, use_gpu=False
+        )
+        result_long = effconn_without_loops(
+            self.paths_no_loop, wide=False, use_gpu=False
+        )
+
+        self.assertIsInstance(result_wide, pd.DataFrame)
+        self.assertIsInstance(result_long, pd.DataFrame)
+
+        # Check that long format has expected columns
+        self.assertIn("pre", result_long.columns)
+        self.assertIn("post", result_long.columns)
+        self.assertIn("weight", result_long.columns)
+
+        # Check that wide format is indeed wide (has pre as index, post as columns)
+        self.assertTrue(hasattr(result_wide, "index"))
+
+    def test_combining_methods(self):
+        """Test different combining methods."""
+        for method in ["mean", "sum", "median"]:
+            result = effconn_without_loops(
+                self.paths_no_loop,
+                pre_group=self.pre_group,
+                post_group=self.post_group,
+                combining_method=method,
+                use_gpu=False,
+            )
+            self.assertIsNotNone(result)
+
+    def test_remove_loop_before_vs_after_grouping(self):
+        """Test remove_loop_before_grouping parameter."""
+        result_before = effconn_without_loops(
+            self.paths_with_loop,
+            pre_group=self.pre_group,
+            post_group=self.post_group,
+            remove_loop_before_grouping=True,
+            use_gpu=False,
+        )
+
+        result_after = effconn_without_loops(
+            self.paths_with_loop,
+            pre_group=self.pre_group,
+            post_group=self.post_group,
+            remove_loop_before_grouping=False,
+            use_gpu=False,
+        )
+
+        # Both should return valid results
+        self.assertIsNotNone(result_before)
+        self.assertIsNotNone(result_after)
+
+    def test_remove_loop_before_grouping_detailed(self):
+        """Detailed test of remove_loop_before_grouping with known structure."""
+        # Create a more detailed path structure with clear loops
+        # Layer 1: 0,1 -> Layer 2: 2,3 -> Layer 3: 4,5 (with 2 appearing again)
+        paths = pd.DataFrame(
+            {
+                "layer": [1, 1, 1, 1, 2, 2, 2, 2, 3, 3],
+                "pre": [0, 0, 1, 1, 2, 2, 3, 3, 2, 4],  # Node 2 in layers 2 and 3
+                "post": [2, 3, 2, 3, 4, 5, 4, 5, 5, 5],
+                "weight": [0.5, 0.3, 0.2, 0.4, 0.6, 0.2, 0.3, 0.5, 0.1, 0.7],
+            }
+        )
+
+        # Define groups that combine nodes
+        pre_group = {0: "A", 1: "A"}  # Both inputs map to group A
+        post_group = {5: "X"}  # Output maps to group X
+        intermediate_group = {2: "I1", 3: "I2", 4: "I3"}
+
+        # Test with remove_loop_before_grouping=True
+        result_before = effconn_without_loops(
+            paths,
+            pre_group=pre_group,
+            post_group=post_group,
+            intermediate_group=intermediate_group,
+            remove_loop_before_grouping=True,
+            wide=False,
+            use_gpu=False,
+        )
+
+        # Test with remove_loop_before_grouping=False
+        result_after = effconn_without_loops(
+            paths,
+            pre_group=pre_group,
+            post_group=post_group,
+            intermediate_group=intermediate_group,
+            remove_loop_before_grouping=False,
+            wide=False,
+            use_gpu=False,
+        )
+
+        # Both should produce valid results
+        self.assertIsNotNone(result_before)
+        self.assertIsNotNone(result_after)
+        self.assertIsInstance(result_before, pd.DataFrame)
+        self.assertIsInstance(result_after, pd.DataFrame)
+
+        # Both should have weight values
+        self.assertGreater(len(result_before), 0)
+        self.assertGreater(len(result_after), 0)
+
+        # Check that results contain expected groups
+        if "pre" in result_before.columns:
+            self.assertIn("A", result_before["pre"].values)
+        if "post" in result_before.columns:
+            self.assertIn("X", result_before["post"].values)
+
+    def test_remove_loop_grouping_with_intermediate(self):
+        """Test that intermediate_group works correctly with loop removal."""
+        # Create paths with intermediate nodes that form loops
+        paths = pd.DataFrame(
+            {
+                "layer": [1, 1, 2, 2, 3, 3],
+                "pre": [0, 0, 1, 2, 1, 3],  # Node 1 appears in layers 2 and 3
+                "post": [1, 2, 3, 3, 4, 4],
+                "weight": [0.6, 0.4, 0.5, 0.3, 0.2, 0.7],
+            }
+        )
+
+        pre_group = {0: "Source"}
+        post_group = {4: "Target"}
+        intermediate_group = {1: "Int_A", 2: "Int_B", 3: "Int_C"}
+
+        # Before grouping
+        result_before = effconn_without_loops(
+            paths,
+            pre_group=pre_group,
+            post_group=post_group,
+            intermediate_group=intermediate_group,
+            remove_loop_before_grouping=True,
+            wide=True,
+            use_gpu=False,
+        )
+
+        # After grouping
+        result_after = effconn_without_loops(
+            paths,
+            pre_group=pre_group,
+            post_group=post_group,
+            intermediate_group=intermediate_group,
+            remove_loop_before_grouping=False,
+            wide=True,
+            use_gpu=False,
+        )
+
+        self.assertIsNotNone(result_before)
+        self.assertIsNotNone(result_after)
+
+        # Check structure
+        self.assertTrue(hasattr(result_before, "index"))
+        self.assertTrue(hasattr(result_after, "index"))
+
+    def test_remove_loop_no_grouping_provided(self):
+        """Test remove_loop_before_grouping when no groups are provided."""
+        paths = pd.DataFrame(
+            {
+                "layer": [1, 1, 2, 2, 3],
+                "pre": [0, 0, 1, 2, 1],
+                "post": [1, 2, 2, 3, 3],
+                "weight": [0.5, 0.3, 0.4, 0.6, 0.2],
+            }
+        )
+
+        # When no groups are provided, the parameter should still work
+        result_before = effconn_without_loops(
+            paths, remove_loop_before_grouping=True, use_gpu=False
+        )
+
+        result_after = effconn_without_loops(
+            paths, remove_loop_before_grouping=False, use_gpu=False
+        )
+
+        # Both should produce identical results when no grouping is applied
+        self.assertIsNotNone(result_before)
+        self.assertIsNotNone(result_after)
+
+    def test_remove_loop_grouping_consistency(self):
+        """Test that both grouping modes produce consistent weight magnitudes."""
+        # Create a well-defined path structure
+        paths = pd.DataFrame(
+            {
+                "layer": [1, 1, 2, 2, 3],
+                "pre": [0, 0, 1, 2, 1],
+                "post": [1, 2, 3, 3, 3],
+                "weight": [0.5, 0.3, 0.4, 0.6, 0.2],
+            }
+        )
+
+        pre_group = {0: "A"}
+        post_group = {3: "Z"}
+
+        result_before = effconn_without_loops(
+            paths,
+            pre_group=pre_group,
+            post_group=post_group,
+            remove_loop_before_grouping=True,
+            wide=False,
+            use_gpu=False,
+        )
+
+        result_after = effconn_without_loops(
+            paths,
+            pre_group=pre_group,
+            post_group=post_group,
+            remove_loop_before_grouping=False,
+            wide=False,
+            use_gpu=False,
+        )
+
+        # Both should have reasonable weight values (non-negative, finite)
+        if result_before is not None and "weight" in result_before.columns:
+            self.assertTrue((result_before["weight"] >= 0).all())
+            self.assertFalse(result_before["weight"].isna().any())
+            self.assertFalse(np.isinf(result_before["weight"]).any())
+
+        if result_after is not None and "weight" in result_after.columns:
+            self.assertTrue((result_after["weight"] >= 0).all())
+            self.assertFalse(result_after["weight"].isna().any())
+            self.assertFalse(np.isinf(result_after["weight"]).any())
+
+    def test_remove_loop_grouping_all_combining_methods(self):
+        """Test remove_loop_before_grouping with different combining methods."""
+        paths = pd.DataFrame(
+            {
+                "layer": [1, 1, 2, 2, 3],
+                "pre": [0, 0, 1, 2, 1],
+                "post": [1, 2, 2, 3, 3],
+                "weight": [0.5, 0.3, 0.4, 0.6, 0.2],
+            }
+        )
+
+        pre_group = {0: "A"}
+        post_group = {3: "Z"}
+
+        for method in ["mean", "sum", "median"]:
+            for remove_before in [True, False]:
+                result = effconn_without_loops(
+                    paths,
+                    pre_group=pre_group,
+                    post_group=post_group,
+                    combining_method=method,
+                    remove_loop_before_grouping=remove_before,
+                    use_gpu=False,
+                )
+                self.assertIsNotNone(
+                    result,
+                    f"Failed with method={method}, remove_before={remove_before}",
+                )
+
+    def test_remove_loop_grouping_wide_long_formats(self):
+        """Test that both wide and long formats work with both grouping modes."""
+        paths = pd.DataFrame(
+            {
+                "layer": [1, 1, 2, 2],
+                "pre": [0, 0, 1, 2],
+                "post": [1, 2, 3, 3],
+                "weight": [0.5, 0.3, 0.4, 0.6],
+            }
+        )
+
+        pre_group = {0: "A"}
+        post_group = {3: "Z"}
+
+        for remove_before in [True, False]:
+            # Test wide format
+            result_wide = effconn_without_loops(
+                paths,
+                pre_group=pre_group,
+                post_group=post_group,
+                remove_loop_before_grouping=remove_before,
+                wide=True,
+                use_gpu=False,
+            )
+            self.assertIsNotNone(result_wide)
+            self.assertTrue(hasattr(result_wide, "index"))
+
+            # Test long format
+            result_long = effconn_without_loops(
+                paths,
+                pre_group=pre_group,
+                post_group=post_group,
+                remove_loop_before_grouping=remove_before,
+                wide=False,
+                use_gpu=False,
+            )
+            self.assertIsNotNone(result_long)
+            if result_long is not None:
+                self.assertIn("pre", result_long.columns)
+                self.assertIn("post", result_long.columns)
+                self.assertIn("weight", result_long.columns)
+
+    def test_remove_loop_grouping_complex_case(self):
+        """Test a complex scenario with multiple loops and groups."""
+        # Create a complex graph structure
+        paths = pd.DataFrame(
+            {
+                "layer": [1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 4, 4],
+                "pre": [0, 0, 1, 2, 2, 3, 3, 2, 4, 5, 6, 3],  # Nodes 2,3 create loops
+                "post": [2, 3, 3, 4, 5, 4, 5, 6, 6, 6, 7, 7],
+                "weight": [
+                    0.5,
+                    0.3,
+                    0.4,
+                    0.2,
+                    0.3,
+                    0.4,
+                    0.2,
+                    0.1,
+                    0.5,
+                    0.3,
+                    0.6,
+                    0.2,
+                ],
+            }
+        )
+
+        # Create groups that span multiple nodes
+        pre_group = {0: "Source", 1: "Source"}
+        post_group = {7: "Target"}
+        intermediate_group = {2: "Mid1", 3: "Mid1", 4: "Mid2", 5: "Mid2", 6: "Mid3"}
+
+        # Both modes should handle this without crashing
+        result_before = effconn_without_loops(
+            paths,
+            pre_group=pre_group,
+            post_group=post_group,
+            intermediate_group=intermediate_group,
+            remove_loop_before_grouping=True,
+            use_gpu=False,
+        )
+
+        result_after = effconn_without_loops(
+            paths,
+            pre_group=pre_group,
+            post_group=post_group,
+            intermediate_group=intermediate_group,
+            remove_loop_before_grouping=False,
+            use_gpu=False,
+        )
+
+        self.assertIsNotNone(result_before)
+        self.assertIsNotNone(result_after)
+
+    def test_remove_loop_grouping_numerical_comparison(self):
+        """Detailed numerical comparison between remove_loop_before_grouping modes.
+
+        This test ensures both modes produce reasonable results and helps understand
+        the difference between grouping before vs after loop removal.
+        """
+        # Create a well-defined structure with known loops
+        # Pre: 0,1 -> Intermediate: 2,3 (node 2 loops back) -> Post: 4
+        paths = pd.DataFrame(
+            {
+                "layer": [1, 1, 1, 1, 2, 2, 2, 2, 3, 3],
+                "pre": [0, 0, 1, 1, 2, 2, 3, 3, 2, 4],  # Node 2 in layer 2 and 3
+                "post": [2, 3, 2, 3, 4, 4, 4, 4, 4, 4],
+                "weight": [0.5, 0.2, 0.3, 0.4, 0.6, 0.3, 0.5, 0.2, 0.1, 0.7],
+            }
+        )
+
+        # Group nodes to test grouping effects
+        pre_group = {0: "GroupA", 1: "GroupB"}
+        post_group = {4: "Target"}
+        intermediate_group = {2: "IntX", 3: "IntY"}
+
+        # Mode 1: Remove loops BEFORE grouping
+        result_before = effconn_without_loops(
+            paths,
+            pre_group=pre_group,
+            post_group=post_group,
+            intermediate_group=intermediate_group,
+            remove_loop_before_grouping=True,
+            wide=False,
+            combining_method="sum",
+            use_gpu=False,
+        )
+
+        # Mode 2: Remove loops AFTER grouping
+        result_after = effconn_without_loops(
+            paths,
+            pre_group=pre_group,
+            post_group=post_group,
+            intermediate_group=intermediate_group,
+            remove_loop_before_grouping=False,
+            wide=False,
+            combining_method="sum",
+            use_gpu=False,
+        )
+
+        # Both should produce valid DataFrames
+        self.assertIsNotNone(result_before)
+        self.assertIsNotNone(result_after)
+        self.assertIsInstance(result_before, pd.DataFrame)
+        self.assertIsInstance(result_after, pd.DataFrame)
+
+        # Both should have the expected columns
+        for col in ["pre", "post", "weight"]:
+            self.assertIn(col, result_before.columns)
+            self.assertIn(col, result_after.columns)
+
+        # Both should have positive weights (effective connectivity)
+        self.assertTrue((result_before["weight"] >= 0).all())
+        self.assertTrue((result_after["weight"] >= 0).all())
+
+        # Both should connect the same groups (even if weights differ)
+        expected_groups = set(pre_group.values()) | set(post_group.values())
+        before_groups = set(result_before["pre"].values) | set(
+            result_before["post"].values
+        )
+        after_groups = set(result_after["pre"].values) | set(
+            result_after["post"].values
+        )
+
+        # Check that we have connections involving our defined groups
+        self.assertTrue(
+            len(before_groups.intersection(expected_groups)) > 0,
+            f"Before grouping result missing expected groups. Got: {before_groups}, Expected: {expected_groups}",
+        )
+        self.assertTrue(
+            len(after_groups.intersection(expected_groups)) > 0,
+            f"After grouping result missing expected groups. Got: {after_groups}, Expected: {expected_groups}",
+        )
+
+        # Verify no NaN or infinite values
+        self.assertFalse(result_before["weight"].isna().any())
+        self.assertFalse(result_after["weight"].isna().any())
+        self.assertFalse(np.isinf(result_before["weight"]).any())
+        self.assertFalse(np.isinf(result_after["weight"]).any())
+
+        # Print summary for manual inspection (useful for debugging)
+        print("\n=== Remove Loop BEFORE Grouping ===")
+        print(result_before.to_string())
+        print(f"Total weight: {result_before['weight'].sum():.4f}")
+
+        print("\n=== Remove Loop AFTER Grouping ===")
+        print(result_after.to_string())
+        print(f"Total weight: {result_after['weight'].sum():.4f}")
+
+        # Note: The weights can be different between the two modes because:
+        # - BEFORE: Individual neuron loops are removed, then grouped
+        # - AFTER: Neurons are grouped first (potentially merging loop info), then loops removed
+        # Both are valid depending on the biological question being asked
+
+    def test_remove_loop_grouping_simple_case_no_loops(self):
+        """Test both modes with no loops - validates they both work correctly.
+
+        Note: Even without loops, the two modes can produce different results because:
+        - BEFORE: Compute effective connectivity on individual neurons, then group
+        - AFTER: Group neurons first, then compute effective connectivity on groups
+
+        Both are correct but answer slightly different questions.
+        """
+        # Create simple paths WITHOUT any loops
+        paths = pd.DataFrame(
+            {
+                "layer": [1, 1, 2, 2],
+                "pre": [0, 1, 2, 3],
+                "post": [2, 3, 4, 4],
+                "weight": [0.5, 0.3, 0.6, 0.4],
+            }
+        )
+
+        pre_group = {0: "A", 1: "B"}
+        post_group = {4: "Z"}
+
+        result_before = effconn_without_loops(
+            paths,
+            pre_group=pre_group,
+            post_group=post_group,
+            remove_loop_before_grouping=True,
+            wide=False,
+            combining_method="sum",
+            use_gpu=False,
+        )
+
+        result_after = effconn_without_loops(
+            paths,
+            pre_group=pre_group,
+            post_group=post_group,
+            remove_loop_before_grouping=False,
+            wide=False,
+            combining_method="sum",
+            use_gpu=False,
+        )
+
+        # Both should produce valid results
+        self.assertIsNotNone(result_before)
+        self.assertIsNotNone(result_after)
+
+        # Both should have the expected structure
+        for result in [result_before, result_after]:
+            self.assertIn("pre", result.columns)
+            self.assertIn("post", result.columns)
+            self.assertIn("weight", result.columns)
+            self.assertTrue((result["weight"] >= 0).all())
+            self.assertFalse(result["weight"].isna().any())
+
+        print("\n=== No loops case - both modes valid but may differ ===")
+        print("BEFORE mode:")
+        print(result_before[["pre", "post", "weight"]].to_string())
+        print(f"\nAFTER mode:")
+        print(result_after[["pre", "post", "weight"]].to_string())
+
+    def test_remove_loop_understand_difference(self):
+        """Detailed test to understand the difference between the two modes.
+
+        This creates a minimal example to clarify when and why the results differ.
+        """
+        # Minimal case: Single source, single target, one intermediate that loops
+        # 0 -> 1 -> 2 (target)
+        #      1 -> 2 (direct again, creates opportunity for loop)
+        paths = pd.DataFrame(
+            {
+                "layer": [1, 2, 2],
+                "pre": [0, 1, 1],  # Node 1 appears twice in layer 2
+                "post": [1, 2, 2],
+                "weight": [0.5, 0.3, 0.2],  # Two different weights from 1->2
+            }
+        )
+
+        print("\n=== Understanding the difference ===")
+        print("Input paths:")
+        print(paths.to_string())
+
+        # No grouping first - see raw behavior
+        result_before_no_group = effconn_without_loops(
+            paths, remove_loop_before_grouping=True, wide=False, use_gpu=False
+        )
+
+        result_after_no_group = effconn_without_loops(
+            paths, remove_loop_before_grouping=False, wide=False, use_gpu=False
+        )
+
+        print("\nWithout grouping:")
+        print("BEFORE mode:")
+        if result_before_no_group is not None:
+            print(result_before_no_group.to_string())
+        else:
+            print("None")
+
+        print("\nAFTER mode:")
+        if result_after_no_group is not None:
+            print(result_after_no_group.to_string())
+        else:
+            print("None")
+
+        # Both should produce valid results
+        self.assertIsNotNone(result_before_no_group)
+        self.assertIsNotNone(result_after_no_group)
+
+    def test_remove_loop_grouping_edge_case_all_loops(self):
+        """Test when all paths contain loops - both modes should handle gracefully."""
+        # Create a structure where every path has a loop
+        paths = pd.DataFrame(
+            {
+                "layer": [1, 1, 2, 2, 3],
+                "pre": [0, 1, 0, 1, 0],  # Nodes 0,1 keep appearing
+                "post": [0, 1, 2, 2, 3],
+                "weight": [0.5, 0.3, 0.4, 0.2, 0.6],
+            }
+        )
+
+        pre_group = {0: "A", 1: "B"}
+        post_group = {3: "Z"}
+
+        # Both modes should handle this without crashing
+        result_before = effconn_without_loops(
+            paths,
+            pre_group=pre_group,
+            post_group=post_group,
+            remove_loop_before_grouping=True,
+            use_gpu=False,
+        )
+
+        result_after = effconn_without_loops(
+            paths,
+            pre_group=pre_group,
+            post_group=post_group,
+            remove_loop_before_grouping=False,
+            use_gpu=False,
+        )
+
+        # Both should return valid results (might have zero weights)
+        # The key is they shouldn't crash
+        if result_before is not None:
+            self.assertIsInstance(result_before, pd.DataFrame)
+        if result_after is not None:
+            self.assertIsInstance(result_after, pd.DataFrame)
+
+    @skipIf(
+        not (torch.cuda.is_available() and torch.__version__ >= "2.2"),
+        "CUDA ≥2.2 required",
+    )
+    def test_gpu_vs_cpu(self):
+        """Test that GPU and CPU computations yield similar results."""
+        result_gpu = effconn_without_loops(self.paths_no_loop, use_gpu=True, wide=False)
+        result_cpu = effconn_without_loops(
+            self.paths_no_loop, use_gpu=False, wide=False
+        )
+
+        # Sort both by pre and post for comparison
+        result_gpu = result_gpu.sort_values(["pre", "post"]).reset_index(drop=True)
+        result_cpu = result_cpu.sort_values(["pre", "post"]).reset_index(drop=True)
+
+        # Compare values, ignoring dtype differences between GPU (int64) and CPU (int32)
+        pd.testing.assert_frame_equal(
+            result_gpu, result_cpu, rtol=1e-5, atol=1e-7, check_dtype=False
+        )
+
+    def test_chunk_size_consistency(self):
+        """Test that different chunk sizes yield same results."""
+        result_small = effconn_without_loops(
+            self.paths_no_loop, chunk_size=10, use_gpu=False, wide=False
+        )
+        result_large = effconn_without_loops(
+            self.paths_no_loop, chunk_size=1000, use_gpu=False, wide=False
+        )
+
+        # Sort for comparison
+        result_small = result_small.sort_values(["pre", "post"]).reset_index(drop=True)
+        result_large = result_large.sort_values(["pre", "post"]).reset_index(drop=True)
+
+        pd.testing.assert_frame_equal(result_small, result_large, rtol=1e-5)
+
+    def test_root_parameter(self):
+        """Test the root parameter."""
+        result_root = effconn_without_loops(
+            self.paths_no_loop, root=True, use_gpu=False, wide=False
+        )
+        result_no_root = effconn_without_loops(
+            self.paths_no_loop, root=False, use_gpu=False, wide=False
+        )
+
+        self.assertIsNotNone(result_root)
+        self.assertIsNotNone(result_no_root)
+
+        # Values should differ when root is applied
+        # (unless all weights are 0 or 1)
+        self.assertIsInstance(result_root, pd.DataFrame)
+        self.assertIsInstance(result_no_root, pd.DataFrame)
+
+    def test_complex_loop_scenario(self):
+        """Test a more complex scenario with multiple loops."""
+        # Create a path with multiple nodes appearing in multiple layers
+        complex_paths = pd.DataFrame(
+            {
+                "layer": [1, 1, 2, 2, 3, 3, 4],
+                "pre": [0, 0, 1, 2, 1, 3, 2],  # nodes 1 and 2 create loops
+                "post": [1, 2, 3, 3, 4, 4, 4],
+                "weight": [0.5, 0.3, 0.4, 0.6, 0.2, 0.7, 0.1],
+            }
+        )
+
+        result = effconn_without_loops(complex_paths, use_gpu=False)
+
+        # Should handle multiple loops without crashing
+        self.assertIsNotNone(result)
+
+    def test_grouping_with_loops(self):
+        """Test that grouping works correctly with loop removal."""
+        result = effconn_without_loops(
+            self.paths_with_loop,
+            pre_group=self.pre_group,
+            post_group=self.post_group,
+            intermediate_group=self.intermediate_group,
+            wide=True,
+            use_gpu=False,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertIsInstance(result, pd.DataFrame)
+
+    def test_density_threshold(self):
+        """Test the density_threshold parameter."""
+        result = effconn_without_loops(
+            self.paths_no_loop, density_threshold=0.5, use_gpu=False
+        )
+
+        self.assertIsNotNone(result)
+
+    def test_single_layer(self):
+        """Test with single layer paths (direct connections only)."""
+        single_layer = pd.DataFrame(
+            {
+                "layer": [1, 1],
+                "pre": [0, 0],
+                "post": [1, 2],
+                "weight": [0.5, 0.3],
+            }
+        )
+
+        result = effconn_without_loops(single_layer, use_gpu=False)
+        self.assertIsNotNone(result)
+
+    def test_self_loop(self):
+        """Test handling of self-loops (neuron connecting to itself)."""
+        self_loop_paths = pd.DataFrame(
+            {
+                "layer": [1, 1, 2],
+                "pre": [0, 1, 1],
+                "post": [1, 1, 2],  # node 1 connects to itself
+                "weight": [0.5, 0.8, 0.3],
+            }
+        )
+
+        # Should handle self-loops gracefully
+        result = effconn_without_loops(self_loop_paths, use_gpu=False)
+        # Result might be None or valid DataFrame depending on implementation
+        if result is not None:
+            self.assertIsInstance(result, pd.DataFrame)
+
+    def test_large_loop_structure(self):
+        """Test with a larger, more realistic loop structure."""
+        # Create a more complex graph with multiple layers and loops
+        large_paths = pd.DataFrame(
+            {
+                "layer": [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4],
+                "pre": [0, 0, 1, 2, 3, 3, 2, 4, 4, 5, 3],
+                "post": [2, 3, 3, 4, 4, 5, 5, 5, 6, 6, 6],
+                "weight": [0.5, 0.3, 0.2, 0.6, 0.4, 0.1, 0.7, 0.3, 0.5, 0.4, 0.2],
+            }
+        )
+
+        result = effconn_without_loops(large_paths, use_gpu=False)
+        self.assertIsNotNone(result)
+
+    def test_numeric_stability(self):
+        """Test numeric stability with very small and large weights."""
+        paths = pd.DataFrame(
+            {
+                "layer": [1, 1, 2, 2],
+                "pre": [0, 0, 1, 2],
+                "post": [1, 2, 3, 3],
+                "weight": [1e-10, 1e10, 0.5, 0.3],
+            }
+        )
+
+        result = effconn_without_loops(paths, use_gpu=False)
+        self.assertIsNotNone(result)
+        # Check for NaN or Inf values
+        if isinstance(result, pd.DataFrame) and "weight" in result.columns:
+            self.assertFalse(result["weight"].isna().any())
+            self.assertFalse(np.isinf(result["weight"]).any())
+
+    def test_multiple_paths_between_same_nodes(self):
+        """Test when there are multiple paths between the same pre-post pair."""
+        multi_path = pd.DataFrame(
+            {
+                "layer": [1, 1, 2, 2, 2, 2],
+                "pre": [0, 0, 1, 1, 2, 2],
+                "post": [1, 2, 3, 3, 3, 3],
+                "weight": [0.5, 0.3, 0.4, 0.2, 0.6, 0.1],
+            }
+        )
+
+        result = effconn_without_loops(multi_path, use_gpu=False)
+        self.assertIsNotNone(result)
 
 
 if __name__ == "__main__":

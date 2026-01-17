@@ -143,6 +143,7 @@ def hex_heatmap(
     dataset: Optional[str] = "mcns_right",
     value_name: str = "weight",
     colorbar: bool = True,
+    title: Optional[str] = None,
 ) -> go.Figure:
     """
     Generate a hexagonal heat map plot of the data. The index of the data
@@ -167,7 +168,9 @@ def hex_heatmap(
                 - 'fig_height': int, default=220 (mm)
                 - 'fig_margin': int, default=0 (mm)
                 - 'fsize_ticks_pt': int, default=20 (points)
-                - 'fsize_title_pt': int, default=20 (points)
+                - 'fsize_title_pt': int, default=20 (points) - colorbar title font size
+                - 'fsize_plot_title_pt': int, default=24 (points) - plot title font size
+                - 'title_margin': int, default=50 (pixels) - top margin when title is present
                 - 'markersize': int, default=18 if dataset='mcns_right', 20 if dataset='fafb_right'
                 - 'ticklen': int, default=15
                 - 'tickwidth': int, default=5
@@ -190,6 +193,7 @@ def hex_heatmap(
 
                 - 'mcns_right': columnar coordinates of individual cells from columnar cell types: L1, L2, L3, L5, Mi1, Mi4, Mi9, C2, C3, Tm1, Tm2, Tm4, Tm9, Tm20, T1, within the medulla of the right optic lobe, from Nern et al. 2024.
                 - 'fafb_right': columnar coordinates of individual cells from columnar cell types, in the right optic lobe of FAFB, from Matsliah et al. 2024.
+        title (Optional[str]): Title for the plot. If None, no title is displayed.
 
     Returns:
         fig : go.Figure
@@ -299,6 +303,8 @@ def hex_heatmap(
         "fig_margin": 0,
         "fsize_ticks_pt": 20,
         "fsize_title_pt": 20,
+        "fsize_plot_title_pt": 24,
+        "title_margin": 50,
         "markersize": markersize,
         "ticklen": 15,
         "tickwidth": 5,
@@ -334,6 +340,9 @@ def hex_heatmap(
 
     fsize_ticks_px = sizing["fsize_ticks_pt"] * (1 / POINTS_PER_INCH) * pixelsperinch
     fsize_title_px = sizing["fsize_title_pt"] * (1 / POINTS_PER_INCH) * pixelsperinch
+    fsize_plot_title_px = (
+        sizing["fsize_plot_title_pt"] * (1 / POINTS_PER_INCH) * pixelsperinch
+    )
 
     # Get global min and max for consistent color scale
     # minimum of 0 and df.values.min()
@@ -362,13 +371,24 @@ def hex_heatmap(
 
     # initiate plot
     fig = go.Figure()
+    top_margin = sizing["title_margin"] if title else 0
     fig.update_layout(
         autosize=False,
         height=area_height,
         width=area_width,
-        margin={"l": 0, "r": 0, "b": 0, "t": 0, "pad": 0},
+        margin={"l": 0, "r": 0, "b": 0, "t": top_margin, "pad": 0},
         paper_bgcolor=style["papercolor"],
         plot_bgcolor=style["papercolor"],
+        title=(
+            dict(
+                text=title,
+                x=0.5,
+                xanchor="center",
+                font=dict(size=fsize_plot_title_px, family=style["font_type"]),
+            )
+            if title
+            else None
+        ),
     )
     fig.update_xaxes(
         showgrid=False, showticklabels=False, showline=False, visible=False
@@ -398,6 +418,7 @@ def hex_heatmap(
         slider_steps = []
 
         # Add base layout
+        top_margin = sizing["title_margin"] if title else 0
         fig.update_layout(
             autosize=False,
             height=area_height,
@@ -406,11 +427,21 @@ def hex_heatmap(
                 "l": 0,
                 "r": 0,
                 "b": slider_height,
-                "t": 0,
+                "t": top_margin,
                 "pad": 0,
             },  # Add bottom margin for slider
             paper_bgcolor=style["papercolor"],
             plot_bgcolor=style["papercolor"],
+            title=(
+                dict(
+                    text=title,
+                    x=0.5,
+                    xanchor="center",
+                    font=dict(size=fsize_plot_title_px, family=style["font_type"]),
+                )
+                if title
+                else None
+            ),
             sliders=[
                 {
                     "active": 0,

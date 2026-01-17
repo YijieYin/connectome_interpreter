@@ -9,6 +9,7 @@ from connectome_interpreter.path_finding import (
     find_paths_of_length,
     enumerate_paths,
     find_shortest_paths,
+    count_paths,
 )
 
 import numpy as np
@@ -380,6 +381,75 @@ class TestEnumeratePathsBetweenLayers(unittest.TestCase):
         df = self.mk_df(edges)
         paths = enumerate_paths(df, 1, 2)
         self.assertEqual(paths[0], [(0, "a", 0.3), ("a", 2, 0.7)])
+    
+    # ------------------------ generator tests
+    def test_generator_simple_chain(self):
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("b", "c", 2.0, 2),
+        ]
+        df = self.mk_df(edges)
+        paths_gen = enumerate_paths(df, 1, 2, return_generator=True)
+        paths = list(paths_gen)
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(paths[0], [("a", "b", 1.0), ("b", "c", 2.0)])
+
+    def test_generator_branching(self):
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("a", "d", 1.0, 1),
+            ("b", "c", 1.0, 2),
+            ("d", "c", 1.0, 2),
+        ]
+        df = self.mk_df(edges)
+        paths_gen = enumerate_paths(df, 1, 2, return_generator=True)
+        paths = list(paths_gen)
+        expected = {
+            (("a", "b", 1.0), ("b", "c", 1.0)),
+            (("a", "d", 1.0), ("d", "c", 1.0)),
+        }
+        self.assertEqual(self.to_set(paths), expected)
+
+    def test_generator_equals_list_output(self):
+        """Ensure generator produces same results as list version"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("a", "c", 2.0, 1),
+            ("b", "d", 3.0, 2),
+            ("c", "d", 4.0, 2),
+            ("c", "e", 5.0, 2),
+            ("d", "f", 6.0, 3),
+            ("e", "f", 7.0, 3),
+        ]
+        df = self.mk_df(edges)
+
+        list_paths = enumerate_paths(df, 1, 3, return_generator=False)
+        gen_paths = list(enumerate_paths(df, 1, 3, return_generator=True))
+
+        self.assertEqual(self.to_set(list_paths), self.to_set(gen_paths))
+
+    def test_generator_empty_result(self):
+        """Test generator returns empty when no paths exist"""
+        edges = [
+            ("p", "q", 1, 1),
+            ("q", "r", 1, 3),  # layer 2 missing
+        ]
+        df = self.mk_df(edges)
+        paths_gen = enumerate_paths(df, 1, 3, return_generator=True)
+        paths = list(paths_gen)
+        self.assertEqual(paths, [])
+
+    def test_generator_is_lazy(self):
+        """Test that generator doesn't compute all paths upfront"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("b", "c", 2.0, 2),
+        ]
+        df = self.mk_df(edges)
+        paths_gen = enumerate_paths(df, 1, 2, return_generator=True)
+        # Generator should be returned without computing paths
+        self.assertTrue(hasattr(paths_gen, "__iter__"))
+        self.assertTrue(hasattr(paths_gen, "__next__"))
 
 
 class TestFindShortestPaths(unittest.TestCase):
@@ -535,3 +605,143 @@ class TestFindShortestPaths(unittest.TestCase):
             self.assertTrue(
                 edge_exists, f"Edge {path[i]} -> {path[i+1]} not found in graph"
             )
+    
+class TestCountPaths(unittest.TestCase):
+    # -------------------------- helpers
+    @staticmethod
+    def mk_df(edges):
+        return pd.DataFrame(edges, columns=["pre", "post", "weight", "layer"])
+
+    # ------------------------ correctness
+    def test_simple_chain(self):
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("b", "c", 2.0, 2),
+        ]
+        df = self.mk_df(edges)
+        count = count_paths(df, 1, 2)
+        self.assertEqual(count, 1)
+
+    def test_branching_two_paths(self):
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("a", "d", 1.0, 1),
+            ("b", "c", 1.0, 2),
+            ("d", "c", 1.0, 2),
+        ]
+        df = self.mk_df(edges)
+        count = count_paths(df, 1, 2)
+        self.assertEqual(count, 2)
+
+    def test_convergent_paths(self):
+        """Test diamond pattern: a->b->d, a->c->d (2 paths)"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("a", "c", 1.0, 1),
+            ("b", "d", 1.0, 2),
+            ("c", "d", 1.0, 2),
+        ]
+        df = self.mk_df(edges)
+        count = count_paths(df, 1, 2)
+        self.assertEqual(count, 2)
+
+    def test_complex_graph(self):
+        """Test more complex graph with multiple paths"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("a", "c", 2.0, 1),
+            ("b", "d", 3.0, 2),
+            ("c", "d", 4.0, 2),
+            ("c", "e", 5.0, 2),
+            ("d", "f", 6.0, 3),
+            ("e", "f", 7.0, 3),
+        ]
+        df = self.mk_df(edges)
+        count = count_paths(df, 1, 3)
+        # Paths: a->b->d->f, a->c->d->f, a->c->e->f
+        self.assertEqual(count, 3)
+
+    def test_default_end_layer(self):
+        edges = [
+            ("x", "y", 1, 1),
+            ("y", "z", 1, 2),
+            ("z", "w", 1, 3),
+        ]
+        df = self.mk_df(edges)
+        count = count_paths(df)  # end_layer defaults to max
+        self.assertEqual(count, 1)
+
+    def test_no_paths_due_to_gap(self):
+        edges = [
+            ("p", "q", 1, 1),
+            ("q", "r", 1, 3),  # layer 2 missing
+        ]
+        df = self.mk_df(edges)
+        count = count_paths(df, 1, 3)
+        self.assertEqual(count, 0)
+
+    def test_start_equals_end_layer(self):
+        edges = [
+            ("m", "n", 0.5, 2),
+            ("o", "p", 1.0, 2),
+        ]
+        df = self.mk_df(edges)
+        count = count_paths(df, 2, 2)
+        self.assertEqual(count, 2)
+
+    def test_invalid_layer_order_raises(self):
+        df = self.mk_df([("a", "b", 1, 1), ("b", "c", 1, 2)])
+        with self.assertRaises(ValueError):
+            count_paths(df, 3, 2)
+
+    def test_count_matches_enumerate(self):
+        """Verify count_paths matches the actual number of enumerated paths"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("a", "c", 2.0, 1),
+            ("b", "d", 3.0, 2),
+            ("b", "e", 3.5, 2),
+            ("c", "d", 4.0, 2),
+            ("c", "e", 4.5, 2),
+            ("d", "f", 5.0, 3),
+            ("e", "f", 6.0, 3),
+        ]
+        df = self.mk_df(edges)
+
+        count = count_paths(df, 1, 3)
+        paths = enumerate_paths(df, 1, 3)
+
+        self.assertEqual(count, len(paths))
+
+    def test_large_branching_factor(self):
+        """Test with many branches to verify efficiency"""
+        edges = []
+        # Layer 1: single source to 3 nodes
+        for i in range(3):
+            edges.append(("src", f"m{i}", 1.0, 1))
+        # Layer 2: each middle node to 3 targets
+        for i in range(3):
+            for j in range(3):
+                edges.append((f"m{i}", f"t{j}", 1.0, 2))
+
+        df = self.mk_df(edges)
+        count = count_paths(df, 1, 2)
+        # 3 middle nodes × 3 targets = 9 paths
+        self.assertEqual(count, 9)
+
+    def test_empty_graph(self):
+        """Test with no edges"""
+        df = self.mk_df([])
+        count = count_paths(df, 1, 2)
+        self.assertEqual(count, 0)
+
+    def test_single_layer_multiple_edges(self):
+        """Test counting paths within a single layer"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("c", "d", 2.0, 1),
+            ("e", "f", 3.0, 1),
+        ]
+        df = self.mk_df(edges)
+        count = count_paths(df, 1, 1)
+        self.assertEqual(count, 3)

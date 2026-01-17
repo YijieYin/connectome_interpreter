@@ -1,9 +1,10 @@
 # Standard library imports
-from itertools import product
+from itertools import product, combinations
 import math
 from typing import List, Optional, Union
 import os
 import gc
+from functools import reduce
 
 # Third-party package imports
 import ipywidgets as widgets
@@ -27,6 +28,8 @@ from .utils import (
     arrayable,
     scipy_sparse_to_pytorch,
 )
+
+from .path_finding import group_paths, remove_excess_neurons, filter_paths
 
 
 def compress_paths(
@@ -2110,8 +2113,8 @@ def effective_conn_from_paths(
     }
     local_to_global_idx = {i: idx for idx, i in local_idx_dict.items()}
 
-    paths["pre_idx"] = paths.pre.map(local_idx_dict)
-    paths["post_idx"] = paths.post.map(local_idx_dict)
+    paths.loc[:, ["pre_idx"]] = paths.pre.map(local_idx_dict)
+    paths.loc[:, ["post_idx"]] = paths.post.map(local_idx_dict)
 
     m = len(local_idx_dict)
     if use_gpu:
@@ -2440,7 +2443,7 @@ def signed_effective_conn_from_paths(
                 "Warning: some neurons are not in idx_to_nt. Their outputs "
                 "will be ignored"
             )
-        paths.loc[:, "sign"] = paths.pre.map(idx_to_nt)
+        paths.loc[:, ["sign"]] = paths.pre.map(idx_to_nt)
 
     # matmul with sparse matrices
     for i, layer in enumerate(sorted(paths.layer.unique())):
@@ -2529,6 +2532,205 @@ def signed_effective_conn_from_paths(
         result_el_i.fillna(0, inplace=True)
 
     return result_el_e, result_el_i
+
+
+def effconn_without_loops(
+    paths: pd.DataFrame,
+    pre_group: Optional[dict] = None,
+    post_group: Optional[dict] = None,
+    intermediate_group: Optional[dict] = None,
+    wide: bool = True,
+    combining_method: str = "mean",
+    chunk_size: int = 2000,  # rows per chunk
+    density_threshold: float = 0.2,
+    use_gpu: bool = True,
+    root: bool = False,
+    remove_loop_before_grouping: bool = True,
+):
+    """Calculate the effective connectivity from the paths Dataframe (which could be an
+    output of `find_paths_of_length()`), from the 'pre' in the earliest layer, to the
+    'post' in the latest layer, grouped by `pre_group`, `post_group`, and
+    `intermediate_group`, excluding paths that contain loops (i.e., paths that
+    revisit the same neuron).
+
+    Args:
+        paths (pd.DataFrame): DataFrame containing the paths with columns: 'pre', 'post',
+            'weight', and 'layer'. The 'pre' and 'post' columns represent the
+            presynaptic and postsynaptic neurons, respectively. The 'weight' column
+            represents the strength of the connection, and the 'layer' column indicates
+            the layer of the connection (starting from 1).
+        pre_group (dict): Mapping from presynaptic neuron indices (what's in the `pre`
+            column in paths) to their groups.
+        post_group (dict): Mapping from postsynaptic neuron indices to their groups.
+        intermediate_group (dict, optional): Mapping for intermediate neurons. Defaults
+            to None.
+        wide (bool, optional): If True, returns the result in wide format. If False,
+            returns in long format. Defaults to True.
+        combining_method (str, optional): Method to combine inputs or outputs based on
+            groups. Can be 'mean', 'median', or 'sum'. Defaults to 'mean'.
+        chunk_size (int, optional): Number of rows to process in each chunk when using
+            GPU. Defaults to 2000.
+        density_threshold (float, optional): Threshold for converting sparse matrices to
+            dense. If the density of the matrix exceeds this value, it will be converted
+            to a dense matrix to save memory. Defaults to 0.2.
+        use_gpu (bool, optional): Whether to use GPU for computation. Defaults to True.
+            If GPU is not available, it will fall back to CPU.
+        root (bool, optional): If True, take the nth root of the effective connectivity
+            values (where n is the number of steps/layers). This transforms the output
+            from "total influence" to "average connection strength per step". Defaults
+            to False.
+        remove_loop_before_grouping (bool, optional): Whether to remove loops before
+            grouping the paths. Defaults to True.
+
+    Returns:
+        pd.DataFrame: A DataFrame summarizing the effective connectivity between
+        presynaptic and postsynaptic groups, excluding loops.
+    """
+    if len(paths) == 0:
+        return None
+
+    # Validate required columns
+    required_columns = {"layer", "pre", "post", "weight"}
+    missing = required_columns - set(paths.columns)
+    if missing:
+        raise ValueError(
+            f"paths DataFrame missing required columns: {missing}. "
+            f"Available columns: {list(paths.columns)}"
+        )
+
+    if not remove_loop_before_grouping:
+        # group first
+        paths = group_paths(
+            paths,
+            pre_group,
+            post_group,
+            intermediate_group,
+            combining_method=combining_method,
+        )
+
+    # count number of layer per node
+    node_layer = paths[["layer", "pre"]].rename(columns={"pre": "node"})
+    last_layer = paths.loc[paths.layer == paths.layer.max(), ["layer", "post"]].rename(
+        columns={"post": "node"}
+    )
+    last_layer["layer"] += 1
+    node_layer = pd.concat(
+        [node_layer, last_layer], ignore_index=True
+    ).drop_duplicates()
+    n_layer_per_node = node_layer.groupby("node").layer.nunique()
+    loop_nodes = n_layer_per_node[n_layer_per_node > 1].index.tolist()
+
+    # if no loops
+    if len(loop_nodes) == 0:
+        if not remove_loop_before_grouping:
+            # then already grouped
+            return effective_conn_from_paths(
+                paths,
+                wide=wide,
+                chunk_size=chunk_size,
+                density_threshold=density_threshold,
+                use_gpu=use_gpu,
+                root=root,
+            )
+        else:
+            return effective_conn_from_paths(
+                paths,
+                pre_group=pre_group,
+                post_group=post_group,
+                intermediate_group=intermediate_group,
+                wide=wide,
+                combining_method=combining_method,
+                chunk_size=chunk_size,
+                density_threshold=density_threshold,
+                use_gpu=use_gpu,
+                root=root,
+            )
+
+    # calculate original effective connectivity (with loops)
+    effconn = effective_conn_from_paths(paths)
+
+    # get effective connectivity contributed by loops
+    filtered_effconn = {}
+    for loop_node in loop_nodes:
+        filtered_effconn[loop_node] = {}
+        dup_node = node_layer[node_layer.node == loop_node]
+        # get all combinations of at least two elements from dup_node.layer
+        for n_dup in range(2, dup_node.shape[0] + 1):
+            for comb in combinations(dup_node.layer, n_dup):
+                # either ,
+                paths_filter = paths[
+                    # in selected layers for loop_node
+                    ((paths.pre == loop_node) & (paths.layer.isin(comb)))
+                    # or not loop_node at all
+                    | (paths.pre != loop_node)
+                    # or loop_node at the last layer
+                    | (
+                        (paths.layer.max() in comb)
+                        & (paths.layer == paths.layer.max())
+                        & (paths.post == loop_node)
+                    )
+                ]
+                paths_filter = remove_excess_neurons(paths_filter, quiet=True)
+                if (paths_filter is not None) and (
+                    paths_filter.layer.nunique() == paths.layer.nunique()
+                ):
+                    paths_filter = filter_paths(
+                        paths_filter,
+                        necessary_intermediate={l: [loop_node] for l in comb},
+                        quiet=True,
+                    )
+                    if (paths_filter is not None) and (
+                        paths_filter.layer.nunique() == paths.layer.nunique()
+                    ):
+                        # only get effective connectivity if still paths from start to target
+                        filtered_effconn[loop_node][comb] = effective_conn_from_paths(
+                            paths_filter,
+                            chunk_size=chunk_size,
+                            density_threshold=density_threshold,
+                            use_gpu=use_gpu,
+                            root=root,
+                        )
+
+    # put results together
+    filtered_effconn_list = []
+    for node, effconn_dict in filtered_effconn.items():
+        for _, this_effconn in effconn_dict.items():
+            filtered_effconn_list.append(this_effconn)
+
+    # Handle empty list case - if no loop contributions found, return original
+    if len(filtered_effconn_list) == 0:
+        effconn_noloop = effconn
+    else:
+        effconn_w_loops = reduce(
+            lambda a, b: a.add(b, fill_value=0), filtered_effconn_list
+        ).fillna(0)
+        # make sure effconn_w_loops has all indices in effconn
+        effconn_w_loops = effconn_w_loops.reindex(
+            index=effconn.index, columns=effconn.columns, fill_value=0
+        )
+        effconn_noloop = effconn - effconn_w_loops
+    effconn_noloop_long = effconn_noloop.reset_index().melt(
+        id_vars="pre", var_name="post", value_name="weight"
+    )
+
+    if remove_loop_before_grouping:  # then the time to group is now
+        effconn_noloop_long = group_paths(
+            effconn_noloop_long,
+            pre_group,
+            post_group,
+            intermediate_group,
+            combining_method=combining_method,
+        )
+        if wide:
+            effconn_noloop = effconn_noloop_long.pivot(
+                index="pre", columns="post", values="weight"
+            )
+            effconn_noloop.fillna(0, inplace=True)
+
+    if wide:
+        return effconn_noloop
+    else:
+        return effconn_noloop_long
 
 
 def read_precomputed(

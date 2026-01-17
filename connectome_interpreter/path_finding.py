@@ -1,7 +1,7 @@
 # Standard library imports
 import itertools
 from dataclasses import dataclass
-from typing import Dict, List, Union, Tuple, Optional
+from typing import Dict, List, Union, Tuple, Optional, Generator
 from collections import defaultdict
 
 # Third-party package imports
@@ -153,6 +153,7 @@ def find_paths_of_length(
     inidx: arrayable,
     outidx: arrayable,
     target_layer_number: int,
+    quiet: bool = False,
 ):
     """
     Finds the path of length target_layer_number between inidx and outidx, returning the
@@ -233,7 +234,8 @@ def find_paths_of_length(
             edgelist[edgelist["pre"].isin(layer_indices[layer - 1])]["post"].unique()
         )
         if len(layer_indices[layer]) == 0:
-            print(f"No neurons found in layer {layer}. Returning None.")
+            if not quiet:
+                print(f"No neurons found in layer {layer}. Returning None.")
             return None
     # then go from outidx to middle layer
     # stopping at the layer after middle_layer
@@ -244,7 +246,8 @@ def find_paths_of_length(
             edgelist[edgelist["post"].isin(layer_indices[layer + 1])]["pre"].unique()
         )
         if len(layer_indices[layer]) == 0:
-            print(f"No neurons found in layer {layer}. Returning None.")
+            if not quiet:
+                print(f"No neurons found in layer {layer}. Returning None.")
             return None
 
     # link middle layer with the one after
@@ -258,9 +261,10 @@ def find_paths_of_length(
         len(layer_indices[middle_layer]) == 0
         or len(layer_indices[middle_layer + 1]) == 0
     ):
-        print(
-            f"No neurons found in layer {middle_layer} or {middle_layer + 1}. Returning None."
-        )
+        if not quiet:
+            print(
+                f"No neurons found in layer {middle_layer} or {middle_layer + 1}. Returning None."
+            )
         return None
 
     # now go from middle layer to the first layer
@@ -271,7 +275,8 @@ def find_paths_of_length(
         ]
         layer_indices[layer] = el["pre"].unique()
         if len(layer_indices[layer]) == 0:
-            print(f"No neurons found in layer {layer}. Returning None.")
+            if not quiet:
+                print(f"No neurons found in layer {layer}. Returning None.")
             return None
     # now go from middle layer to the last layer
     for layer in range(middle_layer + 1, target_layer_number):
@@ -281,7 +286,8 @@ def find_paths_of_length(
         ]
         layer_indices[layer] = el["post"].unique()
         if len(layer_indices[layer]) == 0:
-            print(f"No neurons found in layer {layer}. Returning None.")
+            if not quiet:
+                print(f"No neurons found in layer {layer}. Returning None.")
             return None
 
     # add the weights
@@ -300,7 +306,11 @@ def enumerate_paths(
     edgelist: pd.DataFrame,
     start_layer: int = 1,
     end_layer: Optional[int] = None,
-) -> List[List[Tuple[Union[str, int], Union[str, int], float]]]:
+    return_generator: bool = False,
+) -> Union[
+    List[List[Tuple[Union[str, int], Union[str, int], float]]],
+    Generator[List[Tuple[Union[str, int], Union[str, int], float]], None, None],
+]:
     """
     Finds all paths that begin with an edge in start_layer and end with an edge in
     end_layer, assuming valid paths proceed layer-by-layer without skipping.
@@ -312,10 +322,13 @@ def enumerate_paths(
       start_layer (int): The layer from which all paths must begin. Must be <= end_layer.
       end_layer (int): The layer at which all paths must terminate. If None, defaults to
         the maximum layer in the edgelist.
+      return_generator (bool, optional): If True, returns a generator instead of a list.
+        Useful for large graphs to avoid memory issues. Defaults to False.
 
     Returns:
-      List[List[Tuple[Union[str, int], Union[str, int], float]]]: A list of valid paths.
-        Each path is a list of (pre, post, weight) tuples, ordered from start to end.
+      Union[List[List[Tuple]], Generator]: If return_generator is False, returns a list
+        of valid paths. If True, returns a generator. Each path is a list of
+        (pre, post, weight) tuples, ordered from start to end.
     """
     if end_layer is None:
         end_layer = edgelist["layer"].max()
@@ -330,26 +343,49 @@ def enumerate_paths(
     for _, row in edgelist.iterrows():
         adj[row["layer"]][row["pre"]].append((row["post"], row["weight"]))
 
-    # list of paths
-    # path: list of edges (pre, post, weight)
-    paths: List[List[Tuple[Union[str, int], Union[str, int], float]]] = []
+    if return_generator:
+        # Generator version - yields paths as they are found
+        def generate_paths():
+            def dfs(
+                node: Union[str, int],
+                layer: int,
+                path: List[Tuple[Union[str, int], Union[str, int], float]],
+            ):
+                if layer == end_layer:
+                    yield path.copy()  # yield a copy to avoid mutation issues
+                    return
+                for post, wt in adj.get(layer + 1, {}).get(node, []):
+                    path.append((node, post, wt))
+                    yield from dfs(post, layer + 1, path)
+                    path.pop()
 
-    def dfs(
-        node: Union[str, int],
-        layer: int,
-        path: List[Tuple[Union[str, int], Union[str, int], float]],
-    ):
-        if layer == end_layer:
-            paths.append(path)
-            return
-        for post, wt in adj.get(layer + 1, {}).get(node, []):
-            dfs(post, layer + 1, path + [(node, post, wt)])
+            for pre, edges in adj.get(start_layer, {}).items():
+                for post, wt in edges:
+                    yield from dfs(post, start_layer, [(pre, post, wt)])
 
-    for pre, edges in adj.get(start_layer, {}).items():
-        for post, wt in edges:
-            dfs(post, start_layer, [(pre, post, wt)])
+        return generate_paths()
+    else:
+        # List version - uses mutable path for efficiency (append/pop instead of copying)
+        paths: List[List[Tuple[Union[str, int], Union[str, int], float]]] = []
 
-    return paths
+        def dfs(
+            node: Union[str, int],
+            layer: int,
+            path: List[Tuple[Union[str, int], Union[str, int], float]],
+        ):
+            if layer == end_layer:
+                paths.append(path.copy())  # append a copy to avoid mutation
+                return
+            for post, wt in adj.get(layer + 1, {}).get(node, []):
+                path.append((node, post, wt))
+                dfs(post, layer + 1, path)
+                path.pop()
+
+        for pre, edges in adj.get(start_layer, {}).items():
+            for post, wt in edges:
+                dfs(post, start_layer, [(pre, post, wt)])
+
+        return paths
 
 
 def find_path_iteratively(
@@ -360,6 +396,7 @@ def find_path_iteratively(
     target_layer_number: int,
     top_n: int = -1,
     threshold: float = 0,
+    quiet: bool = False,
 ):
     """
     Iteratively finds the path from the specified output (outidx) back to the
@@ -383,6 +420,7 @@ def find_path_iteratively(
         connections are considered.
       threshold (float, optional): The threshold for the average of the direct
         connectivity from inidx to outidx.
+      quiet (bool, optional): If True, suppresses print statements. Defaults to False.
 
     Returns:
         pd.DataFrame: A DataFrame containing the path data, including the
@@ -392,9 +430,10 @@ def find_path_iteratively(
             between pre and post.
     """
 
-    print(
-        'Have you tried "find_paths_of_length()" instead? About the same speed, no need to pre-load `steps`, and more accurate!'
-    )
+    if not quiet:
+        print(
+            'Have you tried "find_paths_of_length()" instead? About the same speed, no need to pre-load `steps`, and more accurate!'
+        )
 
     inprop_csc.data = np.abs(inprop_csc.data)
     inidx = to_nparray(inidx)
@@ -428,9 +467,10 @@ def find_path_iteratively(
 
         # If no indices are found, break the loop as no path can be formed
         if len(df) == 0:
-            print(f"Cannot trace back to the input in {target_layer_number} steps.")
-            if (top_n > -1) | (threshold > 0):
-                print("Try lowering the threshold or increasing top_n.")
+            if not quiet:
+                print(f"Cannot trace back to the input in {target_layer_number} steps.")
+                if (top_n > -1) | (threshold > 0):
+                    print("Try lowering the threshold or increasing top_n.")
             return
 
         df["layer"] = layer
@@ -532,13 +572,15 @@ def remove_excess_neurons(
     keep=None,
     target_indices=None,
     keep_targets_in_middle: bool = False,
+    quiet: bool = False,
 ) -> pd.DataFrame:
     """After filtering, some neurons are no longer on the paths between the input and
     output neurons. This function removes those neurons from the paths.
 
     Args:
         df (pd.Dataframe): a filtered dataframe with similar structure as the dataframe
-            returned by `find_paths_of_length()`.
+            returned by `find_paths_of_length()`. If df is empty, and `quiet` is False,
+            raises a ValueError. If `quiet` is True, returns None.
         keep (list, set, pd.Series, numpy.ndarray, str, optional): A list of neuron
             indices that should be kept in the paths, even if they don't connect between
             input and target in the last layer. Defaults to None.
@@ -556,10 +598,13 @@ def remove_excess_neurons(
     """
 
     if df.shape[0] == 0:
-        # raise error
-        raise ValueError(
-            "No connections found in the input of `remove_excess_neurons()`. "
-        )
+        if quiet:
+            return
+        else:
+            # raise error
+            raise ValueError(
+                "No connections found in the input of `remove_excess_neurons()`. "
+            )
 
     max_layer_num = df["layer"].max()
     if max_layer_num == 1:
@@ -588,10 +633,11 @@ def remove_excess_neurons(
 
     # check if all layer numbers are consecutive ----
     if not check_consecutive_layers(df):
-        print(
-            "Warning: The layer numbers are not consecutive. Will only use the"
-            " consecutive layers from the last one."
-        )
+        if not quiet:
+            print(
+                "Warning: The layer numbers are not consecutive. Will only use the"
+                " consecutive layers from the last one."
+            )
         selected = []
         # get the consecutive layers from the last one
         for l in range(df["layer"].max(), 0, -1):
@@ -608,10 +654,11 @@ def remove_excess_neurons(
 
     elif df["layer"].min() != 1:
         # if the layer numbers do not start from 1
-        print(
-            "Warning: The layer numbers do not start from 1. Will only use the "
-            "consecutive layers from the last one."
-        )
+        if not quiet:
+            print(
+                "Warning: The layer numbers do not start from 1. Will only use the "
+                "consecutive layers from the last one."
+            )
         global_to_local_layer_number = {
             l: i for i, l in enumerate(sorted(df["layer"].unique()))
         }
@@ -697,9 +744,10 @@ def remove_excess_neurons(
                 ]
 
                 if df_layer.shape[0] == 0:
-                    print(
-                        "No path found. Try lowering the threshold for the edges to be included in the path."
-                    )
+                    if not quiet:
+                        print(
+                            "No path found. Try lowering the threshold for the edges to be included in the path."
+                        )
                     return
                 df_layers_update.append(df_layer)
 
@@ -721,16 +769,18 @@ def remove_excess_neurons(
 
         # at this point, if no edges left: return None
         if df.shape[0] == 0:
-            print("No path found. Try relaxing the criteria for edge inclusion.")
+            if not quiet:
+                print("No path found. Try relaxing the criteria for edge inclusion.")
             return
 
-    df.drop(columns="local_layer", inplace=True)
+    df = df.loc[:, df.columns != "local_layer"]
 
     # in case we removed all the connections in the last layer
     if df["layer"].max() != max_layer_num:
-        print(
-            "No path found. Try lowering the threshold for the edges to be included in the path."
-        )
+        if not quiet:
+            print(
+                "No path found. Try lowering the threshold for the edges to be included in the path."
+            )
         return
     return df
 
@@ -740,30 +790,28 @@ def remove_excess_neurons_batched(
     keep=None,
     target_indices=None,
     keep_targets_in_middle: bool = False,
+    quiet: bool = False,
 ) -> pd.DataFrame:
     """Does the same thing as `remove_excess_neurons()`, but for batched input
     (i.e. assumes column `batch` in `df`).
 
     Args:
-        df (pd.DataFrame): a filtered dataframe with similar structure as the
-            dataframe returned by `find_path_iteratively()`. Must contain a
-            column `batch`.
-        keep (list, set, pd.Series, numpy.ndarray, str, optional): A list of
-            neuron indices that should be kept in the paths, even if they don't
-            connect between input and target in the last layer. Defaults to
-            None.
-        target_indices (list, set, pd.Series, numpy.ndarray, str, optional): A
-            list of target neuron indices that should be kept in the last
-            layer. Defaults to None, in which case all neurons in the last
-            layer in `df` would be kept.
-        keep_targets_in_middle (bool, optional): If True, the target_indices
-            are kept in the middle layers as well, even if they don't connect
-            between input and target in the last layer. Defaults to False.
+        df (pd.DataFrame): a filtered dataframe with similar structure as the dataframe
+            returned by `find_path_iteratively()`. Must contain a column `batch`.
+        keep (list, set, pd.Series, numpy.ndarray, str, optional): A list of neuron
+            indices that should be kept in the paths, even if they don't connect between
+            input and target in the last layer. Defaults to None.
+        target_indices (list, set, pd.Series, numpy.ndarray, str, optional): A list of
+            target neuron indices that should be kept in the last layer. Defaults to
+            None, in which case all neurons in the last layer in `df` would be kept.
+        keep_targets_in_middle (bool, optional): If True, the target_indices are kept in
+            the middle layers as well, even if they don't connect between input and
+            target in the last layer. Defaults to False.
+        quiet (bool, optional): If True, suppresses print statements. Defaults to False.
 
     Returns:
-        pd.DataFrame: The filtered DataFrame containing the path data,
-            including the layer number, pre-synaptic index, post-synaptic
-            index, and weight
+        pd.DataFrame: The filtered DataFrame containing the path data, including the
+            layer number, pre-synaptic index, post-synaptic index, and weight
     """
     # first check if 'batch' is in the columns
     if "batch" not in df.columns:
@@ -773,7 +821,7 @@ def remove_excess_neurons_batched(
     for b in tqdm(df.batch.unique()):
         df_batch = df[df.batch == b]
         df_batch = remove_excess_neurons(
-            df_batch, keep, target_indices, keep_targets_in_middle
+            df_batch, keep, target_indices, keep_targets_in_middle, quiet=quiet
         )
         dfs.append(df_batch)
     return pd.concat(dfs)
@@ -783,6 +831,7 @@ def filter_paths(
     df: pd.DataFrame,
     threshold: float = 0,
     necessary_intermediate: Dict[int, arrayable] | None = None,
+    quiet: bool = False,
 ) -> pd.DataFrame:
     """Filters the paths based on the weight threshold and the necessary
     intermediate neurons. The weight threshold refers to the direct
@@ -791,40 +840,42 @@ def filter_paths(
     stringent and remove all paths.
 
     Args:
-        df (pd.DataFrame): The DataFrame containing the path data, including
-            the layer number, pre-synaptic index, post-synaptic index, and
-            weight.
-        threshold (float, optional): The threshold for the weight of the
-            direct connection between pre and post. Defaults to 0.
-        necessary_intermediate (dict, optional): A dictionary of necessary
-            intermediate neurons, where the keys are the layer numbers
-            (starting neurons: 1; directly downstream: 2) and the values are
-            the neuron indices (can be int, float, list, set, numpy.ndarray,
-            or pandas.Series). Defaults to None.
+        df (pd.DataFrame): The DataFrame containing the path data, including the layer
+            number, pre-synaptic index, post-synaptic index, and weight. If df is empty,
+            and `quiet` is False, raises a ValueError. If `quiet` is True, returns None.
+        threshold (float, optional): The threshold for the weight of the direct
+            connection between pre and post. Defaults to 0.
+        necessary_intermediate (dict, optional): A dictionary of necessary intermediate
+            neurons, where the keys are the layer numbers (starting neurons: 1; directly
+            downstream: 2) and the values are the neuron indices (can be int, float,
+            list, set, numpy.ndarray, or pandas.Series). Defaults to None.
 
     Returns:
-        pd.DataFrame: The filtered DataFrame containing the path data,
-            including the layer number, pre-synaptic index, post-synaptic
-            index, and weight.
+        pd.DataFrame: The filtered DataFrame containing the path data, including the
+            layer number, pre-synaptic index, post-synaptic index, and weight.
     """
     if df.shape[0] == 0:
-        # raise error
-        raise ValueError("The input DataFrame for filter_paths() is empty! ")
+        if quiet:
+            return
+        else:  # raise error
+            raise ValueError("The input DataFrame for filter_paths() is empty! ")
+
+    unique_layers = set(df.layer)
 
     if threshold > 0:
-        max_layer_num = df["layer"].max()
         df = df[df.weight > threshold]
         if df.shape[0] == 0:
-            print("No edges left after thresholding. Try lowering the threshold.")
+            if not quiet:
+                print("No edges left after thresholding. Try lowering the threshold.")
             return
-        elif df["layer"].max() != max_layer_num:
-            print(
-                "No edges left in the last layer after thresholding."
-                "Try lowering the threshold."
-            )
+        elif set(df["layer"]) != unique_layers:
+            if not quiet:
+                print(
+                    "Some layers have no edges left after thresholding. Try lowering the threshold."
+                )
             return
 
-        df = remove_excess_neurons(df)
+        df = remove_excess_neurons(df, quiet=quiet)
 
     if necessary_intermediate is not None:
         for layer, indices in necessary_intermediate.items():
@@ -844,7 +895,13 @@ def filter_paths(
                 # error: layer number too big
                 raise ValueError("Layer number too big")
 
-        df = remove_excess_neurons(df)
+            if set(df["layer"]) != unique_layers:
+                if not quiet:
+                    print(
+                        "Some layers have no edges left after applying necessary_intermediate."
+                    )
+                return
+            df = remove_excess_neurons(df, quiet=quiet)
     return df
 
 
@@ -859,9 +916,12 @@ def group_paths(
 ) -> pd.DataFrame:
     """
     Group the paths by user-specified variable (e.g. cell type, cell class etc.).
-    Weights are summed across presynaptic neurons of the same group and averaged across
-    all postsynaptic neurons of the same group (even if some postsynaptic neurons are
-    not in `paths`).
+    If outprop=False, weights are summed across presynaptic neurons of the same group
+    and combined across all postsynaptic neurons of the same group using combining_method
+    (even if some postsynaptic neurons are not in `paths`).
+    If outprop=True, weights are summed across postsynaptic neurons of the same group
+    and combined across all presynaptic neurons of the same group using combining_method
+    (even if some presynaptic neurons are not in `paths`).
 
     Args:
         paths (pd.DataFrame): The DataFrame containing the path data, looking
@@ -1369,6 +1429,7 @@ def path_for_ngl(path):
 def connected_components(
     paths: pd.DataFrame,
     threshold: float = 0,
+    quiet: bool = False,
 ) -> list:
     """
     Find connected components in a directed graph represented by a DataFrame of paths.
@@ -1407,7 +1468,7 @@ def connected_components(
     for i, component in enumerate(weak_components):
         path = paths[paths.pre.isin(component) & paths.post.isin(component)]
         path.loc[:, ["component_idx"]] = i
-        path = remove_excess_neurons(path)
+        path = remove_excess_neurons(path, quiet=quiet)
         components.append(path)
     return components
 
@@ -1600,3 +1661,58 @@ def find_shortest_paths(
                     shortest_paths.append(path)
 
     return shortest_paths
+  
+  
+def count_paths(
+    edgelist: pd.DataFrame,
+    start_layer: int = 1,
+    end_layer: Optional[int] = None,
+) -> int:
+    """
+    Counts all paths without materializing them in memory.
+    Uses memoization to avoid redundant computation.
+
+    Args:
+      edgelist (pd.DataFrame): Must contain "layer", "pre", "post" columns.
+      start_layer (int): Starting layer.
+      end_layer (int): Ending layer. If None, uses max layer.
+
+    Returns:
+      int: Total number of valid paths.
+    """
+    if end_layer is None:
+        end_layer = edgelist["layer"].max()
+    if start_layer > end_layer:
+        raise ValueError("start_layer must be less than or equal to end_layer.")
+
+    # Build adjacency
+    adj: Dict[int, Dict[Union[str, int], List]] = defaultdict(lambda: defaultdict(list))
+    for _, row in edgelist.iterrows():
+        adj[row["layer"]][row["pre"]].append(row["post"])
+
+    memo = {}
+
+    def dfs(node: Union[str, int], layer: int) -> int:
+        # Memoization - crucial for graphs with convergent paths
+        if (node, layer) in memo:
+            return memo[(node, layer)]
+
+        # add 1 when reaches the end
+        if layer == end_layer:
+            return 1
+
+        count = 0
+        # iterate over all postsynaptic nodes
+        for post in adj.get(layer + 1, {}).get(node, []):
+            # iterate over their postsynaptic nodes
+            count += dfs(post, layer + 1)
+
+        memo[(node, layer)] = count
+        return count
+
+    path_count = 0
+    for pre in adj.get(start_layer, {}):
+        for post in adj.get(start_layer, {}).get(pre, []):
+            path_count += dfs(post, start_layer)
+
+    return path_count
