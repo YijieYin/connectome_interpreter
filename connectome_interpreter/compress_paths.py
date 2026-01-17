@@ -29,7 +29,12 @@ from .utils import (
     scipy_sparse_to_pytorch,
 )
 
-from .path_finding import group_paths, remove_excess_neurons, filter_paths
+from .path_finding import (
+    find_paths_of_length,
+    group_paths,
+    remove_excess_neurons,
+    filter_paths,
+)
 
 
 def compress_paths(
@@ -1787,8 +1792,6 @@ def conn_by_path_length_data(
     inidx = to_nparray(inidx)
     outidx = to_nparray(outidx)
 
-    from .path_finding import find_paths_of_length
-
     # if no grouping dict provided, group all together
     if inidx_map is None:
         inidx_map = {idx: "group" for idx in inidx}
@@ -1805,14 +1808,14 @@ def conn_by_path_length_data(
     rows = []
     for i in tqdm(range(n)):
         paths = find_paths_of_length(inprop, inidx, outidx, i + 1)
+        paths = group_paths(
+            inprop, inidx_map, outidx_map, combining_method=combining_method
+        )
 
         if paths is not None and not paths.empty:
             # has colunms: pre, post, weight
             df = effective_conn_from_paths(
                 paths,
-                pre_group=inidx_map,
-                post_group=outidx_map,
-                combining_method=combining_method,
                 wide=False,
                 chunk_size=chunk_size,
             )
@@ -2056,13 +2059,84 @@ def conn_by_path_length_heatmap(
     display(widgets.interactive(plot_heatmap, index=slider))
 
 
+def signed_conn_by_path_length_data(
+    inprop: spmatrix,
+    inidx: arrayable,
+    outidx: arrayable,
+    n: int,
+    group_to_sign: dict = None,
+    inidx_map: Optional[dict] = None,
+    outidx_map: Optional[dict] = None,
+    intermediate_map: Optional[dict] = None,
+    combining_method: str = "mean",
+    wide: bool = True,
+):
+    """Calculates the signed connectivity from all of inidx to outidx within `n` hops,
+    grouped by inidx_map and outidx_map, aggregated by `combining_method`. The sign of
+    each connection is determined by `group_to_sign`. Direct connections are in
+    path_length 1.
+
+    Args:
+        inprop (spmatrix): The connectivity matrix, with presynaptic in the rows.
+        inidx (int, float, list, set, numpy.ndarray, or pandas.Series): The source
+            indices.
+        outidx (int, float, list, set, numpy.ndarray, or pandas.Series): The target
+            indices.
+        n (int): The maximum number of hops. n=1 for direct connections.
+        group_to_sign (dict): Mapping from group names (the values in inidx_map and
+            outidx_map, or the indices themselves if no mapping is provided) to their
+            signs (+1 or -1).
+        inidx_map (dict): Mapping from indices to presynaptic neuron groups.
+        outidx_map (dict): Mapping from indices to postsynaptic neuron groups.
+        intermediate_map (dict, optional): Mapping from indices to intermediate neuron
+            groups. Defaults to None.
+        combining_method (str, optional): Method to combine inputs or outputs. Can be
+            'mean', 'median', or 'sum'. Defaults to 'mean'.
+        wide (bool, optional): Whether to return the result in wide format. If False,
+            the result will be in long format. Defaults to True.
+
+    Returns:
+        List[pd.DataFrame], List[pd.DataFrame]: Two lists of DataFrames. The first list
+        contains the excitatory effective connectivity DataFrames for each path length,
+        and the second list contains the inhibitory effective connectivity DataFrames
+        for each path length.
+    """
+
+    inidx = to_nparray(inidx)
+    outidx = to_nparray(outidx)
+
+    eees = []
+    iiis = []
+
+    for path_length in tqdm(range(n)):
+        paths = find_paths_of_length(inprop, inidx, outidx, path_length + 1)
+        paths = group_paths(
+            paths,
+            inidx_map,
+            outidx_map,
+            intermediate_group=intermediate_map,
+            combining_method=combining_method,
+        )
+
+        if paths is None or paths.empty:
+            # make empty dataframe
+            exc = pd.DataFrame()
+            inh = pd.DataFrame()
+        else:
+            exc, inh = signed_effective_conn_from_paths(
+                paths,
+                wide=wide,
+                idx_to_nt=group_to_sign,
+            )
+        eees.append(exc)
+        iiis.append(inh)
+
+    return eees, iiis
+
+
 def effective_conn_from_paths(
     paths: pd.DataFrame,
-    pre_group: Optional[dict] = None,
-    post_group: Optional[dict] = None,
-    intermediate_group: Optional[dict] = None,
     wide: bool = True,
-    combining_method: str = "mean",
     chunk_size: int = 2000,  # rows per chunk
     density_threshold: float = 0.2,
     use_gpu: bool = True,
@@ -2080,15 +2154,8 @@ def effective_conn_from_paths(
             presynaptic and postsynaptic neurons, respectively. The 'weight' column
             represents the strength of the connection, and the 'layer' column indicates
             the layer of the connection (starting from 1).
-        pre_group (dict): Mapping from presynaptic neuron indices (what's in the `pre`
-            column in paths) to their groups.
-        post_group (dict): Mapping from postsynaptic neuron indices to their groups.
-        intermediate_group (dict, optional): Mapping for intermediate neurons. Defaults
-            to None.
         wide (bool, optional): If True, returns the result in wide format. If False,
             returns in long format. Defaults to True.
-        combining_method (str, optional): Method to combine inputs or outputs. Can be
-            'mean', 'median', or 'sum'. Defaults to 'mean'.
         chunk_size (int, optional): Number of rows to process in each chunk when using
             GPU. Defaults to 2000.
         density_threshold (float, optional): Threshold for converting sparse matrices to
@@ -2281,16 +2348,6 @@ def effective_conn_from_paths(
     # --------------------------------------------------------------------- #
     # 4. back to edge-list, group, pivot
     # --------------------------------------------------------------------- #
-    from .path_finding import group_paths
-
-    if pre_group is not None or post_group is not None:
-        result_el = group_paths(
-            result_el,
-            pre_group,
-            post_group,
-            intermediate_group,
-            combining_method=combining_method,
-        )
 
     if wide:
         result_el = result_el.pivot(index="pre", columns="post", values="weight")
@@ -2301,11 +2358,7 @@ def effective_conn_from_paths(
 
 def effective_conn_from_paths_cpu(
     paths,
-    pre_group: dict,
-    post_group: dict,
-    intermediate_group: dict | None = None,
     wide=True,
-    combining_method: str = "mean",
 ):
     """Calculate the effective connectivity between (groups of) neurons based
     only on the provided `paths` between neurons. This function runs on CPU,
@@ -2314,18 +2367,8 @@ def effective_conn_from_paths_cpu(
     Args:
         paths (pd.DataFrame): A dataframe representing the paths between neurons, with
             columns 'pre', 'post', 'weight', and 'layer'.
-        pre_group (dict): A dictionary that maps pre-synaptic neuron indices to their
-            respective group.
-        post_group (dict): A dictionary that maps post-synaptic neuron indices to their
-            respective group.
-        intermediate_group (dict, optional): A dictionary that maps intermediate neuron
-            indices to their respective group. Defaults to None. If None, it will be set
-            to pre_group.
         wide (bool, optional): Whether to pivot the output dataframe to a wide format.
             Defaults to True.
-        combining_method (str, optional): Method to combine inputs (outprop=False) or
-            outputs (outprop=True). Can be 'sum', 'mean', or 'median'. Defaults to
-            'mean'.
 
     Returns:
         pd.DataFrame: A dataframe representing the effective connectivity between groups
@@ -2371,16 +2414,6 @@ def effective_conn_from_paths_cpu(
     result_el.loc[:, ["pre"]] = result_el.pre_idx.map(local_to_global_idx)
     result_el.loc[:, ["post"]] = result_el.post_idx.map(local_to_global_idx)
 
-    from .path_finding import group_paths
-
-    result_el = group_paths(
-        result_el,
-        pre_group,
-        post_group,
-        intermediate_group,
-        combining_method=combining_method,
-    )
-
     # pivot wider
     if wide:
         result_el = result_el.pivot(index="pre", columns="post", values="weight")
@@ -2391,12 +2424,8 @@ def effective_conn_from_paths_cpu(
 
 def signed_effective_conn_from_paths(
     paths,
-    pre_group: Optional[dict] = None,
-    post_group: Optional[dict] = None,
-    intermediate_group: dict | None = None,
     wide: bool = True,
     idx_to_nt: dict = None,
-    combining_method: str = "mean",
 ):
     """Calculate the *signed* effective connectivity between (groups of)
     neurons based only on the provided `paths` between neurons. This function
@@ -2406,8 +2435,6 @@ def signed_effective_conn_from_paths(
         paths (pd.DataFrame): A dataframe representing the paths between
             neurons, with columns 'pre', 'post', 'weight', 'layer', and
             optionally 'sign'.
-        group_dict (dict, optional): A dictionary mapping neuron indices
-            (values in columns `pre` and `post`) to groups. Defaults to None.
         wide (bool, optional): Whether to pivot the output dataframe to a wide
             format. Defaults to True.
         idx_to_nt (dict, optional): A dictionary mapping neuron indices
@@ -2506,24 +2533,6 @@ def signed_effective_conn_from_paths(
     result_el_e.loc[:, ["post"]] = result_el_e.post_idx.map(local_to_global_idx)
     result_el_i.loc[:, ["pre"]] = result_el_i.pre_idx.map(local_to_global_idx)
     result_el_i.loc[:, ["post"]] = result_el_i.post_idx.map(local_to_global_idx)
-
-    if pre_group is not None and post_group is not None:
-        from .path_finding import group_paths
-
-        result_el_e = group_paths(
-            result_el_e,
-            pre_group,
-            post_group,
-            intermediate_group,
-            combining_method=combining_method,
-        )
-        result_el_i = group_paths(
-            result_el_i,
-            pre_group,
-            post_group,
-            intermediate_group,
-            combining_method=combining_method,
-        )
 
     if wide:
         result_el_e = result_el_e.pivot(index="pre", columns="post", values="weight")
@@ -2633,13 +2642,16 @@ def effconn_without_loops(
                 root=root,
             )
         else:
+            paths = group_paths(
+                paths,
+                pre_group,
+                post_group,
+                intermediate_group,
+                combining_method=combining_method,
+            )
             return effective_conn_from_paths(
                 paths,
-                pre_group=pre_group,
-                post_group=post_group,
-                intermediate_group=intermediate_group,
                 wide=wide,
-                combining_method=combining_method,
                 chunk_size=chunk_size,
                 density_threshold=density_threshold,
                 use_gpu=use_gpu,
