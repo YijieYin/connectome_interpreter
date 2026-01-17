@@ -948,6 +948,10 @@ def group_paths(
             including the layer number, pre-synaptic index, post-synaptic
             index, and weight.
     """
+    # if path is empty, return it directly
+    if paths is None or paths.shape[0] == 0:
+        return paths
+
     assert combining_method in ["mean", "sum", "median"], (
         "The combining_method should be either 'mean', 'sum' or 'median'. "
         f"Currently it is {combining_method}."
