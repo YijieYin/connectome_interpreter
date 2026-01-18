@@ -2562,6 +2562,13 @@ def effconn_without_loops(
     `intermediate_group`, excluding paths that contain loops (i.e., paths that
     revisit the same neuron).
 
+    LIMITATION: This function removes connectivity contributions from paths where
+    individual neurons appear in multiple layers. However, when a path contains MULTIPLE
+    looping neurons (e.g., A-B-B-A-A loops through both A and B), the contribution would
+    be subtracted multiple times (once per looping node), leading to overcorrection. So
+    the results should be interpreted as the lower bound of the effective connectivity
+    without loops.
+
     Args:
         paths (pd.DataFrame): DataFrame containing the paths with columns: 'pre', 'post',
             'weight', and 'layer'. The 'pre' and 'post' columns represent the
@@ -2617,17 +2624,21 @@ def effconn_without_loops(
             combining_method=combining_method,
         )
 
-    # count number of layer per node
-    node_layer = paths[["layer", "pre"]].rename(columns={"pre": "node"})
-    last_layer = paths.loc[paths.layer == paths.layer.max(), ["layer", "post"]].rename(
-        columns={"post": "node"}
-    )
-    last_layer["layer"] += 1
-    node_layer = pd.concat(
-        [node_layer, last_layer], ignore_index=True
+    # Track where each neuron appears in the path
+    # A neuron appearing in multiple distinct positions indicates a loop
+    # Position = layer for PRE neurons, layer+1 for POST neurons (what layer they end up in)
+    node_positions = pd.concat(
+        [
+            # Neurons as senders in each layer (appear at start of that layer)
+            paths[["layer", "pre"]].rename(columns={"pre": "node"}),
+            # Neurons as receivers in each layer (appear at end of that layer = start of next)
+            paths[["layer", "post"]].assign(layer=lambda x: x.layer + 1).rename(columns={"post": "node"}),
+        ],
+        ignore_index=True,
     ).drop_duplicates()
-    n_layer_per_node = node_layer.groupby("node").layer.nunique()
-    loop_nodes = n_layer_per_node[n_layer_per_node > 1].index.tolist()
+
+    positions_per_node = node_positions.groupby("node").layer.nunique()
+    loop_nodes = positions_per_node[positions_per_node > 1].index.tolist()
 
     # if no loops
     if len(loop_nodes) == 0:
@@ -2661,30 +2672,46 @@ def effconn_without_loops(
     # calculate original effective connectivity (with loops)
     effconn = effective_conn_from_paths(paths)
 
-    # get effective connectivity contributed by loops
-    filtered_effconn = {}
-    for loop_node in loop_nodes:
-        filtered_effconn[loop_node] = {}
-        dup_node = node_layer[node_layer.node == loop_node]
-        # get all combinations of at least two elements from dup_node.layer
-        for n_dup in range(2, dup_node.shape[0] + 1):
-            for comb in combinations(dup_node.layer, n_dup):
-                # either ,
+    # Pre-compute max layer for efficiency
+    max_layer = paths.layer.max()
+    total_layers = paths.layer.nunique()
+    global_min_position = 1
+    global_max_position = max_layer + 1
+
+    # Define worker function for processing a single loop node
+    def process_loop_node(loop_node):
+        """Process combinations for a single loop node."""
+        node_effconn = {}
+        dup_node = node_positions[node_positions.node == loop_node]
+        dup_layers = sorted(dup_node.layer.tolist())
+
+        # get all combinations of at least two elements from dup_layers
+        for n_dup in range(2, len(dup_layers) + 1):
+            for comb in combinations(dup_layers, n_dup):
+                # Skip the combination (global_min, global_max) - this represents intentional 
+                # recurrence A->...->A (start and end only), not an intermediate loop to remove
+                if set(comb) == {global_min_position, global_max_position}:
+                    continue
+                    
+                comb_set = set(comb)  # Convert to set for faster lookups
+
+                # Vectorized filtering - much faster than row-by-row
+                is_loop_in_selected = (paths.pre == loop_node) & paths.layer.isin(
+                    comb_set
+                )
+                is_not_loop = paths.pre != loop_node
+                is_loop_at_end = (
+                    (max_layer in comb_set)
+                    & (paths.layer == max_layer)
+                    & (paths.post == loop_node)
+                )
                 paths_filter = paths[
-                    # in selected layers for loop_node
-                    ((paths.pre == loop_node) & (paths.layer.isin(comb)))
-                    # or not loop_node at all
-                    | (paths.pre != loop_node)
-                    # or loop_node at the last layer
-                    | (
-                        (paths.layer.max() in comb)
-                        & (paths.layer == paths.layer.max())
-                        & (paths.post == loop_node)
-                    )
-                ]
+                    is_loop_in_selected | is_not_loop | is_loop_at_end
+                ].copy()
+
                 paths_filter = remove_excess_neurons(paths_filter, quiet=True)
                 if (paths_filter is not None) and (
-                    paths_filter.layer.nunique() == paths.layer.nunique()
+                    paths_filter.layer.nunique() == total_layers
                 ):
                     paths_filter = filter_paths(
                         paths_filter,
@@ -2692,22 +2719,31 @@ def effconn_without_loops(
                         quiet=True,
                     )
                     if (paths_filter is not None) and (
-                        paths_filter.layer.nunique() == paths.layer.nunique()
+                        paths_filter.layer.nunique() == total_layers
                     ):
                         # only get effective connectivity if still paths from start to target
-                        filtered_effconn[loop_node][comb] = effective_conn_from_paths(
+                        node_effconn[comb] = effective_conn_from_paths(
                             paths_filter,
                             chunk_size=chunk_size,
                             density_threshold=density_threshold,
                             use_gpu=use_gpu,
                             root=root,
                         )
+        return node_effconn
 
-    # put results together
-    filtered_effconn_list = []
-    for node, effconn_dict in filtered_effconn.items():
-        for _, this_effconn in effconn_dict.items():
-            filtered_effconn_list.append(this_effconn)
+    # Process loop nodes serially
+    filtered_effconn = {}
+    for loop_node in tqdm(
+        loop_nodes, desc="Processing loop nodes", disable=len(loop_nodes) <= 1
+    ):
+        filtered_effconn[loop_node] = process_loop_node(loop_node)
+
+    # put results together - more efficient aggregation
+    filtered_effconn_list = [
+        this_effconn
+        for effconn_dict in filtered_effconn.values()
+        for this_effconn in effconn_dict.values()
+    ]
 
     # Handle empty list case - if no loop contributions found, return original
     if len(filtered_effconn_list) == 0:
