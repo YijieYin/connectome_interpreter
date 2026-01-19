@@ -1833,7 +1833,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
             self.paths_with_loop,
             pre_group=self.pre_group,
             post_group=self.post_group,
-            remove_loop_before_grouping=True,
+            remove_loop_after_grouping=False,
             use_gpu=False,
         )
 
@@ -1841,7 +1841,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
             self.paths_with_loop,
             pre_group=self.pre_group,
             post_group=self.post_group,
-            remove_loop_before_grouping=False,
+            remove_loop_after_grouping=True,
             use_gpu=False,
         )
 
@@ -1867,24 +1867,24 @@ class TestEffconnWithoutLoops(unittest.TestCase):
         post_group = {5: "X"}  # Output maps to group X
         intermediate_group = {2: "I1", 3: "I2", 4: "I3"}
 
-        # Test with remove_loop_before_grouping=True
+        # Test with remove_loop_after_grouping=False
         result_before = effconn_without_loops(
             paths,
             pre_group=pre_group,
             post_group=post_group,
             intermediate_group=intermediate_group,
-            remove_loop_before_grouping=True,
+            remove_loop_after_grouping=False,
             wide=False,
             use_gpu=False,
         )
 
-        # Test with remove_loop_before_grouping=False
+        # Test with remove_loop_after_grouping=True
         result_after = effconn_without_loops(
             paths,
             pre_group=pre_group,
             post_group=post_group,
             intermediate_group=intermediate_group,
-            remove_loop_before_grouping=False,
+            remove_loop_after_grouping=True,
             wide=False,
             use_gpu=False,
         )
@@ -1927,7 +1927,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
             pre_group=pre_group,
             post_group=post_group,
             intermediate_group=intermediate_group,
-            remove_loop_before_grouping=True,
+            remove_loop_after_grouping=False,
             wide=True,
             use_gpu=False,
         )
@@ -1938,7 +1938,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
             pre_group=pre_group,
             post_group=post_group,
             intermediate_group=intermediate_group,
-            remove_loop_before_grouping=False,
+            remove_loop_after_grouping=True,
             wide=True,
             use_gpu=False,
         )
@@ -1963,11 +1963,11 @@ class TestEffconnWithoutLoops(unittest.TestCase):
 
         # When no groups are provided, the parameter should still work
         result_before = effconn_without_loops(
-            paths, remove_loop_before_grouping=True, use_gpu=False
+            paths, remove_loop_after_grouping=False, use_gpu=False
         )
 
         result_after = effconn_without_loops(
-            paths, remove_loop_before_grouping=False, use_gpu=False
+            paths, remove_loop_after_grouping=True, use_gpu=False
         )
 
         # Both should produce identical results when no grouping is applied
@@ -1993,7 +1993,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
             paths,
             pre_group=pre_group,
             post_group=post_group,
-            remove_loop_before_grouping=True,
+            remove_loop_after_grouping=False,
             wide=False,
             use_gpu=False,
         )
@@ -2002,7 +2002,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
             paths,
             pre_group=pre_group,
             post_group=post_group,
-            remove_loop_before_grouping=False,
+            remove_loop_after_grouping=True,
             wide=False,
             use_gpu=False,
         )
@@ -2039,7 +2039,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
                     pre_group=pre_group,
                     post_group=post_group,
                     combining_method=method,
-                    remove_loop_before_grouping=remove_before,
+                    remove_loop_after_grouping=remove_before,
                     use_gpu=False,
                 )
                 self.assertIsNotNone(
@@ -2067,7 +2067,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
                 paths,
                 pre_group=pre_group,
                 post_group=post_group,
-                remove_loop_before_grouping=remove_before,
+                remove_loop_after_grouping=remove_before,
                 wide=True,
                 use_gpu=False,
             )
@@ -2079,7 +2079,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
                 paths,
                 pre_group=pre_group,
                 post_group=post_group,
-                remove_loop_before_grouping=remove_before,
+                remove_loop_after_grouping=remove_before,
                 wide=False,
                 use_gpu=False,
             )
@@ -2125,7 +2125,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
             pre_group=pre_group,
             post_group=post_group,
             intermediate_group=intermediate_group,
-            remove_loop_before_grouping=True,
+            remove_loop_after_grouping=False,
             use_gpu=False,
         )
 
@@ -2134,7 +2134,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
             pre_group=pre_group,
             post_group=post_group,
             intermediate_group=intermediate_group,
-            remove_loop_before_grouping=False,
+            remove_loop_after_grouping=True,
             use_gpu=False,
         )
 
@@ -2169,7 +2169,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
             pre_group=pre_group,
             post_group=post_group,
             intermediate_group=intermediate_group,
-            remove_loop_before_grouping=True,
+            remove_loop_after_grouping=False,
             wide=False,
             combining_method="sum",
             use_gpu=False,
@@ -2181,7 +2181,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
             pre_group=pre_group,
             post_group=post_group,
             intermediate_group=intermediate_group,
-            remove_loop_before_grouping=False,
+            remove_loop_after_grouping=True,
             wide=False,
             combining_method="sum",
             use_gpu=False,
@@ -2267,7 +2267,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
             paths,
             pre_group=pre_group,
             post_group=post_group,
-            remove_loop_before_grouping=True,
+            remove_loop_after_grouping=False,
             wide=False,
             combining_method="sum",
             use_gpu=False,
@@ -2277,7 +2277,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
             paths,
             pre_group=pre_group,
             post_group=post_group,
-            remove_loop_before_grouping=False,
+            remove_loop_after_grouping=True,
             wide=False,
             combining_method="sum",
             use_gpu=False,
@@ -2324,11 +2324,11 @@ class TestEffconnWithoutLoops(unittest.TestCase):
 
         # No grouping first - see raw behavior
         result_before_no_group = effconn_without_loops(
-            paths, remove_loop_before_grouping=True, wide=False, use_gpu=False
+            paths, remove_loop_after_grouping=False, wide=False, use_gpu=False
         )
 
         result_after_no_group = effconn_without_loops(
-            paths, remove_loop_before_grouping=False, wide=False, use_gpu=False
+            paths, remove_loop_after_grouping=True, wide=False, use_gpu=False
         )
 
         print("\nWithout grouping:")
@@ -2368,7 +2368,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
             paths,
             pre_group=pre_group,
             post_group=post_group,
-            remove_loop_before_grouping=True,
+            remove_loop_after_grouping=False,
             use_gpu=False,
         )
 
@@ -2376,7 +2376,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
             paths,
             pre_group=pre_group,
             post_group=post_group,
-            remove_loop_before_grouping=False,
+            remove_loop_after_grouping=True,
             use_gpu=False,
         )
 

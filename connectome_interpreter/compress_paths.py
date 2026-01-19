@@ -1794,13 +1794,13 @@ def conn_by_path_length_data(
 
     # if no grouping dict provided, group all together
     if inidx_map is None:
-        inidx_map = {idx: "group" for idx in inidx}
+        inidx_map = {idx: "group" for idx in range(inprop.shape[0])}
         inidx_map_is_none = True
     else:
         inidx_map_is_none = False
 
     if outidx_map is None:
-        outidx_map = {idx: "group" for idx in outidx}
+        outidx_map = {idx: "group" for idx in range(inprop.shape[0])}
         outidx_map_is_none = True
     else:
         outidx_map_is_none = False
@@ -1809,7 +1809,7 @@ def conn_by_path_length_data(
     for i in tqdm(range(n)):
         paths = find_paths_of_length(inprop, inidx, outidx, i + 1)
         paths = group_paths(
-            inprop, inidx_map, outidx_map, combining_method=combining_method
+            paths, inidx_map, outidx_map, combining_method=combining_method
         )
 
         if paths is not None and not paths.empty:
@@ -2554,7 +2554,8 @@ def effconn_without_loops(
     density_threshold: float = 0.2,
     use_gpu: bool = True,
     root: bool = False,
-    remove_loop_before_grouping: bool = True,
+    remove_loop_after_grouping: bool = True,
+    quiet: bool = False,
 ):
     """Calculate the effective connectivity from the paths Dataframe (which could be an
     output of `find_paths_of_length()`), from the 'pre' in the earliest layer, to the
@@ -2595,8 +2596,9 @@ def effconn_without_loops(
             values (where n is the number of steps/layers). This transforms the output
             from "total influence" to "average connection strength per step". Defaults
             to False.
-        remove_loop_before_grouping (bool, optional): Whether to remove loops before
+        remove_loop_after_grouping (bool, optional): Whether to remove loops after
             grouping the paths. Defaults to True.
+        quiet (bool, optional): Whether to suppress progress output. Defaults to False.
 
     Returns:
         pd.DataFrame: A DataFrame summarizing the effective connectivity between
@@ -2614,7 +2616,7 @@ def effconn_without_loops(
             f"Available columns: {list(paths.columns)}"
         )
 
-    if not remove_loop_before_grouping:
+    if remove_loop_after_grouping:
         # group first
         paths = group_paths(
             paths,
@@ -2632,7 +2634,9 @@ def effconn_without_loops(
             # Neurons as senders in each layer (appear at start of that layer)
             paths[["layer", "pre"]].rename(columns={"pre": "node"}),
             # Neurons as receivers in each layer (appear at end of that layer = start of next)
-            paths[["layer", "post"]].assign(layer=lambda x: x.layer + 1).rename(columns={"post": "node"}),
+            paths[["layer", "post"]]
+            .assign(layer=lambda x: x.layer + 1)
+            .rename(columns={"post": "node"}),
         ],
         ignore_index=True,
     ).drop_duplicates()
@@ -2642,7 +2646,7 @@ def effconn_without_loops(
 
     # if no loops
     if len(loop_nodes) == 0:
-        if not remove_loop_before_grouping:
+        if remove_loop_after_grouping:
             # then already grouped
             return effective_conn_from_paths(
                 paths,
@@ -2688,11 +2692,11 @@ def effconn_without_loops(
         # get all combinations of at least two elements from dup_layers
         for n_dup in range(2, len(dup_layers) + 1):
             for comb in combinations(dup_layers, n_dup):
-                # Skip the combination (global_min, global_max) - this represents intentional 
+                # Skip the combination (global_min, global_max) - this represents intentional
                 # recurrence A->...->A (start and end only), not an intermediate loop to remove
                 if set(comb) == {global_min_position, global_max_position}:
                     continue
-                    
+
                 comb_set = set(comb)  # Convert to set for faster lookups
 
                 # Vectorized filtering - much faster than row-by-row
@@ -2734,7 +2738,7 @@ def effconn_without_loops(
     # Process loop nodes serially
     filtered_effconn = {}
     for loop_node in tqdm(
-        loop_nodes, desc="Processing loop nodes", disable=len(loop_nodes) <= 1
+        loop_nodes, desc="Processing loop nodes", disable=(len(loop_nodes) <= 1) | quiet
     ):
         filtered_effconn[loop_node] = process_loop_node(loop_node)
 
@@ -2761,7 +2765,7 @@ def effconn_without_loops(
         id_vars="pre", var_name="post", value_name="weight"
     )
 
-    if remove_loop_before_grouping:  # then the time to group is now
+    if not remove_loop_after_grouping:  # then the time to group is now
         effconn_noloop_long = group_paths(
             effconn_noloop_long,
             pre_group,
