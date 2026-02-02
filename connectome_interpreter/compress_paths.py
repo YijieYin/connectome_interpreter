@@ -2722,6 +2722,22 @@ def effconn_without_loops(
         # Subtract loop contributions
         effconn_noloop = effconn_total - loop_matrix
 
+        # Handle numerical precision issues: clip small negative values to zero
+        min_value = effconn_noloop.min().min()
+        if min_value < 0:
+            if min_value < -1e-6:
+                # Significant negative values - warn user
+                import warnings
+
+                warnings.warn(
+                    f"Loop subtraction resulted in significant negative values "
+                    f"(min={min_value:.6e}). This may indicate an issue with the "
+                    f"loop enumeration approach. Values will be clipped to zero.",
+                    UserWarning,
+                )
+            # Clip to zero (handles both numerical errors and the warning case)
+            effconn_noloop = effconn_noloop.clip(lower=0)
+
     # Convert to long format if requested
     effconn_noloop_long = effconn_noloop.reset_index().melt(
         id_vars="pre", var_name="post", value_name="weight"
