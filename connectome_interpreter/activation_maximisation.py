@@ -2690,9 +2690,9 @@ def get_input_activation(
             number of units in the model.
         selected_indices (arrayable, optional): The indices of the neurons to select.
             Defaults to None. If None, all neurons are selected.
-        activation_threshold (float, optional): A threshold value for activation.
-            Neurons with activations below this threshold are not considered. Defaults
-            to 0.
+        activation_threshold (float, optional): A threshold value for the absolute value
+            of activation. Neurons with activations below this threshold are not
+            considered. Defaults to 0.
         batch_names (arrayable, optional): The names of the batches. Defaults to None.
             If model_in.ndim == 3, then this should be supplied. If not, batch names
             will be e.g. 'batch_0', 'batch_1', etc.
@@ -2738,7 +2738,7 @@ def get_input_activation(
 
         # activation boolean
         # if any >= threshold for each row
-        activation_bool = np.any(model_in >= activation_threshold, axis=1)
+        activation_bool = np.any(np.abs(model_in) >= activation_threshold, axis=1)
 
         selection = selection_bool & activation_bool
 
@@ -2778,7 +2778,7 @@ def get_input_activation(
 
             # activation boolean for this batch
             # if any >= threshold for each row
-            activation_bool = np.any(batch_data >= activation_threshold, axis=1)
+            activation_bool = np.any(np.abs(batch_data) >= activation_threshold, axis=1)
 
             selection = selection_bool & activation_bool
 
