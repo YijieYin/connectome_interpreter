@@ -1756,14 +1756,15 @@ def conn_by_path_length_data(
     n: int,
     outidx_map: Optional[dict] = None,
     inidx_map: Optional[dict] = None,
+    intermediate_group: Optional[dict] = None,
     combining_method: str = "mean",
     wide: bool = False,
     chunk_size: int = 2000,
 ):
     """Calculates the connectivity from all of inidx (grouped by inidx_map) to outidx
     (grouped by outidx_map)  within `n` hops, aggregated by `combining_method`. If
-    neither is provided, presynaptic neurons are grouped together. Direct connections
-    are in path_length 1.
+    neither is provided, nothing is grouped together. Direct connections are in
+    path_length 1.
 
     Args:
         inprop (spmatrix): The connectivity matrix, with presynaptic in the rows.
@@ -1776,6 +1777,9 @@ def conn_by_path_length_data(
             of inidx_map and outidx_map should be specified.
         inidx_map (dict): Mapping from indices to presynaptic neuron groups. Only one of
             inidx_map and outidx_map should be specified.
+        intermediate_group (dict, optional): Mapping from indices to neuron groups for
+            intermediate neurons. If None, it will be inherited from one of inidx_map
+            or outidx_map (whichever is not None).
         combining_method (str, optional): Method to combine inputs or outputs. Can be
             'mean', 'median', or 'sum'. Defaults to 'mean'.
         wide (bool, optional): Whether to return the result in wide format. If False,
@@ -1806,11 +1810,33 @@ def conn_by_path_length_data(
     else:
         outidx_map_is_none = False
 
+    # but if neither is provided, then don't group anything
+    if inidx_map_is_none and outidx_map_is_none:
+        inidx_map = {idx: idx for idx in range(inprop.shape[0])}
+        outidx_map = {idx: idx for idx in range(inprop.shape[0])}
+
+    if intermediate_group is None:
+        # inherit from the one that's not None
+        if inidx_map_is_none and not outidx_map_is_none:
+            intermediate_group = outidx_map
+        elif outidx_map_is_none and not inidx_map_is_none:
+            intermediate_group = inidx_map
+
+        # if not inidx_map_is_none and not outidx_map_is_none:
+        #     # if both are provided, then follow pre_group - already specified in group_paths
+        #     intermediate_group = inidx_map
+
+        # if neither are provided, taken care of above
+
     rows = []
     for i in tqdm(range(n)):
         paths = find_paths_of_length(inprop, inidx, outidx, i + 1)
         paths = group_paths(
-            paths, inidx_map, outidx_map, combining_method=combining_method
+            paths,
+            inidx_map,
+            outidx_map,
+            intermediate_group=intermediate_group,
+            combining_method=combining_method,
         )
 
         if paths is not None and not paths.empty:
@@ -1822,6 +1848,32 @@ def conn_by_path_length_data(
             )
             df.loc[:, ["path_length"]] = i + 1
             rows.append(df)
+
+    # Handle case when no paths exist at all
+    if not rows:
+        # Create empty DataFrame with appropriate structure
+        if not inidx_map_is_none and not outidx_map_is_none:
+            # Both maps: return list of empty DataFrames
+            if wide:
+                # Return empty DataFrames with appropriate index/columns structure
+                return [pd.DataFrame() for _ in range(n)]
+            else:
+                # Add path_length column for long format
+                return [
+                    pd.DataFrame(columns=["pre", "post", "weight", "path_length"])
+                    for _ in range(n)
+                ]
+        else:
+            # Single map: return empty DataFrame with path_length column
+            if inidx_map_is_none:
+                df = pd.DataFrame(columns=["path_length", "post", "weight"])
+            else:
+                df = pd.DataFrame(columns=["path_length", "pre", "weight"])
+            
+            if wide:
+                # Return empty pivoted DataFrame
+                return pd.DataFrame()
+            return df
 
     contri = pd.concat(rows, ignore_index=True)
     if inidx_map_is_none:
@@ -1882,6 +1934,7 @@ def conn_by_path_length(
     n: int,
     outidx_map: Optional[dict] = None,
     inidx_map: Optional[dict] = None,
+    intermediate_group: Optional[dict] = None,
     combining_method: str = "mean",
     width: int = 800,
     height: int = 400,
@@ -1901,6 +1954,9 @@ def conn_by_path_length(
             of inidx_map and outidx_map should be specified.
         inidx_map (dict): Mapping from indices to presynaptic neuron groups. Only one of
             inidx_map and outidx_map should be specified.
+        intermediate_group (dict, optional): Mapping from indices to neuron groups for
+            intermediate neurons. If None, it will be inherited from one of inidx_map or
+            outidx_map (whichever is not None).
         combining_method (str, optional): Method to combine inputs or outputs. Can be
             'mean', 'median', or 'sum'. Defaults to 'mean'.
         width (int, optional): The width of the plot. Defaults to 800.
@@ -1938,6 +1994,7 @@ def conn_by_path_length(
         n,
         inidx_map=inidx_map,
         outidx_map=outidx_map,
+        intermediate_group=intermediate_group,
         combining_method=combining_method,
     )
 
@@ -2108,6 +2165,9 @@ def signed_conn_by_path_length_data(
 
     eees = []
     iiis = []
+
+    # group_paths() turns groups into strings. So let's also make groups string here
+    group_to_sign = {str(k): v for k, v in group_to_sign.items()}
 
     for path_length in tqdm(range(n)):
         paths = find_paths_of_length(inprop, inidx, outidx, path_length + 1)

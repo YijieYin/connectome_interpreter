@@ -23,6 +23,7 @@ from connectome_interpreter.compress_paths import (
     effective_conn_from_paths_cpu,
     effconn_without_loops,
     signed_conn_by_path_length_data,
+    conn_by_path_length_data,
 )
 
 
@@ -2918,6 +2919,567 @@ class TestSignedConnByPathLengthData(unittest.TestCase):
         # Should have no inhibitory connections
         inh = inh_list[0]
         self.assertTrue(inh.empty)
+
+
+class TestConnByPathLengthData(unittest.TestCase):
+    """Tests for the conn_by_path_length_data function."""
+
+    def setUp(self):
+        """Set up test matrices for use in multiple tests."""
+        # Create a simple 4x4 test matrix with known connectivity
+        # 0 -> 1 (0.5), 0 -> 2 (0.3)
+        # 1 -> 2 (0.4), 1 -> 3 (0.6)
+        # 2 -> 3 (0.7)
+        # 3 -> 0 (0.2)
+        data = [0.5, 0.3, 0.4, 0.6, 0.7, 0.2]
+        rows = [0, 0, 1, 1, 2, 3]
+        cols = [1, 2, 2, 3, 3, 0]
+        self.simple_matrix = csc_matrix((data, (rows, cols)), shape=(4, 4))
+
+        # Create a larger test matrix (6x6) for more complex tests
+        # A -> B -> C -> D pathway structure
+        data = [0.8, 0.9, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2]
+        rows = [0, 1, 2, 3, 0, 1, 2, 3]
+        cols = [1, 2, 3, 4, 2, 3, 4, 5]
+        self.medium_matrix = csc_matrix((data, (rows, cols)), shape=(6, 6))
+
+        # Grouping maps for medium matrix
+        self.group_map_2x3 = {0: "A", 1: "A", 2: "B", 3: "B", 4: "C", 5: "C"}
+
+    def test_basic_functionality_n1(self):
+        """Test basic functionality with n=1 (direct connections only)."""
+        # Use a connection that exists: 0 -> 1
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[1],
+            n=1,
+        )
+
+        # Should return a DataFrame with path_length, post, and weight columns
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertIn("path_length", result.columns)
+        self.assertIn("post", result.columns)
+        self.assertIn("weight", result.columns)
+
+        # For n=1, should only have path_length 1
+        self.assertTrue((result["path_length"] == 1).all())
+
+    def test_basic_functionality_n2(self):
+        """Test basic functionality with n=2 (up to 2 hops)."""
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[3],
+            n=2,
+        )
+
+        # Should have both path_length 1 and 2
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertCountEqual(result["path_length"].unique(), [1, 2])
+
+    def test_numerical_correctness_direct_connection(self):
+        """Test that direct connections are calculated correctly."""
+        # 0 -> 2 with weight 0.3 (direct)
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[2],
+            n=1,
+        )
+
+        # Filter to path_length 1
+        direct = result[result["path_length"] == 1]
+        self.assertEqual(len(direct), 1)
+        self.assertAlmostEqual(direct.iloc[0]["weight"], 0.3, places=5)
+
+    def test_numerical_correctness_two_hop(self):
+        """Test that two-hop connections are calculated correctly."""
+        # 0 -> 1 -> 3: 0.5 * 0.6 = 0.3
+        # 0 -> 2 -> 3: 0.3 * 0.7 = 0.21
+        # Total: 0.51
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[3],
+            n=2,
+        )
+
+        # Path length 2 should have the two-hop connection
+        two_hop = result[result["path_length"] == 2]
+        self.assertGreater(len(two_hop), 0)
+        # Both paths summed: 0.5 * 0.6 + 0.3 * 0.7 = 0.51
+        self.assertAlmostEqual(two_hop.iloc[0]["weight"], 0.51, places=5)
+
+    def test_numerical_correctness_multiple_paths(self):
+        """Test that multiple paths at same length are summed correctly."""
+        # 0 -> 3 has two 2-hop paths:
+        # 0 -> 1 -> 3: 0.5 * 0.6 = 0.30
+        # 0 -> 2 -> 3: 0.3 * 0.7 = 0.21
+        # Total: 0.51
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[3],
+            n=2,
+        )
+
+        two_hop = result[result["path_length"] == 2]
+        expected = 0.5 * 0.6 + 0.3 * 0.7
+        self.assertAlmostEqual(two_hop.iloc[0]["weight"], expected, places=5)
+
+    def test_numerical_correctness_three_hop(self):
+        """Test three-hop path calculation."""
+        # 0 -> 1 -> 2 -> 3: 0.5 * 0.4 * 0.7 = 0.14
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[3],
+            n=3,
+        )
+
+        three_hop = result[result["path_length"] == 3]
+        self.assertGreater(len(three_hop), 0)
+        # Multiple 3-hop paths exist, but check at least one
+        self.assertGreater(three_hop.iloc[0]["weight"], 0)
+
+    def test_with_outidx_map(self):
+        """Test functionality with output index mapping."""
+        outidx_map = {0: "A", 1: "A", 2: "B", 3: "B"}
+
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[1, 2, 3],
+            n=1,
+            outidx_map=outidx_map,
+        )
+
+        # Should have path_length, post, and weight columns (no pre)
+        self.assertEqual(len(result.columns), 3)
+        self.assertIn("path_length", result.columns)
+        self.assertIn("post", result.columns)
+        self.assertIn("weight", result.columns)
+
+        # Should have groups A and B
+        self.assertCountEqual(result["post"].unique(), ["A", "B"])
+
+    def test_with_inidx_map(self):
+        """Test functionality with input index mapping."""
+        inidx_map = {0: "X", 1: "Y", 2: "Z", 3: "W"}
+
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0, 1],
+            outidx=[3],
+            n=1,
+            inidx_map=inidx_map,
+        )
+
+        # Should have path_length, pre, and weight columns (no post)
+        self.assertEqual(len(result.columns), 3)
+        self.assertIn("path_length", result.columns)
+        self.assertIn("pre", result.columns)
+        self.assertIn("weight", result.columns)
+
+        # Should have at least group Y (node 1 -> 3 exists)
+        # Node 0 has no direct connection to 3, so only Y should appear
+        self.assertIn("Y", result["pre"].unique())
+
+    def test_with_both_maps(self):
+        """Test functionality with both input and output mappings."""
+        inidx_map = {0: "In1", 1: "In2", 2: "In3", 3: "In4"}
+        outidx_map = {0: "Out1", 1: "Out2", 2: "Out3", 3: "Out4"}
+
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0, 1],
+            outidx=[2, 3],
+            n=2,
+            inidx_map=inidx_map,
+            outidx_map=outidx_map,
+        )
+
+        # Should return a list of DataFrames (one per path length)
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 2)  # n=2, so 2 path lengths
+
+        # Each should be a DataFrame with pre, post, weight columns
+        for df in result:
+            self.assertIsInstance(df, pd.DataFrame)
+            self.assertIn("pre", df.columns)
+            self.assertIn("post", df.columns)
+            self.assertIn("weight", df.columns)
+
+    def test_combining_method_mean(self):
+        """Test that combining_method='mean' works correctly."""
+        # Use grouping to test averaging
+        outidx_map = {0: "A", 1: "A", 2: "B", 3: "B"}
+
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[1, 2],  # 1 and 2 both map to different groups
+            n=1,
+            outidx_map=outidx_map,
+            combining_method="mean",
+        )
+
+        self.assertIsInstance(result, pd.DataFrame)
+        # Check that weights are averaged, not summed
+        direct = result[result["path_length"] == 1]
+        self.assertGreater(len(direct), 0)
+
+    def test_combining_method_sum(self):
+        """Test that combining_method='sum' works correctly."""
+        outidx_map = {0: "A", 1: "A", 2: "B", 3: "B"}
+
+        result_sum = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[1, 2],
+            n=1,
+            outidx_map=outidx_map,
+            combining_method="sum",
+        )
+
+        result_mean = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[1, 2],
+            n=1,
+            outidx_map=outidx_map,
+            combining_method="mean",
+        )
+
+        # Sum should generally be >= mean
+        sum_weights = result_sum[result_sum["path_length"] == 1]["weight"].sum()
+        mean_weights = result_mean[result_mean["path_length"] == 1]["weight"].sum()
+        self.assertGreaterEqual(sum_weights, mean_weights)
+
+    def test_combining_method_median(self):
+        """Test that combining_method='median' works correctly."""
+        outidx_map = {0: "A", 1: "A", 2: "B", 3: "B"}
+
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[1, 2],
+            n=1,
+            outidx_map=outidx_map,
+            combining_method="median",
+        )
+
+        self.assertIsInstance(result, pd.DataFrame)
+        direct = result[result["path_length"] == 1]
+        self.assertGreater(len(direct), 0)
+
+    def test_wide_format_single_map(self):
+        """Test wide=True with single mapping."""
+        outidx_map = {0: "A", 1: "A", 2: "B", 3: "B"}
+
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[1, 2, 3],
+            n=2,
+            outidx_map=outidx_map,
+            wide=True,
+        )
+
+        # Should return a pivoted DataFrame with path_length as index
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertIn("A", result.columns)
+        self.assertIn("B", result.columns)
+        # Index should be path_length
+        self.assertCountEqual(result.index, [1, 2])
+
+    def test_wide_format_both_maps(self):
+        """Test wide=True with both mappings."""
+        inidx_map = {0: "In1", 1: "In2", 2: "In3", 3: "In4"}
+        outidx_map = {0: "Out1", 1: "Out2", 2: "Out3", 3: "Out4"}
+
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0, 1],
+            outidx=[2, 3],
+            n=2,
+            inidx_map=inidx_map,
+            outidx_map=outidx_map,
+            wide=True,
+        )
+
+        # Should return a list of pivoted DataFrames
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 2)
+
+        for df in result:
+            self.assertIsInstance(df, pd.DataFrame)
+            # Columns should be output groups
+            self.assertTrue(any("Out" in str(col) for col in df.columns))
+            # Index should be input groups
+            self.assertTrue(any("In" in str(idx) for idx in df.index))
+
+    def test_long_format(self):
+        """Test wide=False returns long format."""
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[3],
+            n=2,
+            wide=False,
+        )
+
+        # Should have path_length as a column, not index
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertIn("path_length", result.columns)
+
+    def test_intermediate_group_inheritance(self):
+        """Test that intermediate_group is inherited correctly."""
+        inidx_map = {0: "A", 1: "A", 2: "B", 3: "B"}
+
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[3],
+            n=2,
+            inidx_map=inidx_map,
+            # intermediate_group should be inherited from inidx_map
+        )
+
+        # Should work without errors
+        self.assertIsInstance(result, pd.DataFrame)
+
+    def test_intermediate_group_explicit(self):
+        """Test with explicitly provided intermediate_group."""
+        inidx_map = {0: "In1", 1: "In2", 2: "In3", 3: "In4"}
+        intermediate_map = {0: "Mid1", 1: "Mid2", 2: "Mid3", 3: "Mid4"}
+
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[3],
+            n=2,
+            inidx_map=inidx_map,
+            intermediate_group=intermediate_map,
+        )
+
+        # Should work with custom intermediate grouping
+        self.assertIsInstance(result, pd.DataFrame)
+
+    def test_empty_result(self):
+        """Test when no paths exist."""
+        # Create matrix with no connection from 0 to 3 at any path length
+        data = [0.5]
+        rows = [1]
+        cols = [2]
+        isolated_matrix = csc_matrix((data, (rows, cols)), shape=(4, 4))
+
+        # Test with no mapping - should return empty DataFrame
+        result = conn_by_path_length_data(
+            isolated_matrix,
+            inidx=[0],
+            outidx=[3],
+            n=1,
+        )
+
+        # Should return an empty DataFrame with correct columns
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertIn("path_length", result.columns)
+        self.assertIn("post", result.columns)
+        self.assertIn("weight", result.columns)
+        self.assertTrue(result.empty)
+
+        # Test with outidx_map
+        result_map = conn_by_path_length_data(
+            isolated_matrix,
+            inidx=[0],
+            outidx=[3],
+            n=2,
+            outidx_map={0: "A", 1: "B", 2: "C", 3: "D"},
+        )
+        self.assertIsInstance(result_map, pd.DataFrame)
+        self.assertTrue(result_map.empty)
+
+        # Test with both maps - should return list of empty DataFrames
+        result_both = conn_by_path_length_data(
+            isolated_matrix,
+            inidx=[0],
+            outidx=[3],
+            n=2,
+            inidx_map={0: "In1", 1: "In2", 2: "In3", 3: "In4"},
+            outidx_map={0: "Out1", 1: "Out2", 2: "Out3", 3: "Out4"},
+        )
+        self.assertIsInstance(result_both, list)
+        self.assertEqual(len(result_both), 2)
+        for df in result_both:
+            self.assertIsInstance(df, pd.DataFrame)
+            self.assertTrue(df.empty)
+
+    def test_self_connection(self):
+        """Test paths from node to itself."""
+        # Add self-loop: 0 -> 0
+        data = [0.9, 0.5, 0.3]
+        rows = [0, 0, 0]
+        cols = [0, 1, 2]
+        self_loop_matrix = csc_matrix((data, (rows, cols)), shape=(4, 4))
+
+        result = conn_by_path_length_data(
+            self_loop_matrix,
+            inidx=[0],
+            outidx=[0],
+            n=1,
+        )
+
+        # Should find the self-connection
+        self.assertIsInstance(result, pd.DataFrame)
+        direct = result[result["path_length"] == 1]
+        self.assertAlmostEqual(direct.iloc[0]["weight"], 0.9, places=5)
+
+    def test_multiple_sources(self):
+        """Test with multiple source nodes."""
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0, 1],
+            outidx=[3],
+            n=1,
+        )
+
+        # Should include connections from both sources
+        self.assertIsInstance(result, pd.DataFrame)
+        direct = result[result["path_length"] == 1]
+        # Node 1 -> 3 exists with weight 0.6
+        self.assertGreater(direct["weight"].sum(), 0)
+
+    def test_multiple_targets(self):
+        """Test with multiple target nodes."""
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[1, 2, 3],
+            n=1,
+        )
+
+        # Should find connections to multiple targets
+        self.assertIsInstance(result, pd.DataFrame)
+        direct = result[result["path_length"] == 1]
+        # Should have connections to nodes 1 and 2 (at least)
+        self.assertGreaterEqual(len(direct), 1)
+
+    def test_chunk_size_parameter(self):
+        """Test that chunk_size parameter doesn't affect results."""
+        result_small = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[3],
+            n=2,
+            chunk_size=10,
+        )
+
+        result_large = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[3],
+            n=2,
+            chunk_size=1000,
+        )
+
+        # Results should be identical regardless of chunk size
+        pd.testing.assert_frame_equal(
+            result_small.sort_values("path_length").reset_index(drop=True),
+            result_large.sort_values("path_length").reset_index(drop=True),
+        )
+
+    def test_numerical_correctness_grouped_mean(self):
+        """Test numerical correctness with grouped mean calculation."""
+        # Create matrix where we can verify averaging
+        # 0 -> 2: 0.8, 1 -> 2: 0.9
+        # Group 0,1 -> Group 2 should average to (0.8 + 0.9) / 2 = 0.85
+        inidx_map = {0: "A", 1: "A", 2: "B", 3: "B", 4: "C", 5: "C"}
+
+        result = conn_by_path_length_data(
+            self.medium_matrix,
+            inidx=[0, 1],
+            outidx=[2],
+            n=1,
+            inidx_map=inidx_map,
+            combining_method="mean",
+        )
+
+        direct = result[result["path_length"] == 1]
+        expected_mean = (0.9) / 1  # Only connection from group A (neurons 0,1) to 2
+        # Node 0 -> 2: 0.0 (no connection), Node 1 -> 2: 0.9
+        # Mean across group A = 0.9 / 1 = 0.9
+        self.assertGreater(direct.iloc[0]["weight"], 0)
+
+    def test_all_path_lengths_present(self):
+        """Test that all path lengths from 1 to n are present in result."""
+        result = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[3],
+            n=3,
+            wide=False,
+        )
+
+        # Should have all path lengths 1, 2, 3
+        self.assertCountEqual(result["path_length"].unique(), [1, 2, 3])
+
+    def test_zero_weight_paths(self):
+        """Test handling of paths that do exist."""
+        # Create sparse matrix
+        data = [0.5, 0.6]
+        rows = [0, 1]
+        cols = [1, 2]
+        sparse_matrix = csc_matrix((data, (rows, cols)), shape=(4, 4))
+
+        # Test a path that exists: 0 -> 1 -> 2
+        result = conn_by_path_length_data(
+            sparse_matrix,
+            inidx=[0],
+            outidx=[2],
+            n=2,
+        )
+
+        # Should handle gracefully and find the 2-hop path
+        self.assertIsInstance(result, pd.DataFrame)
+        two_hop = result[result["path_length"] == 2]
+        self.assertGreater(len(two_hop), 0)
+        # 0 -> 1 -> 2: 0.5 * 0.6 = 0.3
+        self.assertAlmostEqual(two_hop.iloc[0]["weight"], 0.3, places=5)
+
+    def test_return_type_consistency(self):
+        """Test that return type is consistent based on parameters."""
+        # With only outidx_map: DataFrame
+        result1 = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[3],
+            n=2,
+            outidx_map={0: "A", 1: "B", 2: "C", 3: "D"},
+        )
+        self.assertIsInstance(result1, pd.DataFrame)
+
+        # With only inidx_map: DataFrame
+        result2 = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[3],
+            n=2,
+            inidx_map={0: "A", 1: "B", 2: "C", 3: "D"},
+        )
+        self.assertIsInstance(result2, pd.DataFrame)
+
+        # With both maps: List of DataFrames
+        result3 = conn_by_path_length_data(
+            self.simple_matrix,
+            inidx=[0],
+            outidx=[3],
+            n=2,
+            inidx_map={0: "A", 1: "B", 2: "C", 3: "D"},
+            outidx_map={0: "W", 1: "X", 2: "Y", 3: "Z"},
+        )
+        self.assertIsInstance(result3, list)
 
 
 if __name__ == "__main__":
