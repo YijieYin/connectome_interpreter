@@ -14,8 +14,8 @@ import plotly.graph_objects as go
 from plotly.colors import qualitative
 import plotly.colors
 
+from .compress_paths import result_summary, signed_conn_by_path_length_data
 
-from .compress_paths import result_summary
 from .utils import (
     adjacency_df_to_el,
     arrayable,
@@ -1632,6 +1632,7 @@ def activation_maximisation(
     wandb: bool = False,
     seed: Optional[int] = None,
     normalize_gradients: bool = False,
+    quiet: bool = False,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -1673,10 +1674,6 @@ def activation_maximisation(
             to 1e-5.
         n_runs (int, optional): The number of runs to consider for early stopping.
             Defaults to 10.
-        use_tqdm (bool, optional): Whether to use tqdm progress bars to track
-            optimization progress. Defaults to True.
-        print_output (bool, optional): Whether to print loss information during
-            optimization. Defaults to True.
         report_memory_usage (bool, optional): Whether to report GPU memory usage during
             optimization. Defaults to False.
         device: The device to run the optimization on. If None, automatically selects a
@@ -1784,6 +1781,12 @@ def activation_maximisation(
             device=device,
         )
     else:
+        # if np.ndarray, convert to tensor
+        if isinstance(input_tensor, np.ndarray):
+            input_tensor = torch.tensor(
+                input_tensor, device=device, dtype=torch.float32
+            )
+
         if input_tensor.shape != (
             batch_size,
             len(model.sensory_indices),
@@ -1803,12 +1806,8 @@ def activation_maximisation(
     out_reg_losses = []
     in_reg_losses = []
     losses = []
-    iteration_range = range(num_iterations)
 
-    if use_tqdm:
-        iteration_range = tqdm(iteration_range)
-
-    for iteration in iteration_range:
+    for iteration in tqdm(range(num_iterations), disable=quiet):
         optimizer.zero_grad()
         # Forward pass
         _ = model(input_tensor)
@@ -1878,7 +1877,7 @@ def activation_maximisation(
 
         optimizer.step()
 
-        if print_output and iteration % 10 == 0:
+        if not quiet and iteration % 10 == 0:
             print(
                 f"Iteration {iteration}: Activation Loss = {activation_loss.item()}, "
                 f"Input regularization Loss = {in_reg_loss.item()}, "
@@ -1888,9 +1887,10 @@ def activation_maximisation(
         torch.cuda.empty_cache()
 
     # Final processing
-    print(
-        f"Final - Activation loss: {act_loss[-1]}, Input reg: {in_reg_losses[-1]}, Output reg: {out_reg_losses[-1]}"
-    )
+    if not quiet:
+        print(
+            f"Final - Activation loss: {act_loss[-1]}, Input reg: {in_reg_losses[-1]}, Output reg: {out_reg_losses[-1]}"
+        )
 
     input_tensor = torch.clamp(input_tensor, -1.0, 1.0)
 
@@ -3309,3 +3309,98 @@ def plot_timeseries(
         ]
     )
     return fig
+
+
+def guess_optimal_stimulus(
+    inprop: sparse.spmatrix,
+    sensory_indices: arrayable,
+    idx_to_sign: dict,
+    target_activations: TargetActivation,
+    longest_plen: int = 5,
+):
+    """
+    Guesses optimal stimulus based on signed effective connectivity (no non-linearity).
+    Since it calculates effective connectivity on the fly (behind the scene using
+    `signed_effective_conn_from_paths()`), it would be good to have a small-ish path
+    length (e.g. 5).
+
+    When the layer number in target_activations is > longest_plen, the function returns
+    a stimulus of shape ((batch,) num_sensory_neurons, longest_plen), instead of shape
+    ((batch,) num_sensory_neurons, layer), appropriate for the stimulus immediately
+    before the large layer number in target_activations.
+
+    e.g. if target_activations has layer 10, and longest_plen = 5, the user should first
+    make a random stimulus of shape ((batch,) num_sensory_neurons, 10), and then replace
+    the last 5 timesteps with the output of this function.
+
+    Args:
+        inprop (sparse.spmatrix): The inprop matrix of the model. Pre is in the rows,
+            post in the columns. There are only positive values in this matrix, the sign
+            information is added using idx_to_sign.
+        sensory_indices (arrayable): The sensory indices of the model.
+        idx_to_sign (dict): A dictionary mapping indices to their sign (-1 or 1).
+        target_activations (TargetActivation): The target activations.
+        longest_plen (int, optional): The longest path length to consider. Defaults to 5.
+
+    Returns:
+        np.ndarray: The guessed optimal stimulus. Shape is
+        ((batch,) num_sensory_neurons, min(longest_plen, max_layer_in_target_activations)).
+    """
+
+    all_layers = set()
+    for batch in range(target_activations.batch_size):
+        batch_targets = target_activations.get_batch_targets(batch)
+        all_layers = all_layers | set(batch_targets.keys())
+
+    max_layer = int(max(all_layers))
+    stimuli = []
+
+    nlayer = int(min(longest_plen, max_layer + 1))
+
+    for batch in range(target_activations.batch_size):
+        # shape (num_sensory_neurons, max_layer + 1) (0-indexing)
+        this_stimulus = pd.DataFrame(
+            data=np.zeros((len(sensory_indices), nlayer)),
+            index=sensory_indices,
+            columns=range(nlayer),
+        )
+        this_stimulus.index = this_stimulus.index.astype(str)
+
+        batch_targets = target_activations.get_batch_targets(batch)
+        # iterate through each layer for this batch
+        for layer, neuron_targets in batch_targets.items():
+            post_indices = list(neuron_targets.keys())
+            # Convert neuron indices to int then string (pandas iterrows converts to float)
+            neuron_targets = {str(int(k)): v for k, v in neuron_targets.items()}
+            # excitatory/inhibitory effective connectivity
+            excs, inhbs = signed_conn_by_path_length_data(
+                inprop,
+                sensory_indices,
+                post_indices,
+                int(min(layer + 1, longest_plen)),
+                idx_to_sign,
+            )
+            # scale by target activations, then sum across post neurons
+            excs = [
+                exc.multiply(exc.columns.map(neuron_targets).values, axis=1).sum(axis=1)
+                for exc in excs
+            ]
+            inhbs = [
+                inhb.multiply(inhb.columns.map(neuron_targets).values, axis=1).sum(
+                    axis=1
+                )
+                for inhb in inhbs
+            ]
+
+            # now loop through each path length and add to this_stimulus
+            # e.g. len(excs) = 3 means path lengths 1, 2, 3
+            for plen in range(len(excs)):
+                # e.g. this_stimulus[2] += excs[0] - inhbs[0]
+                this_stimulus[len(excs) - (1 + plen)] += excs[plen].reindex(
+                    this_stimulus.index, fill_value=0
+                )
+                this_stimulus[len(excs) - (1 + plen)] -= inhbs[plen].reindex(
+                    this_stimulus.index, fill_value=0
+                )
+        stimuli.append(this_stimulus.values.astype(np.float32))
+    return np.stack(stimuli)

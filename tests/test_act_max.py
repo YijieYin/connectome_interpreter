@@ -15,6 +15,7 @@ from connectome_interpreter.activation_maximisation import (
     get_neuron_activation,
     get_input_activation,
     get_gradients,
+    guess_optimal_stimulus,
 )
 
 
@@ -1447,3 +1448,266 @@ class TestNormalizeGradients(unittest.TestCase):
             act_losses[-1] < 0.8 * act_losses[0],
             f"Loss should decrease: initial={act_losses[0]}, final={act_losses[-1]}",
         )
+
+
+class TestGuessOptimalStimulus(unittest.TestCase):
+    """Test suite for guess_optimal_stimulus function"""
+
+    def setUp(self):
+        """Set up test fixtures with a simple connectivity matrix"""
+        # Create a simple 6-neuron network:
+        # - Neurons 0, 1: sensory (excitatory)
+        # - Neuron 2: inhibitory
+        # - Neurons 3, 4, 5: internal (excitatory)
+
+        # Simple connectivity: sensory -> internal with some inhibition
+        self.inprop = csr_matrix(
+            np.array(
+                [
+                    [0, 0, 0, 0.5, 0, 0],  # 0 (sensory) -> 3
+                    [0, 0, 0, 0, 0.6, 0],  # 1 (sensory) -> 4
+                    [0, 0, 0, -0.3, -0.2, 0],  # 2 (inhibitory) -> 3, 4
+                    [0, 0, 0, 0, 0, 0.7],  # 3 -> 5
+                    [0, 0, 0, 0, 0, 0.4],  # 4 -> 5
+                    [0, 0, 0, 0, 0, 0],  # 5 (no output)
+                ]
+            )
+        )
+
+        self.sensory_indices = [0, 1]
+        self.idx_to_sign = {
+            0: 1,  # excitatory
+            1: 1,  # excitatory
+            2: -1,  # inhibitory
+            3: 1,  # excitatory
+            4: 1,  # excitatory
+            5: 1,  # excitatory
+        }
+
+    def test_basic_functionality_single_batch(self):
+        """Test basic functionality with single batch and single target"""
+        targets = TargetActivation(
+            targets={0: {3: 1.0}}, batch_size=1  # layer 0, neuron 3
+        )
+
+        result = guess_optimal_stimulus(
+            self.inprop, self.sensory_indices, self.idx_to_sign, targets, longest_plen=2
+        )
+
+        # Check output shape: (batch_size, num_sensory, nlayer)
+        # nlayer = min(longest_plen, max_layer + 1) = min(2, 0 + 1) = 1
+        expected_shape = (1, 2, 1)
+        self.assertEqual(result.shape, expected_shape)
+
+        # Check that stimulus is non-zero (neuron 3 is connected to sensory 0)
+        self.assertTrue(np.any(result != 0))
+
+    def test_multiple_batches(self):
+        """Test with multiple batches"""
+        # Use DataFrame format for multiple batches with different targets
+        targets = TargetActivation(
+            targets=pd.DataFrame(
+                [
+                    {"batch": 0, "layer": 0, "neuron": 3, "value": 1.0},
+                    {"batch": 1, "layer": 0, "neuron": 4, "value": 0.8},
+                ]
+            )
+        )
+
+        result = guess_optimal_stimulus(
+            self.inprop, self.sensory_indices, self.idx_to_sign, targets, longest_plen=2
+        )
+
+        # Check output shape
+        expected_shape = (2, 2, 1)
+        self.assertEqual(result.shape, expected_shape)
+
+        # Batches should be different (targeting different neurons)
+        self.assertFalse(np.allclose(result[0], result[1]))
+
+    def test_multiple_layers_and_path_lengths(self):
+        """Test with targets at different layers"""
+        targets = TargetActivation(
+            targets={0: {5: 1.0}},  # layer 0, neuron 5 (2 hops away)
+            batch_size=1,
+        )
+
+        result = guess_optimal_stimulus(
+            self.inprop, self.sensory_indices, self.idx_to_sign, targets, longest_plen=3
+        )
+
+        # nlayer = min(3, 0 + 1) = 1
+        expected_shape = (1, 2, 1)
+        self.assertEqual(result.shape, expected_shape)
+
+    def test_layer_exceeds_longest_plen(self):
+        """Test when target layer exceeds longest_plen"""
+        targets = TargetActivation(
+            targets={10: {5: 1.0}}, batch_size=1  # layer 10, neuron 5
+        )
+
+        result = guess_optimal_stimulus(
+            self.inprop, self.sensory_indices, self.idx_to_sign, targets, longest_plen=3
+        )
+
+        # nlayer should be min(3, 10 + 1) = 3
+        expected_shape = (1, 2, 3)
+        self.assertEqual(result.shape, expected_shape)
+
+    def test_multiple_targets_same_layer(self):
+        """Test with multiple target neurons at the same layer"""
+        targets = TargetActivation(
+            targets={0: {3: 0.5, 4: 0.8}},  # layer 0, neurons 3 and 4
+            batch_size=1,
+        )
+
+        result = guess_optimal_stimulus(
+            self.inprop, self.sensory_indices, self.idx_to_sign, targets, longest_plen=2
+        )
+
+        expected_shape = (1, 2, 1)
+        self.assertEqual(result.shape, expected_shape)
+
+        # Result should reflect contributions from both targets
+        self.assertTrue(np.any(result != 0))
+
+    def test_inhibitory_influence(self):
+        """Test that inhibitory neurons have negative influence"""
+        # Create a simpler network to test inhibition
+        # inprop should contain only positive weights
+        simple_inprop = csr_matrix(
+            np.array(
+                [
+                    [0, 0, 0],  # 0 (sensory)
+                    [0, 0, 0.5],  # 1 -> 2 with weight 0.5 (sign from idx_to_sign)
+                    [0, 0, 0],  # 2 (target)
+                ]
+            )
+        )
+
+        simple_idx_to_sign = {0: 1, 1: -1, 2: 1}  # 1 is inhibitory
+
+        targets = TargetActivation(
+            targets={0: {2: 1.0}}, batch_size=1  # layer 0, Want to activate neuron 2
+        )
+
+        result = guess_optimal_stimulus(
+            simple_inprop,
+            [0, 1],  # both sensory
+            simple_idx_to_sign,
+            targets,
+            longest_plen=2,
+        )
+
+        # Neuron 1 is inhibitory and connects to neuron 2 with weight 0.5
+        # signed_conn_by_path_length_data returns inhib DataFrame with positive value 0.5
+        # The function does: stimulus += exc - inhib = 0 - 0.5 = -0.5
+        # So it correctly suggests REDUCING activation of neuron 1 to maximize neuron 2
+        self.assertTrue(result[0, 1, 0] < 0)
+
+    def test_output_dtype(self):
+        """Test that output is float32"""
+        targets = TargetActivation(targets={0: {0: {3: 1.0}}}, batch_size=1)
+
+        result = guess_optimal_stimulus(
+            self.inprop, self.sensory_indices, self.idx_to_sign, targets, longest_plen=2
+        )
+
+        self.assertEqual(result.dtype, np.float32)
+
+    def test_empty_paths_handling(self):
+        """Test with target neuron that has no paths from sensory neurons"""
+        # Create network where neuron 5 has no incoming connections from sensory
+        disconnected_inprop = csr_matrix(
+            np.array(
+                [
+                    [0, 0, 0, 0, 0, 0],
+                    [0, 0, 0, 0, 0, 0],
+                    [0, 0, 0, 0, 0, 0],
+                    [0, 0, 0, 0, 0, 0],
+                    [0, 0, 0, 0, 0, 0],
+                    [0, 0, 0, 0, 0, 0],
+                ]
+            )
+        )
+
+        targets = TargetActivation(targets={0: {0: {5: 1.0}}}, batch_size=1)
+
+        result = guess_optimal_stimulus(
+            disconnected_inprop,
+            self.sensory_indices,
+            self.idx_to_sign,
+            targets,
+            longest_plen=2,
+        )
+
+        # Should return zeros when no paths exist
+        self.assertTrue(np.allclose(result, 0))
+
+    def test_sensory_indices_as_different_types(self):
+        """Test that sensory_indices can be list, array, or set"""
+        targets = TargetActivation(targets={0: {0: {3: 1.0}}}, batch_size=1)
+
+        # Test with list
+        result_list = guess_optimal_stimulus(
+            self.inprop, [0, 1], self.idx_to_sign, targets, longest_plen=2
+        )
+
+        # Test with numpy array
+        result_array = guess_optimal_stimulus(
+            self.inprop, np.array([0, 1]), self.idx_to_sign, targets, longest_plen=2
+        )
+
+        # Both should give the same result
+        np.testing.assert_array_almost_equal(result_list, result_array)
+
+    def test_different_target_values(self):
+        """Test that different target activation values scale the stimulus"""
+        targets_small = TargetActivation(targets={0: {0: {3: 0.1}}}, batch_size=1)
+
+        targets_large = TargetActivation(targets={0: {0: {3: 1.0}}}, batch_size=1)
+
+        result_small = guess_optimal_stimulus(
+            self.inprop,
+            self.sensory_indices,
+            self.idx_to_sign,
+            targets_small,
+            longest_plen=2,
+        )
+
+        result_large = guess_optimal_stimulus(
+            self.inprop,
+            self.sensory_indices,
+            self.idx_to_sign,
+            targets_large,
+            longest_plen=2,
+        )
+
+        # Larger target should produce larger stimulus (scaled by 10x)
+        ratio = result_large / (result_small + 1e-10)  # avoid division by zero
+        # The ratio should be approximately 10 for non-zero elements
+        non_zero_mask = np.abs(result_small) > 1e-6
+        if np.any(non_zero_mask):
+            self.assertTrue(np.allclose(ratio[non_zero_mask], 10.0, rtol=0.1))
+
+    def test_targets_at_multiple_layers_same_batch(self):
+        """Test with targets at multiple layers in the same batch"""
+        targets = TargetActivation(
+            targets={
+                0: {3: 1.0},  # layer 0, neuron 3
+                1: {4: 0.5},  # layer 1, neuron 4
+            },
+            batch_size=1,
+        )
+
+        result = guess_optimal_stimulus(
+            self.inprop, self.sensory_indices, self.idx_to_sign, targets, longest_plen=3
+        )
+
+        # nlayer = min(3, max(0, 1) + 1) = min(3, 2) = 2
+        expected_shape = (1, 2, 2)
+        self.assertEqual(result.shape, expected_shape)
+
+
+if __name__ == "__main__":
+    unittest.main()
