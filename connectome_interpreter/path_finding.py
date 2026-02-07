@@ -1671,36 +1671,113 @@ def count_paths(
     edgelist: pd.DataFrame,
     start_layer: int = 1,
     end_layer: Optional[int] = None,
-    include_loops: bool = True,
-) -> int:
+    loop_mode: str = "allow",
+) -> Union[int, Tuple[int, int]]:
     """
-    Counts all paths without materializing them in memory.
-    Uses memoization to avoid redundant computation.
+    Counts all paths without materializing them in memory. Uses memoization to avoid
+    redundant computation. This function was written mostly by Claude Sonnet 4.5 under
+    instructions.
 
     Args:
       edgelist (pd.DataFrame): Must contain "layer", "pre", "post" columns.
       start_layer (int): Starting layer.
       end_layer (int): Ending layer. If None, uses max layer.
-      include_loops (bool, optional): If True (default), counts all paths including
-        those with loops (nodes that appear more than once in the middle of the path).
-        If False, only counts loop-free paths. Note: a node appearing at both the
-        start and end of a path is allowed (e.g., A-B-C-D-A is not considered a loop),
-        but a node appearing again in the middle is a loop (e.g., A-B-C-A-A has a loop).
+      loop_mode (str, optional): How to handle loops in paths. Options:
+        - "allow" (default): Count all paths including those with loops.
+        - "exclude": Count only loop-free paths.
+        - "both": Return tuple (count_with_loops, count_without_loops) computed
+          efficiently in a single DFS pass.
+        Note: a node appearing at both the start and end of a path is allowed
+        (e.g., A-B-C-D-A is not considered a loop), but a node appearing again
+        in the middle is a loop (e.g., A-B-C-A-A has a loop).
 
     Returns:
-      int: Total number of valid paths.
+      int or tuple: If loop_mode is "allow" or "exclude", returns an int with the
+        total number of valid paths. If loop_mode is "both", returns a tuple
+        (count_with_loops, count_without_loops).
     """
     if end_layer is None:
         end_layer = edgelist["layer"].max()
     if start_layer > end_layer:
         raise ValueError("start_layer must be less than or equal to end_layer.")
 
+    if loop_mode not in ["allow", "exclude", "both"]:
+        raise ValueError(
+            f"loop_mode must be 'allow', 'exclude', or 'both', got '{loop_mode}'"
+        )
+
     # Build adjacency
     adj: Dict[int, Dict[Union[str, int], List]] = defaultdict(lambda: defaultdict(list))
     for _, row in edgelist.iterrows():
         adj[row["layer"]][row["pre"]].append(row["post"])
 
-    if include_loops:
+    if loop_mode == "both":
+        # Compute both counts in a single DFS pass
+        # Use memoization for the with-loops count
+        memo_with_loops = {}
+
+        def dfs_both(
+            node: Union[str, int], layer: int, visited: set, start_node: Union[str, int]
+        ) -> Tuple[int, int]:
+            """
+            Returns (count_with_loops, count_without_loops) for paths starting from node.
+            """
+            # Check if this is a loop for the no-loops count
+            is_loop = node in visited
+
+            # For with-loops count, use memoization
+            if (node, layer) in memo_with_loops:
+                count_with = memo_with_loops[(node, layer)]
+            else:
+                # add 1 when reaches the end
+                if layer == end_layer:
+                    count_with = 1
+                else:
+                    count_with = 0
+                    # iterate over all postsynaptic nodes
+                    for post in adj.get(layer + 1, {}).get(node, []):
+                        # For with-loops, we don't care about visited history
+                        # So we can recurse with empty visited set for memoization
+                        count_with += dfs_both(post, layer + 1, set(), start_node)[0]
+
+                memo_with_loops[(node, layer)] = count_with
+
+            # For without-loops count, cannot use memoization
+            if is_loop:
+                # If we're at the end layer and this node is the start node, that's OK
+                if layer == end_layer and node == start_node:
+                    count_without = 1
+                else:
+                    # Otherwise, this is a loop
+                    count_without = 0
+            elif layer == end_layer:
+                count_without = 1
+            else:
+                # Add current node to visited set for this path
+                visited.add(node)
+                count_without = 0
+
+                # iterate over all postsynaptic nodes
+                for post in adj.get(layer + 1, {}).get(node, []):
+                    # recursively count paths from post
+                    count_without += dfs_both(post, layer + 1, visited, start_node)[1]
+
+                # Remove node from visited when backtracking
+                visited.remove(node)
+
+            return (count_with, count_without)
+
+        path_count_with = 0
+        path_count_without = 0
+        for pre in adj.get(start_layer, {}):
+            for post in adj.get(start_layer, {}).get(pre, []):
+                with_loops, without_loops = dfs_both(post, start_layer, {pre}, pre)
+                path_count_with += with_loops
+                path_count_without += without_loops
+
+        return (path_count_with, path_count_without)
+
+    elif loop_mode == "allow":
         # Original memoized approach when loops are allowed
         memo = {}
 
@@ -1728,7 +1805,7 @@ def count_paths(
                 path_count += dfs(post, start_layer)
 
         return path_count
-    else:
+    else:  # loop_mode == "exclude"
         # When loops are not allowed, track visited nodes per path
         # Cannot use memoization because path validity depends on history
         def dfs_no_loops(

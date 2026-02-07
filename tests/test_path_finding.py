@@ -715,26 +715,26 @@ class TestCountPaths(unittest.TestCase):
         self.assertEqual(count, len(paths))
 
     def test_include_loops_true(self):
-        """Test that include_loops=True counts all paths including loops"""
+        """Test that loop_mode='allow' counts all paths including loops"""
         edges = [
             ("a", "b", 1.0, 1),
             ("b", "a", 1.0, 2),  # Creates a loop back to 'a'
             ("a", "c", 1.0, 3),
         ]
         df = self.mk_df(edges)
-        count = count_paths(df, 1, 3, include_loops=True)
+        count = count_paths(df, 1, 3, loop_mode="allow")
         # Path: a->b->a->c (this has a loop)
         self.assertEqual(count, 1)
 
     def test_include_loops_false_with_loop(self):
-        """Test that include_loops=False excludes paths with loops in the middle"""
+        """Test that loop_mode='exclude' excludes paths with loops in the middle"""
         edges = [
             ("a", "b", 1.0, 1),
             ("b", "a", 1.0, 2),  # Creates a loop back to 'a'
             ("a", "c", 1.0, 3),
         ]
         df = self.mk_df(edges)
-        count = count_paths(df, 1, 3, include_loops=False)
+        count = count_paths(df, 1, 3, loop_mode="exclude")
         # Path a->b->a->c should be excluded (a appears at start and in middle)
         self.assertEqual(count, 0)
 
@@ -746,7 +746,7 @@ class TestCountPaths(unittest.TestCase):
             ("c", "a", 1.0, 3),  # Returns to 'a' at the end
         ]
         df = self.mk_df(edges)
-        count = count_paths(df, 1, 3, include_loops=False)
+        count = count_paths(df, 1, 3, loop_mode="exclude")
         # Path: a->b->c->a is allowed (a only at start and end)
         self.assertEqual(count, 1)
 
@@ -759,20 +759,20 @@ class TestCountPaths(unittest.TestCase):
             ("a", "a", 1.0, 4),  # A appears again after returning
         ]
         df = self.mk_df(edges)
-        count = count_paths(df, 1, 4, include_loops=False)
+        count = count_paths(df, 1, 4, loop_mode="exclude")
         # Path a->b->c->a->a has a loop (a appears at positions 0, 3, 4)
         self.assertEqual(count, 0)
 
     def test_include_loops_false_no_loop(self):
-        """Test that include_loops=False allows paths without loops"""
+        """Test that loop_mode='exclude' allows paths without loops"""
         edges = [
             ("a", "b", 1.0, 1),
             ("b", "c", 1.0, 2),
             ("c", "d", 1.0, 3),
         ]
         df = self.mk_df(edges)
-        count_with_loops = count_paths(df, 1, 3, include_loops=True)
-        count_without_loops = count_paths(df, 1, 3, include_loops=False)
+        count_with_loops = count_paths(df, 1, 3, loop_mode="allow")
+        count_without_loops = count_paths(df, 1, 3, loop_mode="exclude")
         # No loops exist, so counts should be the same
         self.assertEqual(count_with_loops, count_without_loops)
         self.assertEqual(count_without_loops, 1)
@@ -786,7 +786,7 @@ class TestCountPaths(unittest.TestCase):
             ("c", "d", 1.0, 2),
         ]
         df = self.mk_df(edges)
-        count = count_paths(df, 1, 2, include_loops=False)
+        count = count_paths(df, 1, 2, loop_mode="exclude")
         # Two paths: a->b->d and a->c->d, neither has loops
         self.assertEqual(count, 2)
 
@@ -801,8 +801,8 @@ class TestCountPaths(unittest.TestCase):
             ("d", "e", 1.0, 3),  # Non-loop path
         ]
         df = self.mk_df(edges)
-        count_with_loops = count_paths(df, 1, 3, include_loops=True)
-        count_without_loops = count_paths(df, 1, 3, include_loops=False)
+        count_with_loops = count_paths(df, 1, 3, loop_mode="allow")
+        count_without_loops = count_paths(df, 1, 3, loop_mode="exclude")
         # With loops: a->b->d->b, a->b->d->e, a->c->d->b, a->c->d->e = 4
         # Without loops:
         #   - a->b->d->b has loop (b appears at position 1 and 3)
@@ -845,3 +845,80 @@ class TestCountPaths(unittest.TestCase):
         df = self.mk_df(edges)
         count = count_paths(df, 1, 1)
         self.assertEqual(count, 3)
+
+    def test_return_both_simple(self):
+        """Test loop_mode='both' with a simple graph"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("b", "c", 2.0, 2),
+        ]
+        df = self.mk_df(edges)
+        count_with, count_without = count_paths(df, 1, 2, loop_mode="both")
+        self.assertEqual(count_with, 1)
+        self.assertEqual(count_without, 1)
+
+    def test_return_both_with_loops(self):
+        """Test loop_mode='both' returns different counts when loops exist"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("a", "c", 1.0, 1),
+            ("b", "d", 1.0, 2),
+            ("c", "d", 1.0, 2),
+            ("d", "b", 1.0, 3),  # Creates loop back to b
+            ("d", "e", 1.0, 3),  # Non-loop path
+        ]
+        df = self.mk_df(edges)
+        count_with, count_without = count_paths(df, 1, 3, loop_mode="both")
+        # Verify it matches individual calls
+        count_with_only = count_paths(df, 1, 3, loop_mode="allow")
+        count_without_only = count_paths(df, 1, 3, loop_mode="exclude")
+        self.assertEqual(count_with, count_with_only)
+        self.assertEqual(count_without, count_without_only)
+        self.assertEqual(count_with, 4)
+        self.assertEqual(count_without, 3)
+
+    def test_return_both_matches_separate_calls(self):
+        """Verify loop_mode='both' gives same results as two separate calls"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("a", "c", 2.0, 1),
+            ("b", "d", 3.0, 2),
+            ("b", "e", 3.5, 2),
+            ("c", "d", 4.0, 2),
+            ("c", "e", 4.5, 2),
+            ("d", "f", 5.0, 3),
+            ("e", "f", 6.0, 3),
+        ]
+        df = self.mk_df(edges)
+
+        # Get both counts in one call
+        count_with, count_without = count_paths(df, 1, 3, loop_mode="both")
+
+        # Get counts separately
+        count_with_separate = count_paths(df, 1, 3, loop_mode="allow")
+        count_without_separate = count_paths(df, 1, 3, loop_mode="exclude")
+
+        self.assertEqual(count_with, count_with_separate)
+        self.assertEqual(count_without, count_without_separate)
+
+    def test_return_both_default_false(self):
+        """Test that loop_mode defaults to 'allow' and returns int"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("b", "c", 2.0, 2),
+        ]
+        df = self.mk_df(edges)
+        count = count_paths(df, 1, 2)
+        # Should return int, not tuple
+        self.assertIsInstance(count, int)
+        self.assertEqual(count, 1)
+
+    def test_invalid_loop_mode(self):
+        """Test that invalid loop_mode raises ValueError"""
+        edges = [
+            ("a", "b", 1.0, 1),
+            ("b", "c", 2.0, 2),
+        ]
+        df = self.mk_df(edges)
+        with self.assertRaises(ValueError):
+            count_paths(df, 1, 2, loop_mode="invalid")
