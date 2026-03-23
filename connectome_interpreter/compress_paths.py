@@ -1799,13 +1799,13 @@ def conn_by_path_length_data(
 
     # if no grouping dict provided, group all together
     if inidx_map is None:
-        inidx_map = {idx: "group" for idx in range(inprop.shape[0])}
+        inidx_map = {idx: "group" for idx in inidx}
         inidx_map_is_none = True
     else:
         inidx_map_is_none = False
 
     if outidx_map is None:
-        outidx_map = {idx: "group" for idx in range(inprop.shape[0])}
+        outidx_map = {idx: "group" for idx in outidx}
         outidx_map_is_none = True
     else:
         outidx_map_is_none = False
@@ -1869,7 +1869,7 @@ def conn_by_path_length_data(
                 df = pd.DataFrame(columns=["path_length", "post", "weight"])
             else:
                 df = pd.DataFrame(columns=["path_length", "pre", "weight"])
-            
+
             if wide:
                 # Return empty pivoted DataFrame
                 return pd.DataFrame()
@@ -2202,6 +2202,7 @@ def effective_conn_from_paths(
     density_threshold: float = 0.2,
     use_gpu: bool = True,
     root: bool = False,
+    quiet: bool = False,
 ):
     """
     Calculate the effective connectivity from the paths Dataframe (which could be an
@@ -2233,7 +2234,8 @@ def effective_conn_from_paths(
     # 0. preliminaries
     # --------------------------------------------------------------------- #
     if len(paths) == 0:
-        print("No paths found, returning None.")
+        if not quiet:
+            print("No paths found, returning None.")
         return None
 
     local_idx_dict = {
@@ -2250,7 +2252,8 @@ def effective_conn_from_paths(
             pass
         else:
             use_gpu = False
-            print("GPU not available, using CPU instead.")
+            if not quiet:
+                print("GPU not available, using CPU instead.")
 
     if not use_gpu:
         for i, layer in enumerate(sorted(paths.layer.unique())):
