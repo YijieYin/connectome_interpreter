@@ -184,9 +184,9 @@ class LinearNetwork(nn.Module):
             strengths. Defaults to 1.
         activation_function (Callable, optional): Custom activation function. If None,
             uses default implementation.
-        tau (float, optional): The extent to which the activation persists to the next
-            timestep. Defaults to 0 (no persistence). 0.5 means 50% of the activation is
-            carried over to the next timestep.
+        tau (float, optional): Time constant. Higher tau results in slower changes.
+            Minimum 1, where the activation at the current time step is solely
+            determined by the current input. Defaults to 10.
         device (torch.device, optional): Device for computation.
     """
 
@@ -204,7 +204,7 @@ class LinearNetwork(nn.Module):
         divisive_normalization: Optional[Dict[str, List[str]]] = None,
         divisive_strength: Union[float, int, dict] = 1,
         activation_function: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-        tau: float = 0,
+        tau: float = 10,
         device: Optional[torch.device] = None,
     ):
         super().__init__()
@@ -477,14 +477,14 @@ class LinearNetwork(nn.Module):
             biases = self.biases[self.indices]
             biases = biases.view(-1, 1).expand(-1, x.shape[1]).to(x.device)
 
-        x = self.tau * x_previous + slopes * x + biases
-        # x = slopes * x + biases
+        # x = self.tau * x_previous + slopes * x + biases
+        x = slopes * x + biases
 
         # # Thresholded relu
         # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
 
         # # Tanh activation
-        # x = torch.tanh(x)
+        x = 1 / self.tau * x + (self.tau - 1) / self.tau * x_previous
 
         return x
 
@@ -819,9 +819,9 @@ class MultilayeredNetwork(nn.Module):
             strengths. Defaults to 1.
         activation_function (Callable, optional): Custom activation function. If None,
             uses default implementation.
-        tau (float, optional): The extent to which the activation persists to the next
-            timestep. Defaults to 0 (no persistence). 0.5 means 50% of the activation is
-            carried over to the next timestep.
+        tau (float, optional): Time constant. Higher tau results in slower changes.
+            Minimum 1, where the activation at the current time step is solely
+            determined by the current input. Defaults to 10.
         device (torch.device, optional): Device for computation.
     """
 
@@ -839,7 +839,7 @@ class MultilayeredNetwork(nn.Module):
         divisive_normalization: Optional[Dict[str, List[str]]] = None,
         divisive_strength: Union[float, int, dict] = 1,
         activation_function: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-        tau: float = 0,
+        tau: float = 10,
         device: Optional[torch.device] = None,
     ):
         super().__init__()
@@ -1111,14 +1111,14 @@ class MultilayeredNetwork(nn.Module):
             biases = self.biases[self.indices]
             biases = biases.view(-1, 1).expand(-1, x.shape[1]).to(x.device)
 
-        x = self.tau * x_previous + slopes * x + biases
-        # x = slopes * x + biases
+        # x = self.tau * x_previous + slopes * x + biases
+        x = slopes * x + biases
 
         # Thresholded relu
         x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
 
-        # Tanh activation
-        x = torch.tanh(x)
+        # # Tanh activation
+        x = 1 / self.tau * torch.tanh(x) + (self.tau - 1) / self.tau * x_previous
 
         return x
 
@@ -3409,3 +3409,95 @@ def guess_optimal_stimulus(
                 )
         stimuli.append(this_stimulus.values.astype(np.float32))
     return np.stack(stimuli)
+
+
+def legacy_activation_function(
+    self, x: torch.Tensor, x_previous=Optional[torch.Tensor]
+) -> torch.Tensor:
+    """
+    Apply the activation function to the input tensor. Currently it is
+    tanh(relu(slope * x + bias)). x = weights @ inputs (done outside the activation
+    function). Note if using this, then tau should be a number between 0 and 1, as it
+    represents the extent to which the activation persists to the next timestep.
+
+    Args:
+        x (torch.Tensor): The input tensor to the activation function.
+        x_previous (Optional[torch.Tensor]): The previous activations of the neurons.
+
+    Returns:
+        torch.Tensor: The output tensor after applying the activation function.
+    """
+    if self.custom_activation_function is not None:
+        return self.custom_activation_function(self, x, x_previous)
+
+    if self.slope is None:
+        slopes = self.tanh_steepness
+    else:
+        slopes = self.slope[self.indices]  # shape: (num_neurons,)
+        # shape: (num_neurons, batch_size)
+        slopes = slopes.view(-1, 1).expand(-1, x.shape[1]).to(x.device)
+
+    slopes = self.divnorm(slopes, x_previous)
+
+    if self.biases is None:
+        biases = self.default_bias
+    else:
+        biases = self.biases[self.indices]
+        biases = biases.view(-1, 1).expand(-1, x.shape[1]).to(x.device)
+
+    x = self.tau * x_previous + slopes * x + biases
+    # x = slopes * x + biases
+
+    # Thresholded relu
+    x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+
+    # Tanh activation
+    x = torch.tanh(x)
+
+    return x
+
+
+def legacy_activation_function_linear(
+    self, x: torch.Tensor, x_previous: Optional[torch.Tensor] = None
+) -> torch.Tensor:
+    """
+    Apply the activation function to the input tensor. Currently it is
+    tanh(relu(slope * x + bias)). x = weights @ inputs (done outside the activation
+    function). Note if using this, then tau should be a number between 0 and 1, as it
+    represents the extent to which the activation persists to the next timestep.
+
+    Args:
+        x (torch.Tensor): The input tensor to the activation function.
+        x_previous (Optional[torch.Tensor]): The previous activations of the neurons.
+
+    Returns:
+        torch.Tensor: The output tensor after applying the activation function.
+    """
+    if self.custom_activation_function is not None:
+        return self.custom_activation_function(self, x, x_previous)
+
+    if self.slope is None:
+        slopes = self.tanh_steepness
+    else:
+        slopes = self.slope[self.indices]  # shape: (num_neurons,)
+        # shape: (num_neurons, batch_size)
+        slopes = slopes.view(-1, 1).expand(-1, x.shape[1]).to(x.device)
+
+    slopes = self.divnorm(slopes, x_previous)
+
+    if self.biases is None:
+        biases = self.default_bias
+    else:
+        biases = self.biases[self.indices]
+        biases = biases.view(-1, 1).expand(-1, x.shape[1]).to(x.device)
+
+    x = self.tau * x_previous + slopes * x + biases
+    # x = slopes * x + biases
+
+    # # Thresholded relu
+    # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+
+    # # Tanh activation
+    # x = torch.tanh(x)
+
+    return x

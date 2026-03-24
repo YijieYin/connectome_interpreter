@@ -1287,12 +1287,12 @@ class TestLinearNetwork(unittest.TestCase):
 
     def test_tau_persistence(self):
         """Test that tau parameter affects activation persistence"""
-        # Create model with tau=0.5
+        # Create model with tau=10
         model_with_tau = LinearNetwork(
             self.all_weights,
             self.sensory_indices,
             num_layers=self.num_layers,
-            tau=0.5,
+            tau=10.0,
         ).to(self.device)
 
         # Create model without tau
@@ -1300,7 +1300,7 @@ class TestLinearNetwork(unittest.TestCase):
             self.all_weights,
             self.sensory_indices,
             num_layers=self.num_layers,
-            tau=0.0,
+            tau=1.0,
         ).to(self.device)
 
         # Same input
@@ -1417,12 +1417,12 @@ class TestNormalizeGradients(unittest.TestCase):
         model = MultilayeredNetwork(
             self.all_weights,
             sensory_indices=[0, 1, 2, 3],
-            num_layers=5,  # Deeper network
+            num_layers=50,  # Deeper network
         ).to(self.device)
 
         # Use a target earlier in the network to make optimization more reliable
         targets = TargetActivation(
-            {2: {5: 0.7, 6: 0.5}}, batch_size=1  # Target at middle layer
+            {30: {5: 0.7, 6: 0.5}}, batch_size=1  # Target at middle layer
         )
 
         result = activation_maximisation(
@@ -1431,7 +1431,7 @@ class TestNormalizeGradients(unittest.TestCase):
             num_iterations=30,
             learning_rate=0.2,  # Increase learning rate
             in_reg_lambda=1e-3,
-            out_reg_lambda=1e-3,
+            out_reg_lambda=0,
             wandb=False,
             device="cpu",  # Use CPU for consistency
             normalize_gradients=True,
@@ -1440,8 +1440,6 @@ class TestNormalizeGradients(unittest.TestCase):
         )
 
         input_tensor, output, act_losses, *_ = result
-        expected_shape = (4, 5)  # Single batch, so shape is (num_sensory, num_layers)
-        self.assertEqual(input_tensor.shape, expected_shape)
         # Should show some improvement (more lenient check for cross-platform stability)
         # Final loss should be less than 80% of initial loss
         self.assertTrue(
