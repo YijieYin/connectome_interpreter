@@ -615,7 +615,7 @@ class TestMultilayeredNetworkEnhanced(unittest.TestCase):
     def test_custom_activation_function(self):
         """Test custom activation function"""
 
-        def custom_activation(x):
+        def custom_activation(self, x, x_previous=None):
             return torch.sigmoid(x)
 
         model = MultilayeredNetwork(
@@ -974,7 +974,7 @@ class TestDivisiveNormalization(unittest.TestCase):
         self.assertGreater(out_no_dn[1, 0].item(), 0.0)
 
 
-def _linear_activation(x):
+def _linear_activation(self, x, x_previous=None):
     # custom activation: identity; ignores x_previous
     return x
 
@@ -1242,7 +1242,7 @@ class TestLinearNetwork(unittest.TestCase):
     def test_custom_activation_function(self):
         """Test LinearNetwork with custom activation function"""
 
-        def custom_activation(x, x_previous=None):
+        def custom_activation(self, x, x_previous=None):
             return torch.relu(x)
 
         model = LinearNetwork(

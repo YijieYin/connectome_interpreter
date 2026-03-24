@@ -134,7 +134,9 @@ class LinearNetwork(nn.Module):
         activations (numpy.ndarray): An array storing the activations of all (batches of)
             neurons (rows) across time steps (columns).
         custom_activation_function (Callable): A custom activation function to use
-            instead of the default.
+            instead of the default. The function should take the model, the input tensor
+            x, and the previous activations x_previous as arguments, and return the
+            output tensor after applying the activation function.
         default_bias (float): Default bias value for all neurons.
         slope (torch.nn.Parameter): Trainable parameter for the steepness of the tanh
             activation function, grouped by neuron type.
@@ -443,7 +445,7 @@ class LinearNetwork(nn.Module):
         return slopes
 
     def activation_function(
-        self, x: torch.Tensor, x_previous=Optional[torch.Tensor]
+        self, x: torch.Tensor, x_previous: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Apply the activation function to the input tensor. Currently it is
@@ -452,12 +454,13 @@ class LinearNetwork(nn.Module):
 
         Args:
             x (torch.Tensor): The input tensor to the activation function.
+            x_previous (Optional[torch.Tensor]): The previous activations of the neurons.
 
         Returns:
             torch.Tensor: The output tensor after applying the activation function.
         """
         if self.custom_activation_function is not None:
-            return self.custom_activation_function(x)
+            return self.custom_activation_function(self, x, x_previous)
 
         if self.slope is None:
             slopes = self.tanh_steepness
@@ -766,7 +769,9 @@ class MultilayeredNetwork(nn.Module):
         activations (numpy.ndarray): An array storing the activations of all (batches of)
             neurons (rows) across time steps (columns).
         custom_activation_function (Callable): A custom activation function to use
-            instead of the default.
+            instead of the default. The function should take the model, the input tensor
+            x, and the previous activations x_previous as arguments, and return the
+            output tensor after applying the activation function.
         default_bias (float): Default bias value for all neurons.
         slope (torch.nn.Parameter): Trainable parameter for the steepness of the tanh
             activation function, grouped by neuron type.
@@ -1089,7 +1094,7 @@ class MultilayeredNetwork(nn.Module):
             torch.Tensor: The output tensor after applying the activation function.
         """
         if self.custom_activation_function is not None:
-            return self.custom_activation_function(x)
+            return self.custom_activation_function(self, x, x_previous)
 
         if self.slope is None:
             slopes = self.tanh_steepness
