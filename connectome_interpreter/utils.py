@@ -1555,7 +1555,7 @@ def check_consecutive_layers(df):
     return consecutive_layers
 
 
-def display_df(df, cmap="Blues"):
+def display_df(df, cmap="Blues", vmin=None, vmax=None):
     """
     Thin wrapper around the `display` function to display a DataFrame with a
         background gradient.
@@ -1564,13 +1564,19 @@ def display_df(df, cmap="Blues"):
         df (pd.DataFrame): The DataFrame to display.
         cmap (str, optional): The name of the colormap to use for the
             background gradient. Defaults to 'Blues'.
+        vmin (float, optional): The minimum value for the colormap. If None,
+            the minimum value of the DataFrame is used. Defaults to None.
+        vmax (float, optional): The maximum value for the colormap. If None,
+            the maximum value of the DataFrame is used. Defaults to None.
 
     Returns:
         None: This function displays the DataFrame using the `display` function
     """
-    result_dp = df.style.background_gradient(
-        cmap=cmap, vmin=df.min().min(), vmax=df.max().max()
-    )
+    if vmin is None:
+        vmin = df.min().min()
+    if vmax is None:
+        vmax = df.max().max()
+    result_dp = df.style.background_gradient(cmap=cmap, vmin=vmin, vmax=vmax)
     display(result_dp)
 
 
