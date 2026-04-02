@@ -16,6 +16,8 @@ from connectome_interpreter.activation_maximisation import (
     get_input_activation,
     get_gradients,
     guess_optimal_stimulus,
+    training_mode,
+    train_model,
 )
 
 
@@ -1705,6 +1707,694 @@ class TestGuessOptimalStimulus(unittest.TestCase):
         # nlayer = min(3, max(0, 1) + 1) = min(3, 2) = 2
         expected_shape = (1, 2, 2)
         self.assertEqual(result.shape, expected_shape)
+
+
+class TestTauParam(unittest.TestCase):
+    """Tests for tau_dict and tau_param across _NetworkBase subclasses."""
+
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.num_layers = 2
+        dense = np.random.rand(6, 6) * 0.1
+        self.weights = csr_matrix(dense)
+        self.sensory_indices = [0, 1]
+        self.idx_to_group = {i: f"type_{i % 3}" for i in range(6)}
+        # sorted groups: type_0, type_1, type_2
+        self.all_types = sorted(set(self.idx_to_group.values()))
+
+    # ------------------------------------------------------------------
+    # Initialization
+    # ------------------------------------------------------------------
+
+    def test_tau_param_none_without_idx_to_group(self):
+        """tau_param should be None when idx_to_group is not provided."""
+        for cls in [LinearNetwork, MultilayeredNetwork]:
+            model = cls(self.weights, self.sensory_indices, num_layers=2)
+            self.assertIsNone(
+                model.tau_param, f"{cls.__name__}: tau_param should be None"
+            )
+
+    def test_tau_param_default_fills_scalar_tau(self):
+        """When tau_dict=None, all groups should get the scalar tau value."""
+        scalar_tau = 7.0
+        for cls in [LinearNetwork, MultilayeredNetwork]:
+            model = cls(
+                self.weights,
+                self.sensory_indices,
+                idx_to_group=self.idx_to_group,
+                tau=scalar_tau,
+            )
+            expected = torch.full((len(self.all_types),), scalar_tau)
+            self.assertTrue(
+                torch.allclose(model.tau_param.cpu(), expected),
+                f"{cls.__name__}: default tau_param values incorrect",
+            )
+
+    def test_tau_dict_sets_values(self):
+        """tau_dict values should override defaults for named groups."""
+        tau_dict = {"type_0": 3.0, "type_2": 15.0}
+        default_tau = 10.0
+        for cls in [LinearNetwork, MultilayeredNetwork]:
+            model = cls(
+                self.weights,
+                self.sensory_indices,
+                idx_to_group=self.idx_to_group,
+                tau=default_tau,
+                tau_dict=tau_dict,
+            )
+            type2pos = {t: i for i, t in enumerate(self.all_types)}
+            self.assertAlmostEqual(
+                model.tau_param[type2pos["type_0"]].item(), 3.0, places=6
+            )
+            self.assertAlmostEqual(
+                model.tau_param[type2pos["type_1"]].item(), default_tau, places=6
+            )
+            self.assertAlmostEqual(
+                model.tau_param[type2pos["type_2"]].item(), 15.0, places=6
+            )
+
+    def test_tau_dict_ignores_unknown_groups(self):
+        """tau_dict keys not in idx_to_group should be silently ignored."""
+        tau_dict = {"type_0": 5.0, "nonexistent_group": 99.0}
+        for cls in [LinearNetwork, MultilayeredNetwork]:
+            model = cls(
+                self.weights,
+                self.sensory_indices,
+                idx_to_group=self.idx_to_group,
+                tau_dict=tau_dict,
+            )
+            # Should not raise; nonexistent_group simply has no effect
+            self.assertAlmostEqual(
+                model.tau_param[
+                    [i for i, t in enumerate(self.all_types) if t == "type_0"][0]
+                ].item(),
+                5.0,
+                places=6,
+            )
+
+    # ------------------------------------------------------------------
+    # effective_tau property
+    # ------------------------------------------------------------------
+
+    def test_effective_tau_returns_scalar_when_no_tau_param(self):
+        """effective_tau should return the scalar self.tau when tau_param is None."""
+        scalar_tau = 8.0
+        for cls in [LinearNetwork, MultilayeredNetwork]:
+            model = cls(self.weights, self.sensory_indices, tau=scalar_tau)
+            self.assertEqual(model.effective_tau, scalar_tau)
+
+    def test_effective_tau_clamps_below_one(self):
+        """effective_tau should clamp values < 1.0 up to 1.0."""
+        tau_dict = {"type_0": 0.1, "type_1": 0.5, "type_2": 2.0}
+        for cls in [LinearNetwork, MultilayeredNetwork]:
+            model = cls(
+                self.weights,
+                self.sensory_indices,
+                idx_to_group=self.idx_to_group,
+                tau_dict=tau_dict,
+            )
+            clamped = model.effective_tau
+            self.assertTrue(
+                torch.all(clamped >= 1.0),
+                f"{cls.__name__}: effective_tau below 1.0 not clamped",
+            )
+
+    def test_effective_tau_does_not_clamp_valid_values(self):
+        """effective_tau should not modify values already >= 1.0."""
+        tau_dict = {"type_0": 1.0, "type_1": 5.0, "type_2": 20.0}
+        for cls in [LinearNetwork, MultilayeredNetwork]:
+            model = cls(
+                self.weights,
+                self.sensory_indices,
+                idx_to_group=self.idx_to_group,
+                tau_dict=tau_dict,
+            )
+            clamped = model.effective_tau.cpu()
+            type2pos = {t: i for i, t in enumerate(self.all_types)}
+            self.assertAlmostEqual(clamped[type2pos["type_0"]].item(), 1.0, places=6)
+            self.assertAlmostEqual(clamped[type2pos["type_1"]].item(), 5.0, places=6)
+            self.assertAlmostEqual(clamped[type2pos["type_2"]].item(), 20.0, places=6)
+
+    # ------------------------------------------------------------------
+    # set_param_grads
+    # ------------------------------------------------------------------
+
+    def test_tau_grad_disabled_by_default(self):
+        """tau_param should not require grad after construction."""
+        for cls in [LinearNetwork, MultilayeredNetwork]:
+            model = cls(
+                self.weights,
+                self.sensory_indices,
+                idx_to_group=self.idx_to_group,
+            )
+            self.assertFalse(
+                model.tau_param.requires_grad,
+                f"{cls.__name__}: tau_param.requires_grad should be False",
+            )
+
+    def test_set_param_grads_tau_true(self):
+        """set_param_grads(tau=True) should enable gradients for tau_param."""
+        for cls in [LinearNetwork, MultilayeredNetwork]:
+            model = cls(
+                self.weights,
+                self.sensory_indices,
+                idx_to_group=self.idx_to_group,
+            )
+            model.set_param_grads(tau=True)
+            self.assertTrue(model.tau_param.requires_grad)
+            # Other params should remain unchanged (still False)
+            self.assertFalse(model.slope.requires_grad)
+            self.assertFalse(model.raw_biases.requires_grad)
+
+    def test_set_param_grads_tau_false(self):
+        """set_param_grads(tau=False) should disable gradients for tau_param."""
+        for cls in [LinearNetwork, MultilayeredNetwork]:
+            model = cls(
+                self.weights,
+                self.sensory_indices,
+                idx_to_group=self.idx_to_group,
+            )
+            model.set_param_grads(tau=True)
+            model.set_param_grads(tau=False)
+            self.assertFalse(model.tau_param.requires_grad)
+
+    def test_set_param_grads_no_tau_param_does_not_raise(self):
+        """set_param_grads should not raise when tau_param is None."""
+        for cls in [LinearNetwork, MultilayeredNetwork]:
+            model = cls(self.weights, self.sensory_indices)
+            try:
+                model.set_param_grads(tau=True)
+            except Exception as e:
+                self.fail(f"{cls.__name__}: set_param_grads raised unexpectedly: {e}")
+
+    # ------------------------------------------------------------------
+    # training_mode context manager
+    # ------------------------------------------------------------------
+
+    def test_training_mode_enables_tau_grad(self):
+        """training_mode with train_tau=True should enable and then restore tau grad."""
+        model = MultilayeredNetwork(
+            self.weights,
+            self.sensory_indices,
+            idx_to_group=self.idx_to_group,
+        )
+        self.assertFalse(model.tau_param.requires_grad)
+        with training_mode(model, train_tau=True):
+            self.assertTrue(model.tau_param.requires_grad)
+        self.assertFalse(model.tau_param.requires_grad)
+
+    def test_training_mode_tau_false_leaves_grad_disabled(self):
+        """training_mode with train_tau=False should not enable tau grad."""
+        model = MultilayeredNetwork(
+            self.weights,
+            self.sensory_indices,
+            idx_to_group=self.idx_to_group,
+        )
+        with training_mode(model, train_tau=False):
+            self.assertFalse(model.tau_param.requires_grad)
+
+    # ------------------------------------------------------------------
+    # Forward pass behaviour
+    # ------------------------------------------------------------------
+
+    def test_tau_dict_affects_output(self):
+        """Two models with different tau_dict should produce different outputs."""
+        inp = torch.rand(2, len(self.sensory_indices), self.num_layers)
+        # (batch, sensory, layers)
+        model_slow = MultilayeredNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+            tau_dict={"type_0": 1.0, "type_1": 1.0, "type_2": 1.0},
+        )
+        model_fast = MultilayeredNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+            tau_dict={"type_0": 20.0, "type_1": 20.0, "type_2": 20.0},
+        )
+        out_slow = model_slow(inp).detach()
+        out_fast = model_fast(inp).detach()
+        self.assertFalse(
+            torch.allclose(out_slow, out_fast),
+            "Different tau values should produce different outputs",
+        )
+
+    def test_scalar_tau_matches_tau_dict_uniform(self):
+        """A model with scalar tau should match one where tau_dict sets all groups to that value."""
+        scalar_tau = 5.0
+        inp = torch.rand(2, len(self.sensory_indices), self.num_layers)
+
+        model_scalar = MultilayeredNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+            tau=scalar_tau,
+        )
+        model_dict = MultilayeredNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+            tau=scalar_tau,
+            tau_dict={t: scalar_tau for t in self.all_types},
+        )
+        out_scalar = model_scalar(inp).detach()
+        out_dict = model_dict(inp).detach()
+        self.assertTrue(
+            torch.allclose(out_scalar, out_dict, atol=1e-6),
+            "Scalar tau and equivalent tau_dict should give identical outputs",
+        )
+
+    def test_forward_without_idx_to_group_uses_scalar_tau(self):
+        """Forward pass without idx_to_group should use scalar tau and not crash."""
+        for cls in [LinearNetwork, MultilayeredNetwork]:
+            model = cls(self.weights, self.sensory_indices, num_layers=2, tau=5.0)
+            inp = torch.rand(2, len(self.sensory_indices), self.num_layers)
+
+            try:
+                out = model(inp)
+            except Exception as e:
+                self.fail(f"{cls.__name__} forward crashed with scalar tau: {e}")
+            self.assertEqual(out.shape, (2, 6, 2))
+
+    # ------------------------------------------------------------------
+    # Gradient flow through tau
+    # ------------------------------------------------------------------
+
+    def test_tau_param_receives_gradient(self):
+        """tau_param should receive a gradient when requires_grad=True."""
+        model = MultilayeredNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+        )
+        model.set_param_grads(tau=True)
+        inp = torch.rand(2, len(self.sensory_indices), self.num_layers)
+
+        out = model(inp)
+        out.sum().backward()
+        self.assertIsNotNone(
+            model.tau_param.grad, "tau_param should have a gradient after backward()"
+        )
+        self.assertFalse(
+            torch.all(model.tau_param.grad == 0),
+            "tau_param gradient should be non-zero",
+        )
+
+    def test_tau_param_changes_after_optimizer_step(self):
+        """tau_param values should change after an optimizer step when grad is enabled."""
+        model = MultilayeredNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+        )
+        model.set_param_grads(tau=True)
+        tau_before = model.tau_param.clone().detach()
+        optimizer = torch.optim.Adam([model.tau_param], lr=0.1)
+        inp = torch.rand(2, len(self.sensory_indices), self.num_layers)
+
+        out = model(inp)
+        out.sum().backward()
+        optimizer.step()
+        self.assertFalse(
+            torch.allclose(model.tau_param.detach(), tau_before),
+            "tau_param should change after optimizer step",
+        )
+
+
+class TestTauParamCorrectness(unittest.TestCase):
+    """Tests for correctness of tau formula and per-group behaviour."""
+
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.num_layers = 3
+        self.sensory_indices = [0, 1]
+        self.num_sensory = len(self.sensory_indices)
+        self.num_neurons = 6
+        self.idx_to_group = {i: f"type_{i % 3}" for i in range(self.num_neurons)}
+        self.all_types = sorted(set(self.idx_to_group.values()))
+
+        dense = np.random.rand(self.num_neurons, self.num_neurons) * 0.1
+        self.weights = csr_matrix(dense)
+
+    # ------------------------------------------------------------------
+    # Tau formula boundary values
+    # ------------------------------------------------------------------
+
+    def test_tau_equals_one_ignores_previous_state_multilayered(self):
+        """With tau=1, activation_function output should not depend on x_previous."""
+        model = MultilayeredNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+            tau_dict={t: 1.0 for t in self.all_types},
+            threshold=0.0,
+        )
+        x = torch.rand(self.num_neurons, 2)
+        x_prev_a = torch.zeros(self.num_neurons, 2)
+        x_prev_b = torch.rand(self.num_neurons, 2)  # different x_previous
+
+        out_a = model.activation_function(x.clone(), x_prev_a)
+        out_b = model.activation_function(x.clone(), x_prev_b)
+
+        self.assertTrue(
+            torch.allclose(out_a, out_b, atol=1e-6),
+            "With tau=1, output should be independent of x_previous",
+        )
+
+    def test_large_tau_output_close_to_x_previous(self):
+        """With very large tau, output should be dominated by x_previous (slow dynamics)."""
+        # tau=1000: 1/1000 * tanh(x) + 999/1000 * x_previous ≈ x_previous
+        model_slow = MultilayeredNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            idx_to_group=self.idx_to_group,
+            tau_dict={t: 1000.0 for t in self.all_types},
+            threshold=0.0,
+        )
+        model_fast = MultilayeredNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            idx_to_group=self.idx_to_group,
+            tau_dict={t: 1.0 for t in self.all_types},
+            threshold=0.0,
+        )
+        inp = torch.rand(2, self.num_sensory, self.num_layers)
+        out_slow = model_slow(inp).detach()
+        out_fast = model_fast(inp).detach()
+
+        # Slow model activations at later layers should be much smaller in magnitude
+        # (dragged toward 0 since x_previous starts at 0)
+        self.assertTrue(
+            out_slow[:, :, -1].abs().mean() < out_fast[:, :, -1].abs().mean(),
+            "Large tau should produce smaller activations (pulled toward zero x_previous)",
+        )
+
+    def test_linear_network_tau_equals_one_no_x_previous(self):
+        """LinearNetwork with tau=1: output should not depend on x_previous."""
+        model = LinearNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+            tau_dict={t: 1.0 for t in self.all_types},
+            threshold=0.0,
+        )
+        x = torch.rand(self.num_neurons, 2)
+        x_prev_a = torch.zeros(self.num_neurons, 2)
+        x_prev_b = torch.rand(self.num_neurons, 2)
+
+        out_a = model.activation_function(x.clone(), x_prev_a)
+        out_b = model.activation_function(x.clone(), x_prev_b)
+
+        self.assertTrue(
+            torch.allclose(out_a, out_b, atol=1e-6),
+            "LinearNetwork with tau=1: output should be independent of x_previous",
+        )
+
+    # ------------------------------------------------------------------
+    # Per-group tau produces group-specific dynamics
+    # ------------------------------------------------------------------
+
+    def test_per_group_tau_faster_group_responds_more(self):
+        """Neurons in a fast-tau group should show larger activations than slow-tau group."""
+        # type_0 (indices 0, 3): tau=1 (fast)
+        # type_1 (indices 1, 4): tau=1000 (slow, stays near 0)
+        # type_2 (indices 2, 5): tau=1 (fast)
+        tau_dict = {"type_0": 1.0, "type_1": 1000.0, "type_2": 1.0}
+        model = MultilayeredNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            idx_to_group=self.idx_to_group,
+            tau_dict=tau_dict,
+            threshold=0.0,
+        )
+        inp = torch.ones(2, self.num_sensory, self.num_layers) * 0.5
+        out = model(inp).detach()  # shape: (2, num_neurons, num_layers)
+
+        # type_1 indices are 1 and 4
+        type1_indices = [i for i, g in self.idx_to_group.items() if g == "type_1"]
+        type0_indices = [i for i, g in self.idx_to_group.items() if g == "type_0"]
+
+        # At last layer, fast neurons should have larger abs activation than slow
+        fast_mean = out[:, type0_indices, -1].abs().mean()
+        slow_mean = out[:, type1_indices, -1].abs().mean()
+        self.assertTrue(
+            fast_mean > slow_mean,
+            f"Fast tau group (mean={fast_mean:.4f}) should have larger activations "
+            f"than slow tau group (mean={slow_mean:.4f})",
+        )
+
+    def test_per_group_tau_independent_across_groups(self):
+        """Changing tau for one group should not affect neurons in other groups."""
+        base_tau_dict = {"type_0": 5.0, "type_1": 5.0, "type_2": 5.0}
+        modified_tau_dict = {
+            "type_0": 1.0,
+            "type_1": 5.0,
+            "type_2": 5.0,
+        }  # only type_0 changed
+
+        model_base = MultilayeredNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            idx_to_group=self.idx_to_group,
+            tau_dict=base_tau_dict,
+            threshold=0.0,
+        )
+        model_modified = MultilayeredNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            idx_to_group=self.idx_to_group,
+            tau_dict=modified_tau_dict,
+            threshold=0.0,
+        )
+        inp = torch.rand(2, self.num_sensory, self.num_layers)
+        out_base = model_base(inp).detach()
+        out_modified = model_modified(inp).detach()
+
+        type1_indices = [i for i, g in self.idx_to_group.items() if g == "type_1"]
+        type2_indices = [i for i, g in self.idx_to_group.items() if g == "type_2"]
+        type0_indices = [i for i, g in self.idx_to_group.items() if g == "type_0"]
+
+        # type_1 and type_2 outputs should be identical between the two models
+        # Note: type_0 feeds into others via weights, so strict equality won't hold at
+        # deeper layers — check only layer 0 where the effect is isolated
+        self.assertTrue(
+            torch.allclose(
+                out_base[:, type1_indices, 0],
+                out_modified[:, type1_indices, 0],
+                atol=1e-5,
+            ),
+            "type_1 activations at layer 0 should be unaffected by type_0 tau change",
+        )
+        self.assertTrue(
+            torch.allclose(
+                out_base[:, type2_indices, 0],
+                out_modified[:, type2_indices, 0],
+                atol=1e-5,
+            ),
+            "type_2 activations at layer 0 should be unaffected by type_0 tau change",
+        )
+        # type_0 outputs should differ
+        self.assertFalse(
+            torch.allclose(
+                out_base[:, type0_indices, :],
+                out_modified[:, type0_indices, :],
+                atol=1e-5,
+            ),
+            "type_0 activations should differ when its tau is changed",
+        )
+
+    # ------------------------------------------------------------------
+    # Clamping propagates into forward pass
+    # ------------------------------------------------------------------
+
+    def test_sub_one_tau_clamped_in_forward(self):
+        """A tau_param value < 1 should be clamped to 1 during forward, not used raw."""
+        # Build a model and manually set tau_param to 0.1 (below minimum)
+        model_clamped = MultilayeredNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+            tau_dict={t: 0.1 for t in self.all_types},  # will be stored as 0.1
+            threshold=0.0,
+        )
+        model_one = MultilayeredNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+            tau_dict={t: 1.0 for t in self.all_types},
+            threshold=0.0,
+        )
+        inp = torch.rand(2, self.num_sensory, 2)
+        # effective_tau clamps to 1.0, so both should produce the same output
+        out_clamped = model_clamped(inp).detach()
+        out_one = model_one(inp).detach()
+        self.assertTrue(
+            torch.allclose(out_clamped, out_one, atol=1e-5),
+            "tau=0.1 should be clamped to 1.0, producing same output as tau=1.0",
+        )
+
+    # ------------------------------------------------------------------
+    # LinearNetwork gradient tests
+    # ------------------------------------------------------------------
+
+    def test_linear_network_tau_param_receives_gradient(self):
+        """LinearNetwork tau_param should receive a gradient when requires_grad=True."""
+        model = LinearNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            idx_to_group=self.idx_to_group,
+        )
+        model.set_param_grads(tau=True)
+        inp = torch.rand(2, self.num_sensory, self.num_layers)
+        out = model(inp)
+        out.sum().backward()
+        self.assertIsNotNone(model.tau_param.grad)
+        self.assertFalse(torch.all(model.tau_param.grad == 0))
+
+    def test_linear_network_tau_param_changes_after_optimizer_step(self):
+        """LinearNetwork tau_param should change after an optimizer step."""
+        model = LinearNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            idx_to_group=self.idx_to_group,
+        )
+        model.set_param_grads(tau=True)
+        tau_before = model.tau_param.clone().detach()
+        optimizer = torch.optim.Adam([model.tau_param], lr=0.1)
+        inp = torch.rand(2, self.num_sensory, self.num_layers)
+        out = model(inp)
+        out.sum().backward()
+        optimizer.step()
+        self.assertFalse(torch.allclose(model.tau_param.detach(), tau_before))
+
+    # ------------------------------------------------------------------
+    # train_model tau behaviour
+    # ------------------------------------------------------------------
+
+    def _make_train_model_fixtures(self):
+        """Helper: returns a model, inputs, and targets suitable for train_model."""
+        model = MultilayeredNetwork(
+            self.weights,
+            self.sensory_indices,
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+        )
+        inputs = torch.rand(6, self.num_sensory, 2)
+        targets = pd.DataFrame(
+            [{"batch": i, "neuron_idx": 2, "layer": 1, "value": 0.5} for i in range(6)]
+        )
+        return model, inputs, targets
+
+    def test_train_model_tau_true_changes_tau_param(self):
+        """train_model with train_tau=True should change tau_param values."""
+        model, inputs, targets = self._make_train_model_fixtures()
+        tau_before = model.tau_param.clone().detach()
+        train_model(
+            model,
+            inputs,
+            targets,
+            num_epochs=10,
+            wandb=False,
+            train_slopes=False,
+            train_biases=False,
+            train_divisive_strength=False,
+            train_tau=True,
+        )
+        self.assertFalse(
+            torch.allclose(model.tau_param.detach(), tau_before),
+            "tau_param should change when train_tau=True",
+        )
+
+    def test_train_model_tau_false_leaves_tau_param_unchanged(self):
+        """train_model with train_tau=False should not change tau_param values."""
+        model, inputs, targets = self._make_train_model_fixtures()
+        tau_before = model.tau_param.clone().detach()
+        train_model(
+            model,
+            inputs,
+            targets,
+            num_epochs=10,
+            wandb=False,
+            train_slopes=True,  # keep at least one param trainable so backward() works
+            train_biases=False,
+            train_divisive_strength=False,
+            train_tau=False,
+        )
+        self.assertTrue(
+            torch.allclose(model.tau_param.detach(), tau_before),
+            "tau_param should be unchanged when train_tau=False",
+        )
+
+    # ------------------------------------------------------------------
+    # tau_dict stored as attribute
+    # ------------------------------------------------------------------
+
+    def test_tau_dict_stored_as_attribute(self):
+        """tau_dict passed to constructor should be stored on the model."""
+        tau_dict = {"type_0": 3.0, "type_1": 7.0, "type_2": 15.0}
+        for cls in [LinearNetwork, MultilayeredNetwork]:
+            model = cls(
+                self.weights,
+                self.sensory_indices,
+                idx_to_group=self.idx_to_group,
+                tau_dict=tau_dict,
+            )
+            self.assertEqual(
+                model.tau_dict,
+                tau_dict,
+                f"{cls.__name__}: tau_dict not stored correctly",
+            )
+
+    def test_tau_dict_none_stored_when_not_provided(self):
+        """tau_dict should be None when not provided."""
+        for cls in [LinearNetwork, MultilayeredNetwork]:
+            model = cls(self.weights, self.sensory_indices)
+            self.assertIsNone(model.tau_dict)
+
+    # ------------------------------------------------------------------
+    # LinearNetwork vs MultilayeredNetwork produce different outputs
+    # ------------------------------------------------------------------
+
+    def test_linear_and_multilayered_differ_same_tau(self):
+        """LinearNetwork and MultilayeredNetwork should produce different outputs with same tau."""
+        kwargs = dict(
+            sensory_indices=self.sensory_indices,
+            num_layers=self.num_layers,
+            idx_to_group=self.idx_to_group,
+            tau_dict={t: 5.0 for t in self.all_types},
+            threshold=0.0,
+            tanh_steepness=1.0,
+            default_bias=0.0,
+        )
+        linear_model = LinearNetwork(self.weights, **kwargs)
+        multi_model = MultilayeredNetwork(self.weights, **kwargs)
+
+        inp = torch.rand(2, self.num_sensory, self.num_layers)
+        out_linear = linear_model(inp).detach()
+        out_multi = multi_model(inp).detach()
+
+        self.assertFalse(
+            torch.allclose(out_linear, out_multi, atol=1e-5),
+            "LinearNetwork and MultilayeredNetwork should differ due to tanh/threshold",
+        )
 
 
 if __name__ == "__main__":
