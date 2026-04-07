@@ -1142,17 +1142,6 @@ def connectivity_summary(
                 "weight": weights,
             }
         )
-        # do this to make sure the aggregation result is correct
-        # in case where e.g. a group only connects to a subset of neurons in the post
-        el_fullcombo = pd.DataFrame(
-            {
-                "pre_id": np.repeat(inidx, len(outidx)),
-                "post_id": np.tile(outidx, len(inidx)),
-            }
-        )
-        edgelist = pd.merge(
-            el_fullcombo, edgelist, how="left", on=["pre_id", "post_id"]
-        ).fillna(0)
     else:
         submat = stepsn[inidx, :][:, outidx]
         edgelist = pd.DataFrame(
@@ -1165,6 +1154,17 @@ def connectivity_summary(
 
     edgelist["pre_group"] = edgelist["pre_id"].map(inidx_map).astype(str)
     edgelist["post_group"] = edgelist["post_id"].map(outidx_map).astype(str)
+    pre_group_df = pd.DataFrame(
+        {"pre_id": list(inidx_map.keys()), "pre_group": list(inidx_map.values())}
+    )
+    pre_group_df["pre_group"] = pre_group_df["pre_group"].astype(str)
+    post_group_df = pd.DataFrame(
+        {"post_id": list(outidx_map.keys()), "post_group": list(outidx_map.values())}
+    )
+    post_group_df["post_group"] = post_group_df["post_group"].astype(str)
+
+    # unique (pre_group, post_group) pairs that exist in the data
+    pregrp_postgrp = edgelist[["pre_group", "post_group"]].drop_duplicates()
 
     # ---------------------------------------------------------------------#
     # Aggregate according to outprop / combining_method
@@ -1180,14 +1180,21 @@ def connectivity_summary(
         per_post_neuron["post_group"] = (
             per_post_neuron["post_id"].map(outidx_map).astype(str)
         )
-        agg_method = {"sum": "sum", "mean": "mean", "median": "median"}[
-            combining_method
-        ]
-        result = (
-            per_post_neuron.groupby(["pre_group", "post_group"], sort=False)["weight"]
-            .agg(agg_method)
-            .unstack(fill_value=0)
-        )
+        # for each such pair, expand to all post_ids in that post_group
+        scaffold = pregrp_postgrp.merge(post_group_df, on="post_group", how="left")
+        per_post_neuron = scaffold.merge(
+            per_post_neuron, on=["pre_group", "post_group", "post_id"], how="left"
+        ).fillna(0)
+
+        # combine with post_group_df to make sure all post_ids from the post_groups are included
+        # per_post_neuron = (
+        #     post_group_df[post_group_df.post_group.isin(per_post_neuron.post_group)]
+        #     .merge(per_post_neuron, how="outer", on=["post_group", "post_id"])
+        #     .fillna(0)
+        # )
+        result = per_post_neuron.groupby(["pre_group", "post_group"], sort=False)[
+            "weight"
+        ].agg(combining_method)
     else:
         # OUTPUT-centred: average neuron in *pre* group
         # output proportion from an average source to a target type
@@ -1199,81 +1206,89 @@ def connectivity_summary(
         per_pre_neuron["pre_group"] = (
             per_pre_neuron["pre_id"].map(inidx_map).astype(str)
         )
-        agg_method = {"sum": "sum", "mean": "mean", "median": "median"}[
-            combining_method
-        ]
+        # for each such pair, expand to all post_ids in that post_group
+        scaffold = pregrp_postgrp.merge(pre_group_df, on="pre_group", how="left")
+
+        # left-join actual weights
+        per_pre_neuron = scaffold.merge(
+            per_pre_neuron, on=["pre_group", "post_group", "pre_id"], how="left"
+        ).fillna(0)
+
+        result = per_pre_neuron.groupby(["pre_group", "post_group"], sort=False)[
+            "weight"
+        ].agg(combining_method)
+
+    if not return_long:
+        result = result.unstack(fill_value=0)
+        # ---------------------------------------------------------------------#
+        # Layout adjustments
+        # ---------------------------------------------------------------------#
+        if pre_in_column:
+            result = result.T
+
+        # threshold filtering
+        if display_threshold > 0:
+            if threshold_axis == "row":
+                result = result[(np.abs(result) >= display_threshold).any(axis=1)]
+            elif threshold_axis == "column":
+                result = result.loc[
+                    :, (np.abs(result) >= display_threshold).any(axis=0)
+                ]
+            else:
+                raise ValueError("threshold_axis must be 'column' or 'row'.")
+        if result.empty:
+            raise ValueError(
+                "No values left after applying the display_threshold; lower the threshold."
+            )
+
+        # sorting
+        if sort_within == "column":
+            if sort_names is None:
+                result = result.sort_values(by=result.columns[0], ascending=False)
+            else:
+                sort_names = [sort_names] if isinstance(sort_names, str) else sort_names
+                if set(sort_names).issubset(result.columns):
+                    result = result.sort_values(by=sort_names, ascending=False)
+                else:
+                    raise ValueError("sort_names must be present in outidx_map values.")
+        elif sort_within == "row":
+            result = result.loc[
+                np.abs(result).mean(axis=1).sort_values(ascending=False).index
+            ]
+            if sort_names is None:
+                result = result.sort_values(by=result.index[0], axis=1, ascending=False)
+            else:
+                sort_names = [sort_names] if isinstance(sort_names, str) else sort_names
+                if set(sort_names).issubset(result.index):
+                    result = result.sort_values(by=sort_names, axis=1, ascending=False)
+                else:
+                    raise ValueError("sort_names must be present in inidx_map values.")
+        else:
+            raise ValueError("sort_within must be 'column' or 'row'.")
+
+        # ---------------------------------------------------------------------#
+        # Display (only if wide)
+        # ---------------------------------------------------------------------#
+        if display_output and not return_long:
+            styled = result.style.background_gradient(
+                cmap="Blues",
+                vmin=np.abs(result).min().min(),
+                vmax=np.abs(result).max().max(),
+            )
+            display(styled)
+
+    else:  # return_long
         result = (
-            per_pre_neuron.groupby(["pre_group", "post_group"], sort=False)["weight"]
-            .agg(agg_method)
-            .unstack(fill_value=0)
+            result[result > display_threshold]
+            .reset_index()
+            .rename(columns={"weight": "value"})
         )
 
-    # ---------------------------------------------------------------------#
-    # Layout adjustments
-    # ---------------------------------------------------------------------#
-    if pre_in_column:
-        result = result.T
+        if result.empty:
+            raise ValueError(
+                "No values left after applying the display_threshold; lower the threshold."
+            )
 
-    # threshold filtering
-    if display_threshold > 0:
-        if threshold_axis == "row":
-            result = result[(np.abs(result) >= display_threshold).any(axis=1)]
-        elif threshold_axis == "column":
-            result = result.loc[:, (np.abs(result) >= display_threshold).any(axis=0)]
-        else:
-            raise ValueError("threshold_axis must be 'column' or 'row'.")
-
-    if result.empty:
-        raise ValueError(
-            "No values left after applying the display_threshold; lower the threshold."
-        )
-
-    # sorting
-    if sort_within == "column":
-        if sort_names is None:
-            result = result.sort_values(by=result.columns[0], ascending=False)
-        else:
-            sort_names = [sort_names] if isinstance(sort_names, str) else sort_names
-            if set(sort_names).issubset(result.columns):
-                result = result.sort_values(by=sort_names, ascending=False)
-            else:
-                raise ValueError("sort_names must be present in outidx_map values.")
-    elif sort_within == "row":
-        result = result.loc[
-            np.abs(result).mean(axis=1).sort_values(ascending=False).index
-        ]
-        if sort_names is None:
-            result = result.sort_values(by=result.index[0], axis=1, ascending=False)
-        else:
-            sort_names = [sort_names] if isinstance(sort_names, str) else sort_names
-            if set(sort_names).issubset(result.index):
-                result = result.sort_values(by=sort_names, axis=1, ascending=False)
-            else:
-                raise ValueError("sort_names must be present in inidx_map values.")
-    else:
-        raise ValueError("sort_within must be 'column' or 'row'.")
-
-    # ---------------------------------------------------------------------#
-    # Display (only if wide)
-    # ---------------------------------------------------------------------#
-    if display_output and not return_long:
-        styled = result.style.background_gradient(
-            cmap="Blues",
-            vmin=np.abs(result).min().min(),
-            vmax=np.abs(result).max().max(),
-        )
-        display(styled)
-
-    # ---------------------------------------------------------------------#
-    # Return
-    # ---------------------------------------------------------------------#
-    if return_long:
-        idx_name = result.index.name or "pre_group"
-        long_df = result.reset_index().melt(
-            id_vars=idx_name, var_name="post_group", value_name="value"
-        )
-        long_df = long_df[long_df["value"] >= display_threshold].reset_index(drop=True)
-        return long_df
     return result
 
 

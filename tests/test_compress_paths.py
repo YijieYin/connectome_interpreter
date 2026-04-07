@@ -24,6 +24,7 @@ from connectome_interpreter.compress_paths import (
     effconn_without_loops,
     signed_conn_by_path_length_data,
     conn_by_path_length_data,
+    connectivity_summary,
 )
 
 
@@ -3482,6 +3483,287 @@ class TestConnByPathLengthData(unittest.TestCase):
         self.assertIsInstance(result3, list)
 
 
-if __name__ == "__main__":
-    # Add the new test class to the existing test suite
-    unittest.main()
+def make_stepsn(dense_array, sparse=True):
+    if sparse:
+        return csr_matrix(dense_array.astype(np.float32))
+    return dense_array.astype(np.float32)
+
+
+# Small 4x4 weight matrix with known values
+# Neurons: 0,1 are pre-group A; 2,3 are pre-group B
+# Neurons: 0,1 are post-group X; 2,3 are post-group Y
+WEIGHTS = np.array(
+    [
+        [0.0, 0.5, 0.1, 0.0],
+        [0.3, 0.0, 0.2, 0.0],
+        [0.0, 0.0, 0.4, 0.6],
+        [0.1, 0.2, 0.0, 0.3],
+    ],
+    dtype=np.float32,
+)
+
+INIDX = np.array([0, 1, 2, 3])
+OUTIDX = np.array([0, 1, 2, 3])
+INIDX_MAP = {0: "A", 1: "A", 2: "B", 3: "B"}
+OUTIDX_MAP = {0: "X", 1: "X", 2: "Y", 3: "Y"}
+
+
+class TestConnectivitySummaryWide(unittest.TestCase):
+    """Tests for the default wide-format output."""
+
+    def _run(self, sparse=True, display_threshold=0.0, **kwargs):
+        stepsn = make_stepsn(WEIGHTS, sparse=sparse)
+        return connectivity_summary(
+            stepsn,
+            INIDX,
+            OUTIDX,
+            inidx_map=INIDX_MAP,
+            outidx_map=OUTIDX_MAP,
+            display_output=False,
+            display_threshold=display_threshold,
+            **kwargs,
+        )
+
+    def test_output_shape_sparse(self):
+        result = self._run(sparse=True)
+        # 2 pre-groups (A, B) x 2 post-groups (X, Y)
+        self.assertEqual(result.shape, (2, 2))
+
+    def test_output_shape_dense(self):
+        result = self._run(sparse=False)
+        self.assertEqual(result.shape, (2, 2))
+
+    def test_index_and_columns(self):
+        result = self._run()
+        self.assertSetEqual(set(result.index), {"A", "B"})
+        self.assertSetEqual(set(result.columns), {"X", "Y"})
+
+    def test_values_input_centred_mean(self):
+        """
+        outprop=False, combining_method='mean':
+        For pre-group A -> post-group X:
+          neuron 0 receives from A: 0+0.3=0.3, neuron 1 receives from A: 0.5+0=0.5
+          mean across post neurons in X = (0.3+0.5)/2 = 0.4
+        """
+        result = self._run()
+        self.assertAlmostEqual(result.loc["A", "X"], 0.4, places=5)
+
+    def test_values_input_centred_sum(self):
+        result = self._run(combining_method="sum")
+        # sum over post neurons: 0.3 + 0.5 = 0.8
+        self.assertAlmostEqual(result.loc["A", "X"], 0.8, places=5)
+
+    def test_values_input_centred_median(self):
+        result = self._run(combining_method="median")
+        self.assertAlmostEqual(result.loc["A", "X"], 0.4, places=5)
+
+    def test_outprop_true(self):
+        """
+        outprop=True, combining_method='mean':
+        For pre-group A -> post-group X:
+          neuron 0 sends to X: 0+0.5=0.5, neuron 1 sends to X: 0.3+0=0.3
+          mean across pre neurons in A = (0.5+0.3)/2 = 0.4
+        """
+        result = self._run(outprop=True)
+        self.assertAlmostEqual(result.loc["A", "X"], 0.4, places=5)
+
+    def test_pre_in_column(self):
+        result = self._run(pre_in_column=True)
+        # Transposed: index=post-groups, columns=pre-groups
+        self.assertSetEqual(set(result.index), {"X", "Y"})
+        self.assertSetEqual(set(result.columns), {"A", "B"})
+
+    def test_threshold_axis_row(self):
+        """Rows with no value >= threshold should be dropped."""
+        result = self._run(display_threshold=0.5, threshold_axis="row")
+        for idx in result.index:
+            self.assertTrue((result.loc[idx] >= 0.5).any())
+
+    def test_threshold_axis_column(self):
+        result = self._run(display_threshold=0.5, threshold_axis="column")
+        for col in result.columns:
+            self.assertTrue((result[col] >= 0.5).any())
+
+    def test_threshold_raises_on_empty(self):
+        with self.assertRaises(ValueError):
+            self._run(display_threshold=999.0)
+
+    def test_sort_within_column(self):
+        result = self._run(sort_within="column")
+        vals = result.iloc[:, 0].values
+        self.assertGreaterEqual(vals[0], vals[1])
+
+    def test_sort_within_row(self):
+        result = self._run(sort_within="row")
+        vals = result.iloc[0, :].values
+        self.assertGreaterEqual(vals[0], vals[1])
+
+    def test_sort_names_column(self):
+        result = self._run(sort_within="column", sort_names="X")
+        vals = result["X"].values
+        self.assertGreaterEqual(vals[0], vals[1])
+
+    def test_sort_names_invalid_raises(self):
+        with self.assertRaises(ValueError):
+            self._run(sort_within="column", sort_names="NONEXISTENT")
+
+    def test_invalid_threshold_axis_raises(self):
+        with self.assertRaises(ValueError):
+            self._run(display_threshold=0.1, threshold_axis="diagonal")
+
+    def test_invalid_sort_within_raises(self):
+        with self.assertRaises(ValueError):
+            self._run(sort_within="cell")
+
+    def test_include_undefined_groups(self):
+        """Neurons with NaN group mapping should appear as 'undefined'."""
+        inidx_map_with_nan = {0: "A", 1: float("nan"), 2: "B", 3: "B"}
+        stepsn = make_stepsn(WEIGHTS)
+        result = connectivity_summary(
+            stepsn,
+            INIDX,
+            OUTIDX,
+            inidx_map=inidx_map_with_nan,
+            outidx_map=OUTIDX_MAP,
+            display_output=False,
+            display_threshold=0.0,
+            include_undefined_groups=True,
+        )
+        self.assertIn("undefined", result.index)
+
+    def test_no_undefined_groups_by_default(self):
+        inidx_map_with_nan = {0: "A", 1: float("nan"), 2: "B", 3: "B"}
+        stepsn = make_stepsn(WEIGHTS)
+        result = connectivity_summary(
+            stepsn,
+            INIDX,
+            OUTIDX,
+            inidx_map=inidx_map_with_nan,
+            outidx_map=OUTIDX_MAP,
+            display_output=False,
+            display_threshold=0.0,
+            include_undefined_groups=False,
+        )
+        self.assertNotIn("undefined", result.index)
+
+    def test_no_inidx_map_uses_integer_keys(self):
+        stepsn = make_stepsn(WEIGHTS)
+        result = connectivity_summary(
+            stepsn,
+            INIDX,
+            OUTIDX,
+            display_output=False,
+            display_threshold=0.0,
+        )
+        # Without maps, each neuron is its own group
+        self.assertEqual(result.shape[0], len(INIDX))
+
+
+class TestConnectivitySummaryLong(unittest.TestCase):
+    """Tests for the return_long path."""
+
+    def _run_long(self, sparse=True, display_threshold=0.0, **kwargs):
+        stepsn = make_stepsn(WEIGHTS, sparse=sparse)
+        return connectivity_summary(
+            stepsn,
+            INIDX,
+            OUTIDX,
+            inidx_map=INIDX_MAP,
+            outidx_map=OUTIDX_MAP,
+            display_output=False,
+            display_threshold=display_threshold,
+            return_long=True,
+            **kwargs,
+        )
+
+    def test_returns_dataframe(self):
+        result = self._run_long()
+        self.assertIsInstance(result, pd.DataFrame)
+
+    def test_columns_present(self):
+        result = self._run_long()
+        self.assertIn("post_group", result.columns)
+        self.assertIn("value", result.columns)
+        self.assertTrue(any("group" in c or "pre" in c for c in result.columns))
+
+    def test_no_zero_values(self):
+        """Threshold=0 should still exclude exact zeros from long output."""
+        result = self._run_long()
+        # The long path uses > threshold, so zeros are excluded
+        self.assertTrue((result["value"] > 0).all())
+
+    def test_threshold_filters_long(self):
+        result = self._run_long(display_threshold=0.3)
+        self.assertTrue((result["value"] >= 0.3).all())
+
+    def test_values_match_wide(self):
+        """Long and wide formats should agree on non-zero values."""
+        stepsn = make_stepsn(WEIGHTS)
+        wide = connectivity_summary(
+            stepsn,
+            INIDX,
+            OUTIDX,
+            inidx_map=INIDX_MAP,
+            outidx_map=OUTIDX_MAP,
+            display_output=False,
+            display_threshold=0.0,
+        )
+        long = connectivity_summary(
+            stepsn,
+            INIDX,
+            OUTIDX,
+            inidx_map=INIDX_MAP,
+            outidx_map=OUTIDX_MAP,
+            display_output=False,
+            display_threshold=0.0,
+            return_long=True,
+        )
+        pre_col = [c for c in long.columns if c not in ("post_group", "value")][0]
+        for _, row in long.iterrows():
+            wide_val = wide.loc[row[pre_col], row["post_group"]]
+            self.assertAlmostEqual(row["value"], wide_val, places=5)
+
+    def test_long_sparse_vs_dense_match(self):
+        """Sparse and dense paths agree on values for edges present in both.
+        Note: sparse path omits truly absent edges so denominators may differ
+        for mean/median; only shared (pre, post) pairs are compared here.
+        """
+        kw = dict(
+            inidx_map=INIDX_MAP,
+            outidx_map=OUTIDX_MAP,
+            display_output=False,
+            display_threshold=0.0,
+            return_long=True,
+        )
+        sparse_result = connectivity_summary(
+            make_stepsn(WEIGHTS, sparse=True), INIDX, OUTIDX, **kw
+        )
+        dense_result = connectivity_summary(
+            make_stepsn(WEIGHTS, sparse=False), INIDX, OUTIDX, **kw
+        )
+        pre_col = [
+            c for c in sparse_result.columns if c not in ("post_group", "value")
+        ][0]
+        merged = sparse_result.merge(
+            dense_result, on=[pre_col, "post_group"], suffixes=("_sp", "_dn")
+        )
+        np.testing.assert_allclose(
+            merged["value_sp"].values, merged["value_dn"].values, atol=1e-5
+        )
+
+    def test_long_threshold_raises_on_empty(self):
+        with self.assertRaises(ValueError):
+            self._run_long(display_threshold=999.0)
+
+    def test_long_outprop_true(self):
+        result = self._run_long(outprop=True)
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertTrue((result["value"] > 0).all())
+
+    def test_long_combining_method_sum(self):
+        result = self._run_long(combining_method="sum")
+        self.assertIsInstance(result, pd.DataFrame)
+
+    def test_long_no_nan_values(self):
+        result = self._run_long()
+        self.assertFalse(result["value"].isna().any())
