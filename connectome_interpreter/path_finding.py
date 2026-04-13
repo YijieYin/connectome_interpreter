@@ -1489,6 +1489,7 @@ def el_within_n_steps(
     combining_method: str = "mean",
     avg_within_connected: bool = False,
     all_connections_between_groups: bool = False,
+    quiet: bool = False,
 ):
     """
     Find paths within a specified number of steps in a directed graph, starting from
@@ -1532,6 +1533,8 @@ def el_within_n_steps(
             pre_group maps indices to cell type, outidx is *one* Tm3 neuron, then the
             function will return L1->Tm3 connections for *all* L1 and Tm3 neurons.
             Defaults to False.
+        quiet (bool, optional): If True, suppresses output messages. Defaults to False.
+
     Returns:
         pd.DataFrame: A DataFrame containing the edges of the paths found, including
         columns 'pre', 'post', and 'weight'. If `return_raw_el` is True, returns a
@@ -1544,7 +1547,7 @@ def el_within_n_steps(
 
     all_paths = []
     raw_el = []
-    for i in tqdm(range(n)):
+    for i in tqdm(range(n), disable=quiet):
         paths = find_paths_of_length(inprop, inidx, outidx, i + 1)
         if paths is None or paths.shape[0] == 0:
             continue
@@ -1558,7 +1561,7 @@ def el_within_n_steps(
                 avg_within_connected=avg_within_connected,
                 combining_method=combining_method,
             )
-        paths = filter_paths(paths, threshold)
+        paths = filter_paths(paths, threshold, quiet=quiet)
         all_paths.append(paths)
     if len(all_paths) == 0:
         return None
