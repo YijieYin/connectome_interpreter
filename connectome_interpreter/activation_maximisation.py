@@ -7,6 +7,7 @@ import numpy.typing as npt
 import pandas as pd
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from tqdm import tqdm
 from scipy import sparse
 from scipy.sparse import coo_matrix
@@ -483,7 +484,12 @@ class LinearNetwork(_NetworkBase):
     """
 
     def activation_function(
-        self, x: torch.Tensor, x_previous: Optional[torch.Tensor] = None
+        self,
+        x: torch.Tensor,
+        x_previous: Optional[torch.Tensor] = None,
+        slopes_full: Optional[torch.Tensor] = None,
+        biases_full: Optional[torch.Tensor] = None,
+        taus_full=None,
     ) -> torch.Tensor:
         """
         Apply the activation function to the input tensor. Currently it is
@@ -493,6 +499,12 @@ class LinearNetwork(_NetworkBase):
         Args:
             x (torch.Tensor): The input tensor to the activation function.
             x_previous (Optional[torch.Tensor]): The previous activations of the neurons.
+            slopes_full (Optional[torch.Tensor]): Pre-expanded slopes, shape
+                (num_neurons, 1). If None, computed from self.slope[self.indices].
+            biases_full (Optional[torch.Tensor]): Pre-expanded biases, shape
+                (num_neurons, 1). If None, computed from self.biases[self.indices].
+            taus_full: Pre-expanded taus, shape (num_neurons, 1), or scalar.
+                If None, computed from self.effective_tau[self.indices].
 
         Returns:
             torch.Tensor: The output tensor after applying the activation function.
@@ -500,20 +512,30 @@ class LinearNetwork(_NetworkBase):
         if self.custom_activation_function is not None:
             return self.custom_activation_function(self, x, x_previous)
 
-        if self.slope is None:
+        # --- slopes ---
+        if slopes_full is not None:
+            slopes = slopes_full.expand(-1, x.shape[1])
+        elif self.slope is None:
             slopes = self.tanh_steepness
         else:
-            slopes = self.slope[self.indices]  # shape: (num_neurons,)
-            # shape: (num_neurons, batch_size)
-            slopes = slopes.view(-1, 1).expand(-1, x.shape[1]).to(x.device)
+            slopes = (
+                self.slope[self.indices].view(-1, 1).expand(-1, x.shape[1]).to(x.device)
+            )
 
         slopes = self.divnorm(slopes, x_previous)
 
-        if self.biases is None:
+        # --- biases ---
+        if biases_full is not None:
+            biases = biases_full.expand(-1, x.shape[1])
+        elif self.biases is None:
             biases = self.default_bias
         else:
-            biases = self.biases[self.indices]
-            biases = biases.view(-1, 1).expand(-1, x.shape[1]).to(x.device)
+            biases = (
+                self.biases[self.indices]
+                .view(-1, 1)
+                .expand(-1, x.shape[1])
+                .to(x.device)
+            )
 
         # x = self.tau * x_previous + slopes * x + biases
         x = slopes * x + biases
@@ -521,8 +543,14 @@ class LinearNetwork(_NetworkBase):
         # # Thresholded relu
         # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
 
-        if self.tau_param is not None:
-            # per-neuron tau, shape: (num_neurons, 1) -> broadcasts over batch
+        # --- taus ---
+        if taus_full is not None:
+            taus = (
+                taus_full.expand(-1, x.shape[1])
+                if isinstance(taus_full, torch.Tensor)
+                else taus_full
+            )
+        elif self.tau_param is not None:
             taus = (
                 self.effective_tau[self.indices]
                 .view(-1, 1)
@@ -530,11 +558,38 @@ class LinearNetwork(_NetworkBase):
                 .to(x.device)
             )
         else:
-            taus = self.tau  # scalar fallback
+            taus = self.tau
 
         x = 1 / taus * x + (taus - 1) / taus * x_previous
 
         return x
+
+    def _forward_chunk(
+        self, x, start_layer, end_layer, inputs, slopes_full, biases_full, taus_full
+    ):
+        """Run a chunk of timesteps. For use with gradient checkpointing.
+
+        Returns:
+            Tuple of (x_final, stacked_chunk_activations).
+        """
+        chunk_acts = []
+        for alayer in range(start_layer, end_layer):
+            x_previous = x
+            x = torch.sparse.mm(self.all_weights, x)
+            x = self.activation_function(
+                x,
+                x_previous=x_previous,
+                slopes_full=slopes_full,
+                biases_full=biases_full,
+                taus_full=taus_full,
+            )
+            if alayer != self.num_layers - 1:
+                x = x.clone()
+                x[self.sensory_indices, :] = (
+                    x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
+                )
+            chunk_acts.append(x.t())
+        return x, torch.stack(chunk_acts, dim=-1)
 
     def forward(
         self,
@@ -549,6 +604,7 @@ class LinearNetwork(_NetworkBase):
             Union[List[Union[int, str]], np.ndarray, torch.Tensor]
         ] = None,
         monitor_layers: Optional[List[int]] = None,
+        checkpoint_steps: int = 0,
     ):
         """
         Process inputs through the network. Use matrix-matrix multiplication for batched
@@ -563,6 +619,8 @@ class LinearNetwork(_NetworkBase):
                 in conjunction with `idx_to_group`, e.g. {0: {'DA1_lPN': 1.0}} for "at
                 layer/timepoint 0, make DA1_lPN's activity 1". If `idx_to_group` is not
                 provided, `neuron_group` is assumed to be neuron indices. Defaults to None.
+            checkpoint_steps (int, optional): If > 0, use gradient checkpointing every
+                this many timesteps. Defaults to 0 (disabled).
 
         Returns:
             torch.Tensor: The activations of all neurons across time steps (in batches).
@@ -635,13 +693,32 @@ class LinearNetwork(_NetworkBase):
                 for i in torch.as_tensor(monitor_layers, dtype=torch.long).tolist()
             )
 
-        # actual forward
-        acts = []
+        # ---- Hoist parameter gathers ONCE before the timestep loop ----
+        if self.slope is not None:
+            slopes_full = self.slope[self.indices].view(-1, 1)
+            biases_full = self.biases[self.indices].view(-1, 1)
+        else:
+            slopes_full = None
+            biases_full = None
+
+        if self.tau_param is not None:
+            taus_full = self.effective_tau[self.indices].view(-1, 1)
+        else:
+            taus_full = None
 
         # inputs = torch.clamp(inputs, -1.0, 1.0)
-
-        # check if inputs requires grad
         req_grad = inputs.requires_grad
+        _needs_grad = req_grad or any(
+            p.requires_grad for p in self.parameters() if p is not None
+        )
+
+        use_ckpt = (
+            checkpoint_steps > 0
+            and _needs_grad
+            and manipulate is None
+            and monitor_neurons is None
+        )
+
         # shape: (all_neurons, batch_size)
         full_input = torch.zeros(
             self.all_weights.size(1),
@@ -650,68 +727,33 @@ class LinearNetwork(_NetworkBase):
             requires_grad=req_grad,
         )
 
-        # # add bias - decided to not, because if added, then model gives different output depending on which neurons are 'sensory'
-        # if self.biases is None:
-        #     biases = self.default_bias
-        # else:
-        #     biases = self.biases[self.indices]
-        #     biases = (
-        #         biases.view(-1, 1)
-        #         .expand(-1, inputs.size(0))
-        #         .to(self.all_weights.device)
-        #     )
-        # full_input = full_input + biases
-
         # replace sensory neurons activations with inputs
         full_input = full_input.scatter(
             0,
-            # shape: (sensory_neurons, batch_size)
             self.sensory_indices.view(-1, 1).expand(-1, inputs.size(0)),
-            inputs[:, :, 0].t(),  # shape: (sensory_neurons, batch_size)
+            inputs[:, :, 0].t(),
         )
-        # full_input = torch.where(
-        #     full_input >= self.threshold, full_input, torch.zeros_like(full_input)
-        # )
-        # full_input = torch.clamp(full_input, max=1.0)
-        # # to illustrate how this works:
-        # dest = torch.zeros(5, 2)
-        # # sensory neurons, batch
-        # index = torch.tensor(
-        #     [
-        #         [0, 0],
-        #         [1, 1],
-        #         [3, 3],
-        #     ]
-        # )
-        # # shape: (sensory_neurons, batch)
-        # src = torch.tensor([[10, 20],
-        #                     [30, 40],
-        #                     [50, 60]
-        #                     ], dtype=dest.dtype)
-        # dest.scatter(0, index, src)
 
-        # full_input = full_input.index_add(0, self.sensory_indices, inputs[:, :, 0].t())
-
-        # sparse matrix multiplication
-        # shape: (all_neurons, batch_size)
+        # ---- Layer 0 ----
         x = torch.sparse.mm(self.all_weights, full_input)
-        x = self.activation_function(x, x_previous=full_input)
+        x = self.activation_function(
+            x,
+            x_previous=full_input,
+            slopes_full=slopes_full,
+            biases_full=biases_full,
+            taus_full=taus_full,
+        )
 
-        # add external input to sensory neurons
-        # so the output activation includes the external input as well
         if self.num_layers > 1:
             x = x.clone()
             x[self.sensory_indices, :] = (
                 x[self.sensory_indices, :] + inputs[:, :, 1].t()
             )
-            # # make sure x is between self.threshold and 1, otherwise set to 0
-            # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
-            # x = torch.clamp(x, max=1.0)
 
         if manipulate is not None:
             x = x.clone()
             for b, this_batch in manipulate.items():
-                if 0 in manipulate_idx[b]:  # if layer 0 in manipulate in batch b
+                if 0 in manipulate_idx[b]:
                     for neuron_idx, target_act in manipulate_idx[b][0].items():
                         x[neuron_idx, b] = target_act
 
@@ -728,52 +770,74 @@ class LinearNetwork(_NetworkBase):
 
                 x.register_hook(_tap0)
 
-        acts.append(x.t().cpu())  # shape: (batch_size, all_neurons)
+        # ---- Remaining layers ----
+        if use_ckpt:
+            # ---- CHECKPOINTED PATH ----
+            act_chunks = [x.t().unsqueeze(-1)]
 
-        # Process remaining layers
-        for alayer in range(1, self.num_layers):
-            x_previous = x.clone()  # save previous activations
-            # shape: (all_neurons, batch_size)
-            x = torch.sparse.mm(self.all_weights, x)
-            # thresholded relu and tanh
-            x = self.activation_function(x, x_previous=x_previous)
-
-            # add external input to sensory neurons, if not the last layer
-            if alayer != self.num_layers - 1:
-                x = x.clone()  # need to do this to avoid in-place operation
-                x[self.sensory_indices, :] = (
-                    x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
+            for chunk_start in range(1, self.num_layers, checkpoint_steps):
+                chunk_end = min(chunk_start + checkpoint_steps, self.num_layers)
+                x, chunk_acts = torch_checkpoint(
+                    self._forward_chunk,
+                    x,
+                    chunk_start,
+                    chunk_end,
+                    inputs,
+                    slopes_full,
+                    biases_full,
+                    taus_full,
+                    use_reentrant=False,
                 )
-                # # activity between [threshold, 1]
-                # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
-                # x = torch.clamp(x, max=1.0)
+                act_chunks.append(chunk_acts)
 
-            if manipulate is not None:
-                x = x.clone()
-                for b, this_batch in manipulate.items():
-                    if alayer in manipulate_idx[b]:
-                        for neuron_idx, target_act in manipulate_idx[b][alayer].items():
-                            x[neuron_idx, b] = target_act
+            self.activations = torch.cat(act_chunks, dim=-1).cpu()
 
-            # hook for this layer
-            if monitor_neurons is not None and alayer in monitor_layers:
+        else:
+            # ---- ORIGINAL (NON-CHECKPOINTED) PATH ----
+            acts = [x.t().cpu()]
 
-                def _tapL(grad, L=alayer):  # bind alayer to L
-                    self.noted_grads[L] = (
-                        grad.index_select(0, monitor_indices).detach().cpu()
+            for alayer in range(1, self.num_layers):
+                x_previous = x.clone()
+                x = torch.sparse.mm(self.all_weights, x)
+                x = self.activation_function(
+                    x,
+                    x_previous=x_previous,
+                    slopes_full=slopes_full,
+                    biases_full=biases_full,
+                    taus_full=taus_full,
+                )
+
+                if alayer != self.num_layers - 1:
+                    x = x.clone()
+                    x[self.sensory_indices, :] = (
+                        x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
                     )
 
-                x.register_hook(_tapL)
+                if manipulate is not None:
+                    x = x.clone()
+                    for b, this_batch in manipulate.items():
+                        if alayer in manipulate_idx[b]:
+                            for neuron_idx, target_act in manipulate_idx[b][
+                                alayer
+                            ].items():
+                                x[neuron_idx, b] = target_act
 
-            acts.append(x.t().cpu())  # shape: (batch_size, all_neurons)
+                if monitor_neurons is not None and alayer in monitor_layers:
 
-        # Stack activations
-        # shape: (batch_size, all_neurons, num_layers)
-        self.activations = torch.stack(acts, dim=-1)
-        # free up memory as much as possible
+                    def _tapL(grad, L=alayer):
+                        self.noted_grads[L] = (
+                            grad.index_select(0, monitor_indices).detach().cpu()
+                        )
+
+                    x.register_hook(_tapL)
+
+                acts.append(x.t().cpu())
+
+            self.activations = torch.stack(acts, dim=-1)
+
+        # free up memory
         del inputs
         del x
-        del acts
         torch.cuda.empty_cache()
 
         if single_input:
@@ -874,7 +938,12 @@ class MultilayeredNetwork(_NetworkBase):
     """
 
     def activation_function(
-        self, x: torch.Tensor, x_previous: Optional[torch.Tensor] = None
+        self,
+        x: torch.Tensor,
+        x_previous: Optional[torch.Tensor] = None,
+        slopes_full: Optional[torch.Tensor] = None,
+        biases_full: Optional[torch.Tensor] = None,
+        taus_full=None,
     ) -> torch.Tensor:
         """
         Apply the activation function to the input tensor. Currently it is
@@ -884,6 +953,12 @@ class MultilayeredNetwork(_NetworkBase):
         Args:
             x (torch.Tensor): The input tensor to the activation function.
             x_previous (Optional[torch.Tensor]): The previous activations of the neurons.
+            slopes_full (Optional[torch.Tensor]): Pre-expanded slopes, shape
+                (num_neurons, 1). If None, computed from self.slope[self.indices].
+            biases_full (Optional[torch.Tensor]): Pre-expanded biases, shape
+                (num_neurons, 1). If None, computed from self.biases[self.indices].
+            taus_full: Pre-expanded taus, shape (num_neurons, 1), or scalar.
+                If None, computed from self.effective_tau[self.indices].
 
         Returns:
             torch.Tensor: The output tensor after applying the activation function.
@@ -891,30 +966,44 @@ class MultilayeredNetwork(_NetworkBase):
         if self.custom_activation_function is not None:
             return self.custom_activation_function(self, x, x_previous)
 
-        if self.slope is None:
+        # --- slopes ---
+        if slopes_full is not None:
+            slopes = slopes_full.expand(-1, x.shape[1])
+        elif self.slope is None:
             slopes = self.tanh_steepness
         else:
-            slopes = self.slope[self.indices]  # shape: (num_neurons,)
-            # shape: (num_neurons, batch_size)
-            slopes = slopes.view(-1, 1).expand(-1, x.shape[1]).to(x.device)
+            slopes = (
+                self.slope[self.indices].view(-1, 1).expand(-1, x.shape[1]).to(x.device)
+            )
 
         slopes = self.divnorm(slopes, x_previous)
 
-        if self.biases is None:
+        # --- biases ---
+        if biases_full is not None:
+            biases = biases_full.expand(-1, x.shape[1])
+        elif self.biases is None:
             biases = self.default_bias
         else:
-            biases = self.biases[self.indices]
-            biases = biases.view(-1, 1).expand(-1, x.shape[1]).to(x.device)
+            biases = (
+                self.biases[self.indices]
+                .view(-1, 1)
+                .expand(-1, x.shape[1])
+                .to(x.device)
+            )
 
-        # x = self.tau * x_previous + slopes * x + biases
         x = slopes * x + biases
 
         # Thresholded relu
         x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
 
-        # # Tanh activation
-        if self.tau_param is not None:
-            # per-neuron tau, shape: (num_neurons, 1) -> broadcasts over batch
+        # --- taus ---
+        if taus_full is not None:
+            taus = (
+                taus_full.expand(-1, x.shape[1])
+                if isinstance(taus_full, torch.Tensor)
+                else taus_full
+            )
+        elif self.tau_param is not None:
             taus = (
                 self.effective_tau[self.indices]
                 .view(-1, 1)
@@ -922,11 +1011,41 @@ class MultilayeredNetwork(_NetworkBase):
                 .to(x.device)
             )
         else:
-            taus = self.tau  # scalar fallback
+            taus = self.tau
 
         x = 1 / taus * torch.tanh(x) + (taus - 1) / taus * x_previous
 
         return x
+
+    def _forward_chunk(
+        self, x, start_layer, end_layer, inputs, slopes_full, biases_full, taus_full
+    ):
+        """Run a chunk of timesteps. For use with gradient checkpointing.
+
+        Returns:
+            Tuple of (x_final, stacked_chunk_activations).
+        """
+        chunk_acts = []
+        for alayer in range(start_layer, end_layer):
+            x_previous = x
+            x = torch.sparse.mm(self.all_weights, x)
+            x = self.activation_function(
+                x,
+                x_previous=x_previous,
+                slopes_full=slopes_full,
+                biases_full=biases_full,
+                taus_full=taus_full,
+            )
+            if alayer != self.num_layers - 1:
+                x = x.clone()
+                x[self.sensory_indices, :] = (
+                    x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
+                )
+                x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+                x = torch.clamp(x, max=1.0)
+            chunk_acts.append(x.t())
+        # stack along last dim → (batch, neurons, chunk_len)
+        return x, torch.stack(chunk_acts, dim=-1)
 
     def forward(
         self,
@@ -941,6 +1060,7 @@ class MultilayeredNetwork(_NetworkBase):
             Union[List[Union[int, str]], np.ndarray, torch.Tensor]
         ] = None,
         monitor_layers: Optional[List[int]] = None,
+        checkpoint_steps: int = 0,
     ):
         """
         Process inputs through the network. Use matrix-matrix multiplication for batched
@@ -955,6 +1075,12 @@ class MultilayeredNetwork(_NetworkBase):
                 in conjunction with `idx_to_group`, e.g. {0: {'DA1_lPN': 1.0}} for "at
                 layer/timepoint 0, make DA1_lPN's activity 1". If `idx_to_group` is not
                 provided, `neuron_group` is assumed to be neuron indices. Defaults to None.
+            checkpoint_steps (int, optional): If > 0, use gradient checkpointing every
+                this many timesteps. This trades ~2x backward compute for dramatically
+                lower GPU memory usage during training, by freeing intermediate tensors
+                and recomputing them during backward. Recommended value: 32-50.
+                Not compatible with manipulate or monitor_neurons; falls back to the
+                non-checkpointed path if those are used. Defaults to 0 (disabled).
 
         Returns:
             torch.Tensor: The activations of all neurons across time steps (in batches).
@@ -1027,13 +1153,34 @@ class MultilayeredNetwork(_NetworkBase):
                 for i in torch.as_tensor(monitor_layers, dtype=torch.long).tolist()
             )
 
-        # actual forward
-        acts = []
+        # ---- Hoist parameter gathers ONCE before the timestep loop ----
+        if self.slope is not None:
+            slopes_full = self.slope[self.indices].view(-1, 1)
+            biases_full = self.biases[self.indices].view(-1, 1)
+        else:
+            slopes_full = None
+            biases_full = None
+
+        if self.tau_param is not None:
+            taus_full = self.effective_tau[self.indices].view(-1, 1)
+        else:
+            taus_full = None
 
         inputs = torch.clamp(inputs, -1.0, 1.0)
-
-        # check if inputs requires grad
         req_grad = inputs.requires_grad
+        _needs_grad = req_grad or any(
+            p.requires_grad for p in self.parameters() if p is not None
+        )
+
+        # Decide whether to use gradient checkpointing.
+        # Checkpointing is incompatible with manipulate/monitor, so fall back.
+        use_ckpt = (
+            checkpoint_steps > 0
+            and _needs_grad
+            and manipulate is None
+            and monitor_neurons is None
+        )
+
         # shape: (all_neurons, batch_size)
         full_input = torch.zeros(
             self.all_weights.size(1),
@@ -1042,68 +1189,39 @@ class MultilayeredNetwork(_NetworkBase):
             requires_grad=req_grad,
         )
 
-        # # add bias - decided to not, because if added, then model gives different output depending on which neurons are 'sensory'
-        # if self.biases is None:
-        #     biases = self.default_bias
-        # else:
-        #     biases = self.biases[self.indices]
-        #     biases = (
-        #         biases.view(-1, 1)
-        #         .expand(-1, inputs.size(0))
-        #         .to(self.all_weights.device)
-        #     )
-        # full_input = full_input + biases
-
         # replace sensory neurons activations with inputs
         full_input = full_input.scatter(
             0,
-            # shape: (sensory_neurons, batch_size)
             self.sensory_indices.view(-1, 1).expand(-1, inputs.size(0)),
-            inputs[:, :, 0].t(),  # shape: (sensory_neurons, batch_size)
+            inputs[:, :, 0].t(),
         )
         full_input = torch.where(
             full_input >= self.threshold, full_input, torch.zeros_like(full_input)
         )
         full_input = torch.clamp(full_input, max=1.0)
-        # # to illustrate how this works:
-        # dest = torch.zeros(5, 2)
-        # # sensory neurons, batch
-        # index = torch.tensor(
-        #     [
-        #         [0, 0],
-        #         [1, 1],
-        #         [3, 3],
-        #     ]
-        # )
-        # # shape: (sensory_neurons, batch)
-        # src = torch.tensor([[10, 20],
-        #                     [30, 40],
-        #                     [50, 60]
-        #                     ], dtype=dest.dtype)
-        # dest.scatter(0, index, src)
 
-        # full_input = full_input.index_add(0, self.sensory_indices, inputs[:, :, 0].t())
-
-        # sparse matrix multiplication
-        # shape: (all_neurons, batch_size)
+        # ---- Layer 0 ----
         x = torch.sparse.mm(self.all_weights, full_input)
-        x = self.activation_function(x, x_previous=full_input)
+        x = self.activation_function(
+            x,
+            x_previous=full_input,
+            slopes_full=slopes_full,
+            biases_full=biases_full,
+            taus_full=taus_full,
+        )
 
-        # add external input to sensory neurons
-        # so the output activation includes the external input as well
         if self.num_layers > 1:
             x = x.clone()
             x[self.sensory_indices, :] = (
                 x[self.sensory_indices, :] + inputs[:, :, 1].t()
             )
-            # make sure x is between self.threshold and 1, otherwise set to 0
             x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
             x = torch.clamp(x, max=1.0)
 
         if manipulate is not None:
             x = x.clone()
             for b, this_batch in manipulate.items():
-                if 0 in manipulate_idx[b]:  # if layer 0 in manipulate in batch b
+                if 0 in manipulate_idx[b]:
                     for neuron_idx, target_act in manipulate_idx[b][0].items():
                         x[neuron_idx, b] = target_act
 
@@ -1120,52 +1238,79 @@ class MultilayeredNetwork(_NetworkBase):
 
                 x.register_hook(_tap0)
 
-        acts.append(x.t().cpu())  # shape: (batch_size, all_neurons)
+        # ---- Remaining layers ----
+        if use_ckpt:
+            # ---- CHECKPOINTED PATH ----
+            # Activations stay on GPU (memory is manageable since intermediates
+            # are freed by checkpointing).  Moved to CPU after stacking.
+            act_chunks = [x.t().unsqueeze(-1)]  # layer 0: (batch, neurons, 1)
 
-        # Process remaining layers
-        for alayer in range(1, self.num_layers):
-            x_previous = x.clone()  # save previous activations
-            # shape: (all_neurons, batch_size)
-            x = torch.sparse.mm(self.all_weights, x)
-            # thresholded relu and tanh
-            x = self.activation_function(x, x_previous=x_previous)
-
-            # add external input to sensory neurons, if not the last layer
-            if alayer != self.num_layers - 1:
-                x = x.clone()  # need to do this to avoid in-place operation
-                x[self.sensory_indices, :] = (
-                    x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
+            for chunk_start in range(1, self.num_layers, checkpoint_steps):
+                chunk_end = min(chunk_start + checkpoint_steps, self.num_layers)
+                x, chunk_acts = torch_checkpoint(
+                    self._forward_chunk,
+                    x,
+                    chunk_start,
+                    chunk_end,
+                    inputs,
+                    slopes_full,
+                    biases_full,
+                    taus_full,
+                    use_reentrant=False,
                 )
-                # activity between [threshold, 1]
-                x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
-                x = torch.clamp(x, max=1.0)
+                act_chunks.append(chunk_acts)
 
-            if manipulate is not None:
-                x = x.clone()
-                for b, this_batch in manipulate.items():
-                    if alayer in manipulate_idx[b]:
-                        for neuron_idx, target_act in manipulate_idx[b][alayer].items():
-                            x[neuron_idx, b] = target_act
+            # (batch, neurons, num_layers) – on GPU, then move to CPU
+            self.activations = torch.cat(act_chunks, dim=-1).cpu()
 
-            # hook for this layer
-            if monitor_neurons is not None and alayer in monitor_layers:
+        else:
+            # ---- ORIGINAL (NON-CHECKPOINTED) PATH ----
+            acts = [x.t().cpu()]
 
-                def _tapL(grad, L=alayer):  # bind alayer to L
-                    self.noted_grads[L] = (
-                        grad.index_select(0, monitor_indices).detach().cpu()
+            for alayer in range(1, self.num_layers):
+                x_previous = x.clone()
+                x = torch.sparse.mm(self.all_weights, x)
+                x = self.activation_function(
+                    x,
+                    x_previous=x_previous,
+                    slopes_full=slopes_full,
+                    biases_full=biases_full,
+                    taus_full=taus_full,
+                )
+
+                if alayer != self.num_layers - 1:
+                    x = x.clone()
+                    x[self.sensory_indices, :] = (
+                        x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
                     )
+                    x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+                    x = torch.clamp(x, max=1.0)
 
-                x.register_hook(_tapL)
+                if manipulate is not None:
+                    x = x.clone()
+                    for b, this_batch in manipulate.items():
+                        if alayer in manipulate_idx[b]:
+                            for neuron_idx, target_act in manipulate_idx[b][
+                                alayer
+                            ].items():
+                                x[neuron_idx, b] = target_act
 
-            acts.append(x.t().cpu())  # shape: (batch_size, all_neurons)
+                if monitor_neurons is not None and alayer in monitor_layers:
 
-        # Stack activations
-        # shape: (batch_size, all_neurons, num_layers)
-        self.activations = torch.stack(acts, dim=-1)
-        # free up memory as much as possible
+                    def _tapL(grad, L=alayer):
+                        self.noted_grads[L] = (
+                            grad.index_select(0, monitor_indices).detach().cpu()
+                        )
+
+                    x.register_hook(_tapL)
+
+                acts.append(x.t().cpu())
+
+            self.activations = torch.stack(acts, dim=-1)
+
+        # free up memory
         del inputs
         del x
-        del acts
         torch.cuda.empty_cache()
 
         if single_input:
@@ -1213,6 +1358,7 @@ def train_model(
     train_biases: bool = True,
     train_divisive_strength: bool = True,
     train_tau: bool = True,
+    checkpoint_steps: int = 50,
 ):
     """
     Train the model to approximate the targets, while keeping the model parameter change
@@ -1282,37 +1428,6 @@ def train_model(
             val_indices,
         )
 
-    def get_activation_loss(actual_activations, targets):
-        """Calculate the activation loss for the model with time series support."""
-        activation_loss = torch.tensor(0.0, device=actual_activations.device)
-
-        # Calculate loss
-        for b in targets["batch"].unique():
-            batch_targets = targets[targets["batch"] == b]
-
-            batch_loss = torch.tensor(0.0, device=actual_activations.device)
-            for _, row in batch_targets.iterrows():
-                target_value = row["value"]
-                neuron_idx = int(row["neuron_idx"])  # Convert to int
-
-                if "layer" in row:
-                    # Time series mode - use specific layer/timestep
-                    actual_value = actual_activations[b, neuron_idx, int(row["layer"])]
-                else:
-                    # Backward compatibility - average across timesteps
-                    actual_value = actual_activations[b, neuron_idx, :].mean()
-
-                # batch loss is absolute difference between actual and target
-                batch_loss += torch.abs(actual_value - target_value)
-            batch_loss /= len(batch_targets)  # average over neurons
-            activation_loss += batch_loss
-
-        if len(targets["batch"].unique()) == 0:
-            return activation_loss
-        else:
-            activation_loss /= len(targets["batch"].unique())  # average over batches
-        return activation_loss
-
     # Set random seed for reproducibility
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -1363,12 +1478,32 @@ def train_model(
             val_indices,
         ) = train_test_split(inputs, targets, train_fraction)
 
+        batch_idx = torch.tensor(train_targets["batch"].values, dtype=torch.long)
+        neuron_idx = torch.tensor(train_targets["neuron_idx"].values, dtype=torch.long)
+        if "layer" in train_targets.columns:
+            layer_idx = torch.tensor(train_targets["layer"].values, dtype=torch.long)
+        target_vals = torch.tensor(train_targets["value"].values, dtype=torch.float32)
+
+        batch_idx_val = torch.tensor(val_targets["batch"].values, dtype=torch.long)
+        neuron_idx_val = torch.tensor(
+            val_targets["neuron_idx"].values, dtype=torch.long
+        )
+        if "layer" in val_targets.columns:
+            layer_idx_val = torch.tensor(val_targets["layer"].values, dtype=torch.long)
+        target_vals_val = torch.tensor(val_targets["value"].values, dtype=torch.float32)
+
         for epoch in tqdm(range(num_epochs)):
             optimizer.zero_grad()
             # Forward pass
-            outputs = model(train_inputs)  # shape: (train_num, num_neurons, num_layers)
+            outputs = model(
+                train_inputs, checkpoint_steps=checkpoint_steps
+            )  # shape: (train_num, num_neurons, num_layers)
 
-            activation_loss = get_activation_loss(outputs, train_targets)
+            if "layer" in train_targets.columns:
+                actual = outputs[batch_idx, neuron_idx, layer_idx]
+            else:
+                actual = outputs[batch_idx, neuron_idx, :].mean(dim=-1)
+            activation_loss = torch.abs(actual - target_vals).mean()
 
             # regularization loss
             param_reg_loss = 0
@@ -1384,7 +1519,11 @@ def train_model(
             # validation loss
             with torch.no_grad():
                 val_outputs = model(val_inputs)
-                val_activation_loss = get_activation_loss(val_outputs, val_targets)
+                if "layer" in val_targets.columns:
+                    actual = val_outputs[batch_idx_val, neuron_idx_val, layer_idx_val]
+                else:
+                    actual = val_outputs[batch_idx_val, neuron_idx_val, :].mean(dim=-1)
+                val_activation_loss = torch.abs(actual - target_vals_val).mean()
                 if wandb:
                     wandb.log({"val_activation_loss": val_activation_loss.item()})
 

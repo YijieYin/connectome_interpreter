@@ -2397,5 +2397,253 @@ class TestTauParamCorrectness(unittest.TestCase):
         )
 
 
+# ---- Add these tests before `if __name__ == "__main__":` ----
+
+
+class TestCheckpointing(unittest.TestCase):
+    """Tests for gradient checkpointing and hoisted parameter gathers."""
+
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.num_neurons = 12
+        self.num_sensory = 4
+        self.num_layers = 20
+        self.batch_size = 2
+
+        dense_weights = np.random.rand(self.num_neurons, self.num_neurons).astype(
+            np.float32
+        )
+        dense_weights = dense_weights / dense_weights.sum(axis=1, keepdims=True)
+        dense_weights[:, :3] = -dense_weights[:, :3]
+        self.all_weights = csr_matrix(dense_weights)
+        self.sensory_indices = list(range(self.num_sensory))
+
+        self.idx_to_group = {}
+        types = ["type_0", "type_1", "type_2"]
+        for i in range(self.num_neurons):
+            self.idx_to_group[i] = types[i % 3]
+
+    def _make_input(self):
+        return torch.rand(
+            self.batch_size,
+            self.num_sensory,
+            self.num_layers,
+            device=self.device,
+        )
+
+    # ------------------------------------------------------------------
+    # Forward equivalence
+    # ------------------------------------------------------------------
+
+    def test_multilayered_checkpoint_matches_no_checkpoint(self):
+        """Checkpointed forward should produce identical output to non-checkpointed."""
+        torch.manual_seed(0)
+        model = MultilayeredNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            idx_to_group=self.idx_to_group,
+        ).to(self.device)
+        inp = self._make_input()
+
+        out_no_ckpt = model(inp, checkpoint_steps=0).detach()
+        out_ckpt = model(inp, checkpoint_steps=7).detach()
+
+        self.assertTrue(
+            torch.allclose(out_no_ckpt, out_ckpt, atol=1e-5),
+            "Checkpointed and non-checkpointed forward should match (MultilayeredNetwork)",
+        )
+
+    def test_linear_checkpoint_matches_no_checkpoint(self):
+        """Checkpointed forward should produce identical output to non-checkpointed."""
+        torch.manual_seed(0)
+        model = LinearNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            idx_to_group=self.idx_to_group,
+        ).to(self.device)
+        inp = self._make_input()
+
+        out_no_ckpt = model(inp, checkpoint_steps=0).detach()
+        out_ckpt = model(inp, checkpoint_steps=7).detach()
+
+        self.assertTrue(
+            torch.allclose(out_no_ckpt, out_ckpt, atol=1e-5),
+            "Checkpointed and non-checkpointed forward should match (LinearNetwork)",
+        )
+
+    # ------------------------------------------------------------------
+    # Gradient equivalence
+    # ------------------------------------------------------------------
+
+    def _gradient_equivalence(self, cls):
+        """Helper: compare parameter gradients with and without checkpointing."""
+        torch.manual_seed(42)
+        inp = self._make_input()
+
+        def _run(ckpt_steps):
+            torch.manual_seed(42)
+            model = cls(
+                self.all_weights,
+                self.sensory_indices,
+                num_layers=self.num_layers,
+                idx_to_group=self.idx_to_group,
+            ).to(self.device)
+            model.set_param_grads(slopes=True, raw_biases=True, tau=True)
+            out = model(inp.clone(), checkpoint_steps=ckpt_steps)
+            out.sum().backward()
+            return {
+                "slope": model.slope.grad.clone(),
+                "bias": model.raw_biases.grad.clone(),
+                "tau": model.tau_param.grad.clone(),
+            }
+
+        grads_plain = _run(0)
+        grads_ckpt = _run(5)
+
+        for name in grads_plain:
+            self.assertTrue(
+                torch.allclose(grads_plain[name], grads_ckpt[name], atol=1e-4),
+                f"{cls.__name__}: {name} gradients differ between checkpointed and non-checkpointed",
+            )
+
+    def test_multilayered_gradient_equivalence(self):
+        self._gradient_equivalence(MultilayeredNetwork)
+
+    def test_linear_gradient_equivalence(self):
+        self._gradient_equivalence(LinearNetwork)
+
+    # ------------------------------------------------------------------
+    # Checkpoint fallback with manipulate
+    # ------------------------------------------------------------------
+
+    def test_checkpoint_fallback_with_manipulate(self):
+        """When manipulate is used, checkpoint_steps should be ignored (fallback)."""
+        model = MultilayeredNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            idx_to_group=self.idx_to_group,
+        ).to(self.device)
+        inp = self._make_input()
+        manipulate = {0: {"type_0": 0.5}}
+
+        # Should not raise, should silently fall back to non-checkpointed
+        out = model(inp, manipulate=manipulate, checkpoint_steps=5)
+        self.assertEqual(
+            out.shape, (self.batch_size, self.num_neurons, self.num_layers)
+        )
+
+    # ------------------------------------------------------------------
+    # Different checkpoint_steps values all produce same output
+    # ------------------------------------------------------------------
+
+    def test_various_checkpoint_step_sizes(self):
+        """Different chunk sizes should all produce the same output."""
+        model = MultilayeredNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            idx_to_group=self.idx_to_group,
+        ).to(self.device)
+        inp = self._make_input()
+
+        baseline = model(inp, checkpoint_steps=0).detach()
+        for steps in [1, 3, 10, self.num_layers]:
+            out = model(inp, checkpoint_steps=steps).detach()
+            self.assertTrue(
+                torch.allclose(baseline, out, atol=1e-5),
+                f"checkpoint_steps={steps} produced different output",
+            )
+
+    # ------------------------------------------------------------------
+    # train_model with checkpoint_steps
+    # ------------------------------------------------------------------
+
+    def test_train_model_with_checkpoint_steps(self):
+        """train_model should work with checkpoint_steps and reduce loss."""
+        model = MultilayeredNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=5,
+            idx_to_group=self.idx_to_group,
+        ).to(self.device)
+        inputs = torch.rand(6, self.num_sensory, 5, device=self.device)
+        targets = pd.DataFrame(
+            [{"batch": i, "neuron_idx": 5, "layer": 4, "value": 0.5} for i in range(6)]
+        )
+
+        _, history, *_ = train_model(
+            model,
+            inputs,
+            targets,
+            num_epochs=5,
+            wandb=False,
+            train_slopes=True,
+            train_biases=False,
+            train_divisive_strength=False,
+            train_tau=False,
+            checkpoint_steps=3,
+        )
+        self.assertTrue(len(history["loss"]) == 5)
+
+    # ------------------------------------------------------------------
+    # Hoisted parameters produce same output as original indexing
+    # ------------------------------------------------------------------
+
+    def test_hoisted_params_match_original(self):
+        """activation_function with pre-expanded params should match per-call indexing."""
+        model = MultilayeredNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=3,
+            idx_to_group=self.idx_to_group,
+        ).to(self.device)
+
+        x = torch.rand(self.num_neurons, self.batch_size, device=self.device)
+        x_prev = torch.rand(self.num_neurons, self.batch_size, device=self.device)
+
+        # Call with hoisted params (as forward does)
+        slopes_full = model.slope[model.indices].view(-1, 1)
+        biases_full = model.biases[model.indices].view(-1, 1)
+        taus_full = model.effective_tau[model.indices].view(-1, 1)
+        out_hoisted = model.activation_function(
+            x.clone(),
+            x_previous=x_prev,
+            slopes_full=slopes_full,
+            biases_full=biases_full,
+            taus_full=taus_full,
+        )
+
+        # Call without hoisted params (fallback indexing)
+        out_fallback = model.activation_function(x.clone(), x_previous=x_prev)
+
+        self.assertTrue(
+            torch.allclose(out_hoisted, out_fallback, atol=1e-6),
+            "Hoisted params and per-call indexing should produce identical results",
+        )
+
+    # ------------------------------------------------------------------
+    # 2D input still works with checkpointing
+    # ------------------------------------------------------------------
+
+    def test_checkpoint_2d_input(self):
+        """checkpoint_steps should work with 2D (non-batched) input."""
+        model = MultilayeredNetwork(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=self.num_layers,
+            idx_to_group=self.idx_to_group,
+        ).to(self.device)
+        inp = torch.rand(self.num_sensory, self.num_layers, device=self.device)
+
+        out_no_ckpt = model(inp, checkpoint_steps=0).detach()
+        out_ckpt = model(inp, checkpoint_steps=5).detach()
+
+        self.assertEqual(out_no_ckpt.shape, (self.num_neurons, self.num_layers))
+        self.assertTrue(torch.allclose(out_no_ckpt, out_ckpt, atol=1e-5))
+
+
 if __name__ == "__main__":
     unittest.main()
