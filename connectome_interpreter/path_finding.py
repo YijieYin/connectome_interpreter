@@ -1018,8 +1018,43 @@ def group_paths(
             )
 
         if combining_method == "median":
+            # first sum across pre neurons for each individual post neuron
+            per_post = (
+                paths.groupby(group_columns + ["post"])["weight"]
+                .sum()
+                .reset_index()
+            )
+            if not avg_within_connected:
+                # pad with zeros for post neurons missing from paths
+                n_actual = (
+                    per_post.groupby(group_columns)["post"]
+                    .nunique()
+                    .reset_index(name="n_actual")
+                )
+                if isinstance(nneuron_per_type, dict):
+                    n_actual["n_total"] = n_actual["post_type"].map(nneuron_per_type)
+                else:  # DataFrame
+                    n_actual = n_actual.merge(
+                        nneuron_per_type.rename(columns={"nneuron_post": "n_total"}),
+                        on=group_columns_sub,
+                    )
+                n_actual["n_missing"] = n_actual["n_total"] - n_actual["n_actual"]
+                # create zero-weight rows for missing post neurons
+                zero_rows = []
+                for _, row in n_actual.iterrows():
+                    if row["n_missing"] > 0:
+                        base = {col: row[col] for col in group_columns}
+                        base["weight"] = 0.0
+                        base["post"] = None  # placeholder
+                        for _ in range(int(row["n_missing"])):
+                            zero_rows.append(base.copy())
+                if zero_rows:
+                    per_post = pd.concat(
+                        [per_post, pd.DataFrame(zero_rows)], ignore_index=True
+                    )
+            # then take the median across post neurons
             paths_weights = (
-                paths.groupby(group_columns)["weight"].median().reset_index()
+                per_post.groupby(group_columns)["weight"].median().reset_index()
             )
         elif combining_method == "sum":
             # sum across presynaptic neurons of the same type
@@ -1078,8 +1113,44 @@ def group_paths(
 
         # weights
         if combining_method == "median":
+            # first sum across post neurons for each individual pre neuron
+            per_pre = (
+                paths.groupby(group_columns + ["pre"])["weight"]
+                .sum()
+                .reset_index()
+            )
+            if not avg_within_connected:
+                # pad with zeros for pre neurons missing from paths
+                n_actual = (
+                    per_pre.groupby(group_columns)["pre"]
+                    .nunique()
+                    .reset_index(name="n_actual")
+                )
+                if isinstance(nneuron_per_type, dict):
+                    n_actual["n_total"] = n_actual["pre_type"].map(nneuron_per_type)
+                else:  # DataFrame
+                    group_columns_sub = list(set(group_columns) - set(["post_type"]))
+                    n_actual = n_actual.merge(
+                        nneuron_per_type.rename(columns={"nneuron_pre": "n_total"}),
+                        on=group_columns_sub,
+                    )
+                n_actual["n_missing"] = n_actual["n_total"] - n_actual["n_actual"]
+                # create zero-weight rows for missing pre neurons
+                zero_rows = []
+                for _, row in n_actual.iterrows():
+                    if row["n_missing"] > 0:
+                        base = {col: row[col] for col in group_columns}
+                        base["weight"] = 0.0
+                        base["pre"] = None  # placeholder
+                        for _ in range(int(row["n_missing"])):
+                            zero_rows.append(base.copy())
+                if zero_rows:
+                    per_pre = pd.concat(
+                        [per_pre, pd.DataFrame(zero_rows)], ignore_index=True
+                    )
+            # then take the median across pre neurons
             paths_weights = (
-                paths.groupby(group_columns)["weight"].median().reset_index()
+                per_pre.groupby(group_columns)["weight"].median().reset_index()
             )
         elif combining_method == "sum":
             # sum across presynaptic neurons of the same type
