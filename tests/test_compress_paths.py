@@ -1772,6 +1772,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
             self.paths_no_loop,
             pre_group=self.pre_group,
             post_group=self.post_group,
+            intermediate_group=self.intermediate_group,
             wide=True,
             use_gpu=False,
         )
@@ -1835,6 +1836,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
             self.paths_with_loop,
             pre_group=self.pre_group,
             post_group=self.post_group,
+            intermediate_group=self.intermediate_group,
             remove_loop_after_grouping=False,
             use_gpu=False,
         )
@@ -1843,6 +1845,7 @@ class TestEffconnWithoutLoops(unittest.TestCase):
             self.paths_with_loop,
             pre_group=self.pre_group,
             post_group=self.post_group,
+            intermediate_group=self.intermediate_group,
             remove_loop_after_grouping=True,
             use_gpu=False,
         )
