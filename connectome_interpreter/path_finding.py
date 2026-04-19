@@ -909,7 +909,7 @@ def group_paths(
     paths: pd.DataFrame,
     pre_group: Optional[dict] = None,
     post_group: Optional[dict] = None,
-    intermediate_group: dict | None = None,
+    intermediate_group: Optional[dict] = None,
     avg_within_connected: bool = False,
     outprop: bool = False,
     combining_method: str = "mean",
@@ -958,14 +958,20 @@ def group_paths(
         f"Currently it is {combining_method}."
     )
 
+    # (new) auto-fill missing keys so every node has a group
     all_nodes = set(paths["pre"]).union(set(paths["post"]))
     if pre_group is None:
-        pre_group = {node: node for node in all_nodes}
+        pre_group = {n: n for n in all_nodes}
+    else:
+        pre_group = {**{n: n for n in all_nodes}, **pre_group}  # user's values win
     if post_group is None:
-        post_group = {node: node for node in all_nodes}
-
+        post_group = {n: n for n in all_nodes}
+    else:
+        post_group = {**{n: n for n in all_nodes}, **post_group}
     if intermediate_group is None:
-        intermediate_group = pre_group
+        intermediate_group = dict(pre_group)
+    else:
+        intermediate_group = {**{n: n for n in all_nodes}, **intermediate_group}
 
     # make values in pre_group, post_group, and intermediate_group strings
     pre_group = {k: str(v) for k, v in pre_group.items()}
@@ -1001,10 +1007,6 @@ def group_paths(
     if has_activation:
         paths_act = paths.copy()
 
-    # when the grouping dicts don't have some pre/post in the keys
-    paths["pre_type"] = paths.pre_type.fillna(paths.pre)
-    paths["post_type"] = paths.post_type.fillna(paths.post)
-
     if not outprop:
         # in this case, calculating the summed input proportion across all senders for
         # each average recipient
@@ -1035,11 +1037,6 @@ def group_paths(
                 not_last_prepost = not_last_prepost.merge(
                     intermediate_group_df, on=["post_type"], how="left"
                 )
-                # for the neurons that are not in intermediate_group,
-                # fill post_type with the original post neuron id
-                not_last_prepost["post"] = not_last_prepost["post"].fillna(
-                    not_last_prepost["post_type"]
-                )
                 not_last = not_last_prepost.merge(
                     not_last, on=group_columns + ["post"], how="left"
                 ).fillna(0)
@@ -1048,11 +1045,6 @@ def group_paths(
                 last_prepost = last_prepost.merge(
                     post_group_df, on=["post_type"], how="left"
                 )
-                # for the neurons that are not in post_group,
-                # fill post_type with the original post neuron id
-                last_prepost["post"] = last_prepost["post"].fillna(
-                    last_prepost["post_type"]
-                )
                 last = last_prepost.merge(
                     last, on=group_columns + ["post"], how="left"
                 ).fillna(0)
@@ -1060,9 +1052,6 @@ def group_paths(
             else:
                 prepost = paths[group_columns].drop_duplicates()
                 prepost = prepost.merge(post_group_df, on=["post_type"], how="left")
-                # for the neurons that are not in post_group,
-                # fill post_type with the original post neuron id
-                prepost["post"] = prepost["post"].fillna(prepost["post_type"])
                 paths = prepost.merge(
                     paths, on=group_columns + ["post"], how="left"
                 ).fillna(0)
@@ -1100,11 +1089,6 @@ def group_paths(
                 not_first_prepost = not_first_prepost.merge(
                     intermediate_group_df, on=["pre_type"], how="left"
                 )
-                # for the neurons that are not in intermediate_group,
-                # fill pre_type with the original pre neuron id
-                not_first_prepost["pre"] = not_first_prepost["pre"].fillna(
-                    not_first_prepost["pre_type"]
-                )
                 not_first = not_first_prepost.merge(
                     not_first, on=group_columns + ["pre"], how="left"
                 ).fillna(0)
@@ -1114,11 +1098,6 @@ def group_paths(
                 first_prepost = first_prepost.merge(
                     pre_group_df, on=["pre_type"], how="left"
                 )
-                # for the neurons that are not in pre_group,
-                # fill pre_type with the original pre neuron id
-                first_prepost["pre"] = first_prepost["pre"].fillna(
-                    first_prepost["pre_type"]
-                )
                 first = first_prepost.merge(
                     first, on=group_columns + ["pre"], how="left"
                 ).fillna(0)
@@ -1126,9 +1105,6 @@ def group_paths(
             else:
                 prepost = paths[group_columns].drop_duplicates()
                 prepost = prepost.merge(pre_group_df, on=["pre_type"], how="left")
-                # for the neurons that are not in pre_group,
-                # fill pre_type with the original pre neuron id
-                prepost["pre"] = prepost["pre"].fillna(prepost["pre_type"])
                 paths = prepost.merge(
                     paths, on=group_columns + ["pre"], how="left"
                 ).fillna(0)
