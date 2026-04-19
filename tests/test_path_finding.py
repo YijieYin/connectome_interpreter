@@ -1270,3 +1270,63 @@ class TestGroupPaths(unittest.TestCase):
         # layer 2: b1 absent → 0, b2 contributes 3; mean = 1.5
         self.assertAlmostEqual(self.weight_of(out, "A", "B", layer=1), 1.0)
         self.assertAlmostEqual(self.weight_of(out, "A", "B", layer=2), 1.5)
+
+    def test_missing_post_group_key_becomes_own_group(self):
+        """Post neurons absent from post_group fall back to their own id as group."""
+        df = self.mk_df([("a1", "b1", 2.0), ("a1", "b2", 4.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A"},
+            post_group={"b1": "B"},  # 'b2' missing
+            combining_method="sum",
+            avg_within_connected=True,
+        )
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 2.0)
+        self.assertAlmostEqual(self.weight_of(out, "A", "b2"), 4.0)
+
+    def test_missing_pre_group_key_outprop(self):
+        """Pre neurons absent from pre_group fall back to their own id under outprop."""
+        df = self.mk_df([("a1", "b", 2.0), ("a2", "b", 4.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A"},  # 'a2' missing
+            post_group={"b": "B"},
+            outprop=True,
+            combining_method="sum",
+            avg_within_connected=True,
+        )
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 2.0)
+        self.assertAlmostEqual(self.weight_of(out, "a2", "B"), 4.0)
+
+    def test_missing_intermediate_group_key(self):
+        """Intermediate nodes absent from intermediate_group fall back to their own id."""
+        df = self.mk_df(
+            [("a", "m", 1.0, 1), ("m", "n", 2.0, 2), ("n", "b", 3.0, 3)],
+            cols=["pre", "post", "weight", "layer"],
+        )
+        out = group_paths(
+            df,
+            pre_group={"a": "A"},
+            post_group={"b": "B"},
+            intermediate_group={"n": "N"},  # 'm' missing
+            combining_method="sum",
+            avg_within_connected=True,
+        )
+        self.assertEqual(self.weight_of(out, "A", "m", layer=1), 1.0)
+        self.assertEqual(self.weight_of(out, "m", "N", layer=2), 2.0)
+        self.assertEqual(self.weight_of(out, "N", "B", layer=3), 3.0)
+
+    def test_missing_key_still_zero_fills_known_group(self):
+        """A missing post key shouldn't perturb zero-filling of known groups."""
+        df = self.mk_df([("a1", "b1", 2.0), ("a2", "b1", 3.0), ("a1", "b2", 4.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A", "a2": "A"},
+            post_group={"b1": "B"},  # 'b2' missing → own group
+            combining_method="mean",
+            avg_within_connected=False,
+        )
+        # Group B only contains b1; a1+a2 sum to 5 on b1 → mean(5) = 5
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 5.0)
+        # Own-group b2 holds weight 4
+        self.assertAlmostEqual(self.weight_of(out, "A", "b2"), 4.0)
