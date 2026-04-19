@@ -10,6 +10,7 @@ from connectome_interpreter.path_finding import (
     enumerate_paths,
     find_shortest_paths,
     count_paths,
+    group_paths,
 )
 
 import numpy as np
@@ -922,3 +923,410 @@ class TestCountPaths(unittest.TestCase):
         df = self.mk_df(edges)
         with self.assertRaises(ValueError):
             count_paths(df, 1, 2, loop_mode="invalid")
+
+
+class TestGroupPaths(unittest.TestCase):
+    # ------------------------------------------------------------------ helpers
+    @staticmethod
+    def mk_df(edges, cols=None):
+        """Build a paths DataFrame from a list of tuples."""
+        if cols is None:
+            cols = ["pre", "post", "weight"]
+        return pd.DataFrame(edges, columns=cols)
+
+    @staticmethod
+    def weight_of(df, pre, post, layer=None):
+        """Fetch the weight for a given (pre, post[, layer]) row, or None."""
+        mask = (df["pre"] == pre) & (df["post"] == post)
+        if layer is not None:
+            mask &= df["layer"] == layer
+        row = df[mask]
+        return None if len(row) == 0 else row["weight"].iloc[0]
+
+    # --------------------------------------------------------------- edge cases
+    def test_empty_paths_returns_unchanged(self):
+        empty = pd.DataFrame(columns=["pre", "post", "weight"])
+        out = group_paths(empty)
+        self.assertEqual(out.shape[0], 0)
+
+    def test_none_paths_returns_none(self):
+        self.assertIsNone(group_paths(None))
+
+    def test_invalid_combining_method_raises(self):
+        df = self.mk_df([("a", "b", 1.0)])
+        with self.assertRaises(AssertionError):
+            group_paths(df, combining_method="max")
+
+    def test_valid_combining_methods_accepted(self):
+        df = self.mk_df([("a", "b", 1.0)])
+        for method in ("sum", "mean", "median"):
+            group_paths(df, combining_method=method)  # should not raise
+
+    def test_none_groups_default_to_identity(self):
+        """With pre_group=post_group=None, nodes map to themselves."""
+        df = self.mk_df([("a", "b", 1.0), ("c", "d", 2.0)])
+        out = group_paths(df)
+        self.assertAlmostEqual(self.weight_of(out, "a", "b"), 1.0)
+        self.assertAlmostEqual(self.weight_of(out, "c", "d"), 2.0)
+
+    # -------------------------------------------- basic grouping (outprop=False)
+    def test_outprop_false_sums_within_pre_type(self):
+        """Weights from different pre of same type → same post are summed first."""
+        df = self.mk_df([("a1", "b1", 1.0), ("a2", "b1", 2.0), ("a1", "b2", 3.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A", "a2": "A"},
+            post_group={"b1": "B", "b2": "B"},
+            combining_method="sum",
+            avg_within_connected=True,
+        )
+        # step 1 (sum within pre_type per post): b1=3, b2=3
+        # step 2 (sum across posts of same type): 3+3 = 6
+        self.assertEqual(len(out), 1)
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 6.0)
+
+    def test_outprop_false_mean_across_post_type(self):
+        df = self.mk_df([("a1", "b1", 2.0), ("a1", "b2", 4.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A"},
+            post_group={"b1": "B", "b2": "B"},
+            combining_method="mean",
+            avg_within_connected=True,
+        )
+        # mean(2, 4) = 3
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 3.0)
+
+    def test_outprop_false_median_across_post_type(self):
+        df = self.mk_df([("a1", "b1", 1.0), ("a1", "b2", 3.0), ("a1", "b3", 100.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A"},
+            post_group={"b1": "B", "b2": "B", "b3": "B"},
+            combining_method="median",
+            avg_within_connected=True,
+        )
+        # median(1, 3, 100) = 3
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 3.0)
+
+    # --------------------------------------------- basic grouping (outprop=True)
+    def test_outprop_true_sum(self):
+        """outprop=True: sum over posts of same type per pre, then sum across pre."""
+        df = self.mk_df([("a1", "b1", 1.0), ("a1", "b2", 3.0), ("a2", "b1", 2.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A", "a2": "A"},
+            post_group={"b1": "B", "b2": "B"},
+            outprop=True,
+            combining_method="sum",
+            avg_within_connected=True,
+        )
+        # per pre summed over posts of type B: a1=4, a2=2; total sum = 6
+        self.assertEqual(len(out), 1)
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 6.0)
+
+    def test_outprop_true_mean(self):
+        df = self.mk_df([("a1", "b1", 1.0), ("a1", "b2", 3.0), ("a2", "b1", 2.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A", "a2": "A"},
+            post_group={"b1": "B", "b2": "B"},
+            outprop=True,
+            combining_method="mean",
+            avg_within_connected=True,
+        )
+        # per pre: a1=4, a2=2; mean across pre = 3
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 3.0)
+
+    def test_outprop_true_median(self):
+        df = self.mk_df([("a1", "b1", 1.0), ("a2", "b1", 3.0), ("a3", "b1", 100.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A", "a2": "A", "a3": "A"},
+            post_group={"b1": "B"},
+            outprop=True,
+            combining_method="median",
+            avg_within_connected=True,
+        )
+        # median(1, 3, 100) = 3
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 3.0)
+
+    # ------------------------------------------- avg_within_connected distinction
+    def test_avg_within_connected_true_ignores_disconnected(self):
+        """avg_within_connected=True averages only over actually-connected neurons."""
+        # b1 connected to A; b2 connected only to C (different pre_type)
+        df = self.mk_df([("a1", "b1", 2.0), ("c1", "b2", 4.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A", "c1": "C"},
+            post_group={"b1": "B", "b2": "B"},
+            combining_method="mean",
+            avg_within_connected=True,
+        )
+        # (A, B): only b1 connected to any A neuron → mean = 2
+        # (C, B): only b2 connected to any C neuron → mean = 4
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 2.0)
+        self.assertAlmostEqual(self.weight_of(out, "C", "B"), 4.0)
+
+    def test_avg_within_connected_false_fills_zero_for_disconnected(self):
+        """avg_within_connected=False: every post of the type counts, missing=0.
+
+        Per docstring: 'combined across all postsynaptic neurons of the same group
+        (even if some postsynaptic neurons are not in paths)'.
+        """
+        df = self.mk_df([("a1", "b1", 2.0), ("c1", "b2", 4.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A", "c1": "C"},
+            post_group={"b1": "B", "b2": "B"},
+            combining_method="mean",
+            avg_within_connected=False,
+        )
+        # (A, B): b1 contributes 2, b2 contributes 0 → (2+0)/2 = 1
+        # (C, B): b1 contributes 0, b2 contributes 4 → (0+4)/2 = 2
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 1.0)
+        self.assertAlmostEqual(self.weight_of(out, "C", "B"), 2.0)
+
+    def test_avg_within_connected_false_outprop_true(self):
+        """Mirror of above for outprop=True (average across all pre of type)."""
+        df = self.mk_df([("a1", "b1", 2.0), ("a2", "c1", 4.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A", "a2": "A"},
+            post_group={"b1": "B", "c1": "C"},
+            outprop=True,
+            combining_method="mean",
+            avg_within_connected=False,
+        )
+        # (A, B): a1→b1=2, a2→(B)=0 → mean = 1
+        # (A, C): a1→(C)=0, a2→c1=4 → mean = 2
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 1.0)
+        self.assertAlmostEqual(self.weight_of(out, "A", "C"), 2.0)
+
+    def test_avg_within_connected_false_includes_group_member_absent_from_paths(self):
+        """A neuron in the group but never appearing in paths must still be counted."""
+        # b2 is in post_group B but has no edges at all
+        df = self.mk_df([("a1", "b1", 4.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A"},
+            post_group={"b1": "B", "b2": "B"},
+            combining_method="mean",
+            avg_within_connected=False,
+        )
+        # Per docstring: average over b1 and b2 even though b2 absent → (4+0)/2 = 2
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 2.0)
+
+    # ------------------------------------------------------------ layer handling
+    def test_layer_first_layer_uses_pre_group(self):
+        """At the minimum layer, pre is grouped by pre_group (not intermediate)."""
+        df = self.mk_df(
+            [("a1", "m", 1.0, 1), ("a2", "m", 2.0, 1), ("m", "b", 3.0, 2)],
+            cols=["pre", "post", "weight", "layer"],
+        )
+        out = group_paths(
+            df,
+            pre_group={"a1": "A", "a2": "A"},
+            post_group={"b": "B"},
+            intermediate_group={"a1": "X", "a2": "X", "m": "M", "b": "Y"},
+            combining_method="sum",
+            avg_within_connected=True,
+        )
+        layer1 = out[out["layer"] == 1]
+        self.assertTrue((layer1["pre"] == "A").all())  # pre_group, not "X"
+        self.assertTrue((layer1["post"] == "M").all())  # intermediate_group
+
+    def test_layer_last_layer_uses_post_group(self):
+        """At the maximum layer, post is grouped by post_group (not intermediate)."""
+        df = self.mk_df(
+            [("a", "m", 1.0, 1), ("m", "b1", 2.0, 2), ("m", "b2", 3.0, 2)],
+            cols=["pre", "post", "weight", "layer"],
+        )
+        out = group_paths(
+            df,
+            pre_group={"a": "A"},
+            post_group={"b1": "B", "b2": "B"},
+            intermediate_group={"a": "X", "m": "M", "b1": "Y", "b2": "Y"},
+            combining_method="sum",
+            avg_within_connected=True,
+        )
+        layer2 = out[out["layer"] == 2]
+        self.assertTrue((layer2["post"] == "B").all())  # post_group, not "Y"
+        self.assertTrue((layer2["pre"] == "M").all())  # intermediate_group
+
+    def test_layer_middle_uses_intermediate_group(self):
+        """Non-first, non-last layer nodes are grouped by intermediate_group."""
+        df = self.mk_df(
+            [
+                ("a", "m1", 1.0, 1),
+                ("m1", "m2", 1.0, 2),  # middle layer
+                ("m2", "b", 1.0, 3),
+            ],
+            cols=["pre", "post", "weight", "layer"],
+        )
+        out = group_paths(
+            df,
+            pre_group={"a": "A"},
+            post_group={"b": "B"},
+            intermediate_group={"m1": "M", "m2": "M", "a": "A", "b": "B"},
+            combining_method="sum",
+            avg_within_connected=True,
+        )
+        middle = out[out["layer"] == 2]
+        self.assertTrue((middle["pre"] == "M").all())
+        self.assertTrue((middle["post"] == "M").all())
+
+    def test_intermediate_group_defaults_to_pre_group(self):
+        """If intermediate_group is None, it should fall back to pre_group."""
+        df = self.mk_df(
+            [("a", "m", 1.0, 1), ("m", "b", 2.0, 2)],
+            cols=["pre", "post", "weight", "layer"],
+        )
+        out = group_paths(
+            df,
+            pre_group={"a": "A", "m": "M"},
+            post_group={"b": "B"},
+            combining_method="sum",
+            avg_within_connected=True,
+        )
+        # 'm' at layer-1-post is intermediate → mapped via pre_group → "M"
+        self.assertEqual(self.weight_of(out, "A", "M", layer=1), 1.0)
+        # 'm' at layer-2-pre is intermediate → mapped via pre_group → "M"
+        self.assertEqual(self.weight_of(out, "M", "B", layer=2), 2.0)
+
+    # ----------------------------------------------- activation column handling
+    def test_activation_columns_averaged_within_groups(self):
+        """pre_activation / post_activation should be mean-aggregated per group."""
+        df = self.mk_df(
+            [
+                ("a1", "b1", 1.0, 0.2, 0.8),
+                ("a2", "b1", 2.0, 0.4, 0.8),
+            ],
+            cols=["pre", "post", "weight", "pre_activation", "post_activation"],
+        )
+        out = group_paths(
+            df,
+            pre_group={"a1": "A", "a2": "A"},
+            post_group={"b1": "B"},
+            combining_method="sum",
+            avg_within_connected=True,
+        )
+        row = out[(out["pre"] == "A") & (out["post"] == "B")]
+        self.assertEqual(len(row), 1)
+        self.assertAlmostEqual(row["pre_activation"].iloc[0], 0.3)  # mean(0.2, 0.4)
+        self.assertAlmostEqual(row["post_activation"].iloc[0], 0.8)
+
+    # -------------------------------------------------------------- output shape
+    def test_output_columns_renamed(self):
+        """Final output uses 'pre'/'post', not 'pre_type'/'post_type'."""
+        df = self.mk_df([("a", "b", 1.0)])
+        out = group_paths(df, pre_group={"a": "A"}, post_group={"b": "B"})
+        self.assertIn("pre", out.columns)
+        self.assertIn("post", out.columns)
+        self.assertNotIn("pre_type", out.columns)
+        self.assertNotIn("post_type", out.columns)
+
+    def test_output_has_no_duplicate_columns(self):
+        """Grouped output should have a single 'post' column, not a leftover one."""
+        df = self.mk_df([("a1", "b1", 1.0), ("a1", "b2", 3.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A"},
+            post_group={"b1": "B", "b2": "B"},
+            combining_method="mean",
+        )
+        self.assertEqual(list(out.columns).count("pre"), 1)
+        self.assertEqual(list(out.columns).count("post"), 1)
+
+    def test_output_one_row_per_group_pair(self):
+        """After grouping, each (pre_type, post_type) combo appears exactly once."""
+        df = self.mk_df([("a1", "b1", 1.0), ("a1", "b2", 2.0), ("a2", "b1", 3.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A", "a2": "A"},
+            post_group={"b1": "B", "b2": "B"},
+            combining_method="sum",
+        )
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out.iloc[0]["pre"], "A")
+        self.assertEqual(out.iloc[0]["post"], "B")
+
+    def test_avg_within_connected_false_zero_fills_per_layer(self):
+        """With a layer column, zero-filling must happen per (layer, types) group."""
+        # 'a' connects to b1 at layer 1 and to b2 at layer 2 only.
+        df = self.mk_df(
+            [("a", "b1", 2.0, 1), ("a", "b2", 3.0, 2)],
+            cols=["pre", "post", "weight", "layer"],
+        )
+        out = group_paths(
+            df,
+            pre_group={"a": "A"},
+            post_group={"b1": "B", "b2": "B"},
+            intermediate_group={"a": "A", "b1": "B", "b2": "B"},  # <-- added
+            combining_method="mean",
+            avg_within_connected=False,
+        )
+        # layer 1: b1 contributes 2, b2 absent → 0; mean = 1.0
+        # layer 2: b1 absent → 0, b2 contributes 3; mean = 1.5
+        self.assertAlmostEqual(self.weight_of(out, "A", "B", layer=1), 1.0)
+        self.assertAlmostEqual(self.weight_of(out, "A", "B", layer=2), 1.5)
+
+    def test_missing_post_group_key_becomes_own_group(self):
+        """Post neurons absent from post_group fall back to their own id as group."""
+        df = self.mk_df([("a1", "b1", 2.0), ("a1", "b2", 4.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A"},
+            post_group={"b1": "B"},  # 'b2' missing
+            combining_method="sum",
+            avg_within_connected=True,
+        )
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 2.0)
+        self.assertAlmostEqual(self.weight_of(out, "A", "b2"), 4.0)
+
+    def test_missing_pre_group_key_outprop(self):
+        """Pre neurons absent from pre_group fall back to their own id under outprop."""
+        df = self.mk_df([("a1", "b", 2.0), ("a2", "b", 4.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A"},  # 'a2' missing
+            post_group={"b": "B"},
+            outprop=True,
+            combining_method="sum",
+            avg_within_connected=True,
+        )
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 2.0)
+        self.assertAlmostEqual(self.weight_of(out, "a2", "B"), 4.0)
+
+    def test_missing_intermediate_group_key(self):
+        """Intermediate nodes absent from intermediate_group fall back to their own id."""
+        df = self.mk_df(
+            [("a", "m", 1.0, 1), ("m", "n", 2.0, 2), ("n", "b", 3.0, 3)],
+            cols=["pre", "post", "weight", "layer"],
+        )
+        out = group_paths(
+            df,
+            pre_group={"a": "A"},
+            post_group={"b": "B"},
+            intermediate_group={"n": "N"},  # 'm' missing
+            combining_method="sum",
+            avg_within_connected=True,
+        )
+        self.assertEqual(self.weight_of(out, "A", "m", layer=1), 1.0)
+        self.assertEqual(self.weight_of(out, "m", "N", layer=2), 2.0)
+        self.assertEqual(self.weight_of(out, "N", "B", layer=3), 3.0)
+
+    def test_missing_key_still_zero_fills_known_group(self):
+        """A missing post key shouldn't perturb zero-filling of known groups."""
+        df = self.mk_df([("a1", "b1", 2.0), ("a2", "b1", 3.0), ("a1", "b2", 4.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A", "a2": "A"},
+            post_group={"b1": "B"},  # 'b2' missing → own group
+            combining_method="mean",
+            avg_within_connected=False,
+        )
+        # Group B only contains b1; a1+a2 sum to 5 on b1 → mean(5) = 5
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 5.0)
+        # Own-group b2 holds weight 4
+        self.assertAlmostEqual(self.weight_of(out, "A", "b2"), 4.0)

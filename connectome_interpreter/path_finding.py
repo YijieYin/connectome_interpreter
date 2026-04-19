@@ -909,7 +909,7 @@ def group_paths(
     paths: pd.DataFrame,
     pre_group: Optional[dict] = None,
     post_group: Optional[dict] = None,
-    intermediate_group: dict | None = None,
+    intermediate_group: Optional[dict] = None,
     avg_within_connected: bool = False,
     outprop: bool = False,
     combining_method: str = "mean",
@@ -958,14 +958,20 @@ def group_paths(
         f"Currently it is {combining_method}."
     )
 
+    # (new) auto-fill missing keys so every node has a group
     all_nodes = set(paths["pre"]).union(set(paths["post"]))
     if pre_group is None:
-        pre_group = {node: node for node in all_nodes}
+        pre_group = {n: n for n in all_nodes}
+    else:
+        pre_group = {**{n: n for n in all_nodes}, **pre_group}  # user's values win
     if post_group is None:
-        post_group = {node: node for node in all_nodes}
-
+        post_group = {n: n for n in all_nodes}
+    else:
+        post_group = {**{n: n for n in all_nodes}, **post_group}
     if intermediate_group is None:
-        intermediate_group = pre_group
+        intermediate_group = dict(pre_group)
+    else:
+        intermediate_group = {**{n: n for n in all_nodes}, **intermediate_group}
 
     # make values in pre_group, post_group, and intermediate_group strings
     pre_group = {k: str(v) for k, v in pre_group.items()}
@@ -979,11 +985,13 @@ def group_paths(
         paths["pre_type"] = paths["pre"].map(intermediate_group).astype(str)
         paths["post_type"] = paths["post"].map(intermediate_group).astype(str)
 
+        # group source by pre_group
         paths.loc[paths["layer"] == paths["layer"].min(), "pre_type"] = (
             paths.loc[paths["layer"] == paths["layer"].min(), "pre"]
             .map(pre_group)
             .astype(str)
         )
+        # group target by post_group
         paths.loc[paths["layer"] == paths["layer"].max(), "post_type"] = (
             paths.loc[paths["layer"] == paths["layer"].max(), "post"]
             .map(post_group)
@@ -995,126 +1003,130 @@ def group_paths(
         paths["post_type"] = paths["post"].map(post_group).astype(str)
         group_columns = ["pre_type", "post_type"]
 
+    has_activation = "pre_activation" in paths.columns
+    if has_activation:
+        paths_act = paths.copy()
+
     if not outprop:
         # in this case, calculating the summed input proportion across all senders for
         # each average recipient
+        # regardless of combining method, need to sum within pre_type anyway
+        paths = paths.groupby(group_columns + ["post"])["weight"].sum().reset_index()
 
         if not avg_within_connected:
             # sometimes only one neuron in a type is connected to another type, so
             # only this connection is in paths
             # but to calculate the average weight between two types, we should
             # take into account all the neurons of the post-synaptic type
-            # so let's count the number of neurons in each post-synaptic type
-            nneuron_per_type = count_keys_per_value(intermediate_group)
-            nneuron_per_type.update(count_keys_per_value(post_group))
-        else:
-            # count number of unique neurons in each type (for each layer)
-            # group by post_type, and layer if it exists
-            group_columns_sub = list(set(group_columns) - set(["pre_type"]))
-            nneuron_per_type = (
-                paths.groupby(group_columns_sub)["post"]
-                .nunique()
-                .reset_index(name="nneuron_post")
+            post_group_df = pd.DataFrame(
+                {
+                    "post": list(post_group.keys()),
+                    "post_type": list(post_group.values()),
+                }
             )
 
-        if combining_method == "median":
-            paths_weights = (
-                paths.groupby(group_columns)["weight"].median().reset_index()
-            )
-        elif combining_method == "sum":
-            # sum across presynaptic neurons of the same type
-            paths_weights = paths.groupby(group_columns).weight.sum().reset_index()
-        elif combining_method == "mean":
-            # sum across presynaptic neurons of the same type
-            paths_weights = paths.groupby(group_columns).weight.sum().reset_index()
-            # divide by number of postsynaptic neurons of the same type
-            if isinstance(nneuron_per_type, pd.DataFrame):
-                paths_weights = paths_weights.merge(
-                    nneuron_per_type, on=group_columns_sub
+            if (intermediate_group != post_group) and ("layer" in paths.columns):
+                intermediate_group_df = pd.DataFrame(
+                    {
+                        "post": list(intermediate_group.keys()),
+                        "post_type": list(intermediate_group.values()),
+                    }
                 )
-            elif isinstance(nneuron_per_type, dict):
-                paths_weights["nneuron_post"] = paths_weights.post_type.map(
-                    nneuron_per_type
+                not_last = paths[paths["layer"] != paths["layer"].max()]
+                not_last_prepost = not_last[group_columns].drop_duplicates()
+                not_last_prepost = not_last_prepost.merge(
+                    intermediate_group_df, on=["post_type"], how="left"
                 )
-            paths_weights["weight"] = paths_weights.weight / paths_weights.nneuron_post
-            paths_weights.drop(columns="nneuron_post", inplace=True)
+                not_last = not_last_prepost.merge(
+                    not_last, on=group_columns + ["post"], how="left"
+                ).fillna(0)
+                last = paths[paths["layer"] == paths["layer"].max()]
+                last_prepost = last[group_columns].drop_duplicates()
+                last_prepost = last_prepost.merge(
+                    post_group_df, on=["post_type"], how="left"
+                )
+                last = last_prepost.merge(
+                    last, on=group_columns + ["post"], how="left"
+                ).fillna(0)
+                paths = pd.concat([not_last, last], ignore_index=True)
+            else:
+                prepost = paths[group_columns].drop_duplicates()
+                prepost = prepost.merge(post_group_df, on=["post_type"], how="left")
+                paths = prepost.merge(
+                    paths, on=group_columns + ["post"], how="left"
+                ).fillna(0)
 
-        if "pre_activation" in paths.columns:
-            paths = (
-                paths.groupby(group_columns)
-                .agg(
-                    pre_activation=("pre_activation", "mean"),
-                    post_activation=("post_activation", "mean"),
-                )
-                .reset_index()
-            )
-            # then merge the weights
-            paths = pd.merge(paths, paths_weights, on=group_columns)
-        else:
-            paths = paths_weights.copy()
-        paths.rename(columns={"pre_type": "pre", "post_type": "post"}, inplace=True)
-
-        return paths
+        paths = (
+            paths.groupby(group_columns)["weight"].agg(combining_method).reset_index()
+        )
 
     else:  # outprop
         # in this case, calculating the summed output proportion (across recipient
         # single cells in the same cell type) for each average sender
+        # regardless of combining method, need to sum within post_type anyway
+        paths = paths.groupby(group_columns + ["pre"])["weight"].sum().reset_index()
         if not avg_within_connected:
             # sometimes only one neuron in a type is connected to another type, so
             # only this connection is in paths
             # but to calculate the average weight between two types, we should
-            # take into account all the neurons of the post-synaptic type
-            # so let's count the number of neurons in each post-synaptic type
-            nneuron_per_type = count_keys_per_value(intermediate_group)
-            nneuron_per_type.update(count_keys_per_value(pre_group))
-        else:
-            # count number of unique neurons in each type
-            group_columns_sub = list(set(group_columns) - set(["post_type"]))
-            nneuron_per_type = (
-                paths.groupby(group_columns_sub)["pre"]
-                .nunique()
-                .reset_index(name="nneuron_pre")
+            # take into account all the neurons of the pre-synaptic type
+            pre_group_df = pd.DataFrame(
+                {
+                    "pre": list(pre_group.keys()),
+                    "pre_type": list(pre_group.values()),
+                }
             )
 
-        # weights
-        if combining_method == "median":
-            paths_weights = (
-                paths.groupby(group_columns)["weight"].median().reset_index()
-            )
-        elif combining_method == "sum":
-            # sum across presynaptic neurons of the same type
-            paths_weights = paths.groupby(group_columns).weight.sum().reset_index()
-        elif combining_method == "mean":
-            # sum across presynaptic neurons of the same type
-            paths_weights = paths.groupby(group_columns).weight.sum().reset_index()
-            # divide by number of presynaptic neurons of the same type
-            if isinstance(nneuron_per_type, pd.DataFrame):
-                paths_weights = paths_weights.merge(
-                    nneuron_per_type, on=group_columns_sub
+            if (intermediate_group != pre_group) and ("layer" in paths.columns):
+                intermediate_group_df = pd.DataFrame(
+                    {
+                        "pre": list(intermediate_group.keys()),
+                        "pre_type": list(intermediate_group.values()),
+                    }
                 )
-            elif isinstance(nneuron_per_type, dict):
-                paths_weights["nneuron_pre"] = paths_weights.pre_type.map(
-                    nneuron_per_type
+                not_first = paths[paths["layer"] != paths["layer"].min()]
+                not_first_prepost = not_first[group_columns].drop_duplicates()
+                not_first_prepost = not_first_prepost.merge(
+                    intermediate_group_df, on=["pre_type"], how="left"
                 )
-            paths_weights["weight"] = paths_weights.weight / paths_weights.nneuron_pre
-            paths_weights.drop(columns="nneuron_pre", inplace=True)
+                not_first = not_first_prepost.merge(
+                    not_first, on=group_columns + ["pre"], how="left"
+                ).fillna(0)
 
-        if "pre_activation" in paths.columns:
-            paths = (
-                paths.groupby(group_columns)
-                .agg(
-                    pre_activation=("pre_activation", "mean"),
-                    post_activation=("post_activation", "mean"),
+                first = paths[paths["layer"] == paths["layer"].min()]
+                first_prepost = first[group_columns].drop_duplicates()
+                first_prepost = first_prepost.merge(
+                    pre_group_df, on=["pre_type"], how="left"
                 )
-                .reset_index()
-            )
-            # then merge the weights
-            paths = pd.merge(paths, paths_weights, on=group_columns)
-        else:
-            paths = paths_weights.copy()
-        paths.rename(columns={"pre_type": "pre", "post_type": "post"}, inplace=True)
+                first = first_prepost.merge(
+                    first, on=group_columns + ["pre"], how="left"
+                ).fillna(0)
+                paths = pd.concat([not_first, first], ignore_index=True)
+            else:
+                prepost = paths[group_columns].drop_duplicates()
+                prepost = prepost.merge(pre_group_df, on=["pre_type"], how="left")
+                paths = prepost.merge(
+                    paths, on=group_columns + ["pre"], how="left"
+                ).fillna(0)
 
-        return paths
+        paths = (
+            paths.groupby(group_columns)["weight"].agg(combining_method).reset_index()
+        )
+    if has_activation:
+        paths_act = (
+            paths_act.groupby(group_columns)
+            .agg(
+                pre_activation=("pre_activation", "mean"),
+                post_activation=("post_activation", "mean"),
+            )
+            .reset_index()
+        )
+        # then merge the weights
+        paths = pd.merge(paths_act, paths, on=group_columns)
+
+    paths.rename(columns={"pre_type": "pre", "post_type": "post"}, inplace=True)
+
+    return paths
 
 
 def compare_layered_paths(
