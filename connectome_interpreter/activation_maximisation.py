@@ -178,7 +178,7 @@ class _NetworkBase(nn.Module):
 
             keep = np.array(keep)
             self.divnorm_indices = all_weights._indices()[:, ~keep]
-            self.divnorm_weights = all_weights._values()[~keep]
+            self.divnorm_weights = all_weights._values()[~keep].to(device)
             # sanity check: all values should be negative
             # which index of divnorm_weights is positive?
             posidx = torch.where(self.divnorm_weights > 0)[0]
@@ -272,27 +272,34 @@ class _NetworkBase(nn.Module):
             # will only be set for the pres in divisive_normalization for their connections with the post
             # So for training, these particular connections are assumed to be only divisive normalising
             # and their divisive_strength is strained.
-            divnorm_list = []
-            type2div_strength = {}
-            for pre, _ in self.divisive_normalization.items():
-                this_strength = (
-                    divisive_strength
-                    if isinstance(divisive_strength, (int, float))
-                    else divisive_strength[pre]
-                )
-                divnorm_list.extend([this_strength])
-                type2div_strength[pre] = this_strength
+            pre_groups = sorted(self.divisive_normalization.keys())
+            self.pre2dividx = {pre: i for i, pre in enumerate(pre_groups)}
 
-            divisive_init = torch.tensor(
-                divnorm_list, dtype=torch.float32, device=device
+            div_init = torch.tensor(
+                [
+                    (
+                        float(divisive_strength)
+                        if isinstance(divisive_strength, (int, float))
+                        else float(divisive_strength[pre])
+                    )
+                    for pre in pre_groups
+                ],
+                dtype=torch.float32,
             )
-            # a parameter that applies separately to each pre type in divisive_normalization, and no one else
             self.divisive_strength = nn.Parameter(
-                divisive_init.to(device), requires_grad=False
+                div_init.to(device), requires_grad=False
             )
-            self.type2div_strength = type2div_strength
+
+            # map each divnorm edge to its pre-group parameter index
+            _, pre_idxs = self.divnorm_indices
+            self.edge_pre_param_idx = torch.tensor(
+                [self.pre2dividx[idx_to_group[int(p)]] for p in pre_idxs],
+                dtype=torch.long,
+                device=device,
+            )
         else:
             self.divisive_strength = None
+            self.edge_pre_param_idx = None
 
         # Setup tau values ----
         if tau_dict is None:
@@ -366,28 +373,19 @@ class _NetworkBase(nn.Module):
         """
         if self.divisive_normalization is None:
             return slopes
-
         if isinstance(slopes, float):
-            # turn to the same shape as x
             slopes = torch.full(x_previous.shape, slopes, device=x_previous.device)
 
-        slopes = slopes.clone()  # ← clone here to break any aliasing but keep grad_fn
+        post_idxs, pre_idxs = self.divnorm_indices  # (K,), (K,)
+        strengths = self.divisive_strength[self.edge_pre_param_idx]  # (K,)
 
-        for i, (apost, apre) in enumerate(self.divnorm_indices.T):
-            new_slope = slopes[apost] * (
-                1
-                # used + because the weights are negative
-                + self.divnorm_weights[i]  # weight between pre (divisive norm) and post
-                * x_previous[apre]  # activation of pre
-                * self.type2div_strength[
-                    self.idx_to_group[int(apre.cpu().numpy())]
-                ]  # divisive strength for this pre
-            )
-            slopes[apost] = torch.max(
-                torch.tensor(0.0, device=slopes.device), new_slope
-            )
-
-        return slopes
+        per_edge = (
+            self.divnorm_weights.unsqueeze(1)  # (K, 1)
+            * x_previous[pre_idxs]  # (K, batch)
+            * strengths.unsqueeze(1)  # (K, 1)
+        )
+        per_post = torch.zeros_like(slopes).index_add_(0, post_idxs, per_edge)
+        return torch.clamp(slopes * (1 + per_post), min=0.0)
 
 
 class LinearNetwork(_NetworkBase):
@@ -970,7 +968,11 @@ class MultilayeredNetwork(_NetworkBase):
         x = slopes * x + biases
 
         # Thresholded relu
-        x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+        # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+        # this propagates NaN honesty
+        x = torch.relu(x - self.threshold) + self.threshold * (x >= self.threshold).to(
+            x.dtype
+        )
 
         # --- taus ---
         if taus_full is not None:
@@ -1013,7 +1015,11 @@ class MultilayeredNetwork(_NetworkBase):
                 x[self.sensory_indices, :] = (
                     x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
                 )
-                x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+                # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+                # this propagates NaN honesty
+                x = torch.relu(x - self.threshold) + self.threshold * (
+                    x >= self.threshold
+                ).to(x.dtype)
                 x = torch.clamp(x, max=1.0)
             chunk_acts.append(x)  # <-- no .t()
         return (x, *chunk_acts)
@@ -1125,7 +1131,11 @@ class MultilayeredNetwork(_NetworkBase):
             x[self.sensory_indices, :] = (
                 x[self.sensory_indices, :] + inputs[:, :, 1].t()
             )
-            x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+            # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+            # this propagates NaN honesty
+            x = torch.relu(x - self.threshold) + self.threshold * (
+                x >= self.threshold
+            ).to(x.dtype)
             x = torch.clamp(x, max=1.0)
 
         if manipulate is not None:
@@ -1171,7 +1181,11 @@ class MultilayeredNetwork(_NetworkBase):
                         x[self.sensory_indices, :] = (
                             x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
                         )
-                        x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+                        # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+                        # this propagates NaN honesty
+                        x = torch.relu(x - self.threshold) + self.threshold * (
+                            x >= self.threshold
+                        ).to(x.dtype)
                         x = torch.clamp(x, max=1.0)
                     if manipulate is not None:
                         x = x.clone()
@@ -1224,7 +1238,11 @@ class MultilayeredNetwork(_NetworkBase):
                     x[self.sensory_indices, :] = (
                         x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
                     )
-                    x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+                    # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+                    # this propagates NaN honesty
+                    x = torch.relu(x - self.threshold) + self.threshold * (
+                        x >= self.threshold
+                    ).to(x.dtype)
                     x = torch.clamp(x, max=1.0)
                 if manipulate is not None:
                     x = x.clone()
@@ -1435,12 +1453,19 @@ def train_model(
             # regularization loss
             param_reg_loss = 0
             for param, param0 in zip(model.parameters(), initial_params):
-                param_reg_loss += torch.norm(param - param0, p=1)
+                param_reg_loss += (param - param0).abs().mean()
 
             param_reg_loss = param_reg_lambda * param_reg_loss
 
             loss = activation_loss + param_reg_loss
             loss.backward()
+            if not torch.isfinite(loss):
+                print(f"[epoch {epoch}] non-finite loss, skipping step")
+                optimizer.zero_grad()
+                continue
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in model.parameters() if p.requires_grad], max_norm=1.0
+            )
             optimizer.step()
 
             # validation loss
@@ -3363,7 +3388,11 @@ def legacy_activation_function(
     # x = slopes * x + biases
 
     # Thresholded relu
-    x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+    # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+    # this propagates NaN honesty
+    x = torch.relu(x - self.threshold) + self.threshold * (x >= self.threshold).to(
+        x.dtype
+    )
 
     # Tanh activation
     x = torch.tanh(x)

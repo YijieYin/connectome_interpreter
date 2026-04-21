@@ -2836,5 +2836,165 @@ class TestCheckpointing(unittest.TestCase):
         self.assertTrue(torch.allclose(out_no_ckpt, out_ckpt, atol=1e-5))
 
 
+class TestNaNPropagation(unittest.TestCase):
+    """The thresholded activation used to silently zero NaN, hiding parameter
+    corruption for thousands of steps. New formulation must propagate NaN."""
+
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        dense = np.random.rand(6, 6) * 0.1
+        self.weights = csr_matrix(dense)
+        self.sensory_indices = [0, 1]
+        self.idx_to_group = {i: f"type_{i//2}" for i in range(6)}
+
+    def _model(self, cls):
+        return cls(
+            self.weights,
+            self.sensory_indices,
+            num_layers=3,
+            idx_to_group=self.idx_to_group,
+        ).to(self.device)
+
+    def test_nan_in_slope_reaches_output(self):
+        for cls in [MultilayeredNetwork, LinearNetwork]:
+            model = self._model(cls)
+            with torch.no_grad():
+                model.slope.data[0] = float("nan")
+            out = model(torch.rand(2, 3, device=self.device))
+            self.assertTrue(
+                torch.isnan(out).any(),
+                f"{cls.__name__}: NaN in slope must propagate, not be silenced",
+            )
+
+    def test_nan_in_input_reaches_output(self):
+        model = self._model(MultilayeredNetwork)
+        inp = torch.rand(2, 3, device=self.device)
+        inp[0, 0] = float("nan")
+        out = model(inp)
+        self.assertTrue(torch.isnan(out).any())
+
+
+class TestDivisiveStrengthTraining(unittest.TestCase):
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # C receives +0.5 from A (drive) and -0.8 from B (divnorm).
+        dense = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.5, -0.8, 0.0],
+            ],
+            dtype=float,
+        )
+        self.weights = csr_matrix(dense)
+        self.idx_to_group = {0: "A", 1: "B", 2: "C"}
+        self.divnorm = {"B": ["C"]}
+
+    def _model(self):
+        return MultilayeredNetwork(
+            self.weights,
+            sensory_indices=[0, 1],
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+            divisive_normalization=self.divnorm,
+            divisive_strength={"B": 1.0},
+            threshold=0.0,
+        ).to(self.device)
+
+    def test_gradient_reaches_divisive_strength(self):
+        model = self._model()
+        model.set_param_grads(divisive_strength=True)
+        out = model(torch.ones(1, 2, 2, device=self.device))
+        out.sum().backward()
+        self.assertIsNotNone(model.divisive_strength.grad)
+        self.assertFalse(
+            torch.all(model.divisive_strength.grad == 0),
+            "divisive_strength.grad should be nonzero under active divnorm",
+        )
+
+    def test_train_model_updates_divisive_strength(self):
+        model = self._model()
+        ds_before = model.divisive_strength.detach().clone()
+        inp = torch.rand(4, 2, 2, device=self.device)
+        targets = pd.DataFrame(
+            [{"batch": i, "neuron_idx": 2, "layer": 1, "value": 0.1} for i in range(4)]
+        )
+        train_model(
+            model,
+            inp,
+            targets,
+            num_epochs=5,
+            wandb=False,
+            train_slopes=False,
+            train_biases=False,
+            train_divisive_strength=True,
+            train_tau=False,
+        )
+        self.assertFalse(
+            torch.allclose(model.divisive_strength.detach(), ds_before),
+            "train_divisive_strength=True should actually move the parameter",
+        )
+
+
+class TestMultiGroupDivnorm(unittest.TestCase):
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # A inhibits C; B inhibits C and D. 3 edges, 2 pre groups.
+        dense = np.array(
+            [
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [-0.3, -0.5, 0.0, 0.0],
+                [0.0, -0.4, 0.0, 0.0],
+            ],
+            dtype=float,
+        )
+        self.weights = csr_matrix(dense)
+        self.idx_to_group = {0: "A", 1: "B", 2: "C", 3: "D"}
+
+    def test_strength_shape_and_edge_mapping(self):
+        dn = {"A": ["C"], "B": ["C", "D"]}
+        model = MultilayeredNetwork(
+            self.weights,
+            sensory_indices=[0, 1],
+            idx_to_group=self.idx_to_group,
+            divisive_normalization=dn,
+            divisive_strength={"A": 0.7, "B": 1.3},
+        ).to(self.device)
+
+        # one parameter per pre group
+        self.assertEqual(model.divisive_strength.numel(), 2)
+        self.assertAlmostEqual(
+            model.divisive_strength[model.pre2dividx["A"]].item(), 0.7, places=6
+        )
+        self.assertAlmostEqual(
+            model.divisive_strength[model.pre2dividx["B"]].item(), 1.3, places=6
+        )
+
+        # Every edge must reference the slot matching its pre's group
+        _, pre_idxs = model.divnorm_indices
+        for k, pre_neuron in enumerate(pre_idxs.tolist()):
+            expected = model.pre2dividx[self.idx_to_group[pre_neuron]]
+            self.assertEqual(
+                model.edge_pre_param_idx[k].item(),
+                expected,
+                f"edge {k}: pre-neuron {pre_neuron} maps to wrong strength slot",
+            )
+
+    def test_parameter_sharing_within_pre_group(self):
+        """B's single strength should govern both B->C and B->D edges."""
+        dn = {"B": ["C", "D"]}
+        model = MultilayeredNetwork(
+            self.weights,
+            sensory_indices=[0, 1],
+            idx_to_group=self.idx_to_group,
+            divisive_normalization=dn,
+            divisive_strength={"B": 1.0},
+        ).to(self.device)
+        self.assertEqual(model.divisive_strength.numel(), 1)
+        # all divnorm edges point at the single strength parameter
+        self.assertTrue(torch.all(model.edge_pre_param_idx == 0))
+
+
 if __name__ == "__main__":
     unittest.main()
