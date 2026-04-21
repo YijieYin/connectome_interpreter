@@ -207,7 +207,6 @@ class _NetworkBase(nn.Module):
         self.divisive_normalization = divisive_normalization
         self.tau = tau
         self.tau_dict = tau_dict
-        self.noted_grads: Dict[int, torch.Tensor] = {}
 
         # Setup trainable parameters if idx_to_group is provided
         if idx_to_group is not None:
@@ -570,7 +569,11 @@ class LinearNetwork(_NetworkBase):
         """Run a chunk of timesteps. For use with gradient checkpointing.
 
         Returns:
-            Tuple of (x_final, stacked_chunk_activations).
+            Flat tuple (x_final, *per_layer_xs). Each per_layer_x is the raw
+            timestep activation with shape (neurons, batch) — NOT transposed.
+            Transposing (or stacking) here would make the per-layer tensors
+            siblings of a shared parent, breaking the parent→child edge that
+            autograd.grad needs to walk layer-wise.
         """
         chunk_acts = []
         for alayer in range(start_layer, end_layer):
@@ -588,8 +591,8 @@ class LinearNetwork(_NetworkBase):
                 x[self.sensory_indices, :] = (
                     x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
                 )
-            chunk_acts.append(x.t())
-        return x, torch.stack(chunk_acts, dim=-1)
+            chunk_acts.append(x)  # <-- no .t()
+        return (x, *chunk_acts)
 
     def forward(
         self,
@@ -600,33 +603,19 @@ class LinearNetwork(_NetworkBase):
                 Dict[int, Dict[int, Dict[Union[int, str], float]]],
             ]
         ] = None,
-        monitor_neurons: Optional[
-            Union[List[Union[int, str]], np.ndarray, torch.Tensor]
-        ] = None,
-        monitor_layers: Optional[List[int]] = None,
         checkpoint_steps: int = 0,
+        return_layer_list: bool = False,
     ):
         """
-        Process inputs through the network. Use matrix-matrix multiplication for batched
-        processing.
-
         Args:
-            inputs (torch.Tensor): Either a 2D tensor (num_input, time_steps) or a 3D
-                tensor (batch_size, num_input, time_steps)
-            manipulate (Dict[int, Dict[int, float]], optional): A dictionary specifying
-                the activity of specified neurons. To be used like
-                `{layer: {neuron_group: activity}}` or `{batch: {layer: {neuron_group: activity}}}`
-                in conjunction with `idx_to_group`, e.g. {0: {'DA1_lPN': 1.0}} for "at
-                layer/timepoint 0, make DA1_lPN's activity 1". If `idx_to_group` is not
-                provided, `neuron_group` is assumed to be neuron indices. Defaults to None.
-            checkpoint_steps (int, optional): If > 0, use gradient checkpointing every
-                this many timesteps. Defaults to 0 (disabled).
-
-        Returns:
-            torch.Tensor: The activations of all neurons across time steps (in batches).
+            return_layer_list (bool): If True, return List[Tensor] of length
+                num_layers, each shape (neurons, batch), on GPU with grad_fn
+                preserved. Required for layer-wise gradient attribution via
+                torch.autograd.grad — stacking/transposing makes per-layer
+                tensors siblings of a shared parent, which breaks the graph
+                path autograd.grad needs. When True, self.activations is not
+                populated.
         """
-
-        # if inputs is numpy, convert to tensor
         if isinstance(inputs, np.ndarray):
             inputs = torch.tensor(inputs, device=self.all_weights.device)
         elif isinstance(inputs, torch.Tensor):
@@ -651,49 +640,25 @@ class LinearNetwork(_NetworkBase):
                 manipulate = dict.fromkeys(range(inputs.shape[0]), batch_manipulate)
 
             if self.idx_to_group is None:
+                manipulate_idx = {
+                    b: {
+                        layer: {int(c): a for c, a in act_dict.items()}
+                        for layer, act_dict in this_batch.items()
+                    }
+                    for b, this_batch in manipulate.items()
+                }
+            else:
+                # convert group names to indices
                 manipulate_idx = {}
                 for b, this_batch in manipulate.items():
                     manipulate_idx[b] = {}
                     for layer, act_dict in this_batch.items():
                         manipulate_idx[b][layer] = {
-                            int(cell): activity for cell, activity in act_dict.items()
+                            idx: act_dict[grp]
+                            for idx, grp in self.idx_to_group.items()
+                            if grp in act_dict
                         }
-            else:
-                # convert group names to indices
-                manipulate_idx = {}
-                for b, this_batch in manipulate.items():
-                    manipulate_idx[b] = {}
-                    for layer, act_dict in this_batch.items():
-                        manipulate_idx[b][layer] = {}
-                        for idx, grp in self.idx_to_group.items():
-                            if grp in act_dict:
-                                manipulate_idx[b][layer][idx] = act_dict[grp]
 
-        if monitor_neurons is not None:
-            if self.idx_to_group is None:
-                # assume monitor_neurons are indices
-                monitor_indices = torch.tensor(
-                    monitor_neurons, dtype=torch.long, device=self.all_weights.device
-                )
-            else:
-                # convert group names to indices
-                monitor_indices_list = []
-                for idx, grp in self.idx_to_group.items():
-                    if grp in monitor_neurons:
-                        monitor_indices_list.append(idx)
-                monitor_indices = torch.tensor(
-                    monitor_indices_list,
-                    dtype=torch.long,
-                    device=self.all_weights.device,
-                )
-
-        if monitor_layers is not None:
-            monitor_layers = set(
-                int(i)
-                for i in torch.as_tensor(monitor_layers, dtype=torch.long).tolist()
-            )
-
-        # ---- Hoist parameter gathers ONCE before the timestep loop ----
         if self.slope is not None:
             slopes_full = self.slope[self.indices].view(-1, 1)
             biases_full = self.biases[self.indices].view(-1, 1)
@@ -706,20 +671,13 @@ class LinearNetwork(_NetworkBase):
         else:
             taus_full = None
 
-        # inputs = torch.clamp(inputs, -1.0, 1.0)
         req_grad = inputs.requires_grad
         _needs_grad = req_grad or any(
             p.requires_grad for p in self.parameters() if p is not None
         )
 
-        use_ckpt = (
-            checkpoint_steps > 0
-            and _needs_grad
-            and manipulate is None
-            and monitor_neurons is None
-        )
+        use_ckpt = checkpoint_steps > 0 and _needs_grad and manipulate is None
 
-        # shape: (all_neurons, batch_size)
         full_input = torch.zeros(
             self.all_weights.size(1),
             inputs.size(0),
@@ -752,32 +710,67 @@ class LinearNetwork(_NetworkBase):
 
         if manipulate is not None:
             x = x.clone()
-            for b, this_batch in manipulate.items():
+            for b, _ in manipulate.items():
                 if 0 in manipulate_idx[b]:
                     for neuron_idx, target_act in manipulate_idx[b][0].items():
                         x[neuron_idx, b] = target_act
 
-        if monitor_neurons is not None:
-            if monitor_layers is None:
-                print("monitor_layers not provided. Assuming all layers are monitored.")
-                monitor_layers = set(range(self.num_layers))
-            elif 0 in monitor_layers:
-
-                def _tap0(grad):
-                    self.noted_grads[0] = (
-                        grad.index_select(0, monitor_indices).detach().cpu()
-                    )
-
-                x.register_hook(_tap0)
-
         # ---- Remaining layers ----
-        if use_ckpt:
-            # ---- CHECKPOINTED PATH ----
-            act_chunks = [x.t().unsqueeze(-1)]
+        if return_layer_list:
+            per_layer_acts = [x]  # <-- no .t()
 
+            if use_ckpt:
+                for chunk_start in range(1, self.num_layers, checkpoint_steps):
+                    chunk_end = min(chunk_start + checkpoint_steps, self.num_layers)
+                    result = torch_checkpoint(
+                        self._forward_chunk,
+                        x,
+                        chunk_start,
+                        chunk_end,
+                        inputs,
+                        slopes_full,
+                        biases_full,
+                        taus_full,
+                        use_reentrant=False,
+                    )
+                    x = result[0]
+                    per_layer_acts.extend(result[1:])
+            else:
+                for alayer in range(1, self.num_layers):
+                    x_previous = x.clone()
+                    x = torch.sparse.mm(self.all_weights, x)
+                    x = self.activation_function(
+                        x,
+                        x_previous=x_previous,
+                        slopes_full=slopes_full,
+                        biases_full=biases_full,
+                        taus_full=taus_full,
+                    )
+                    if alayer != self.num_layers - 1:
+                        x = x.clone()
+                        x[self.sensory_indices, :] = (
+                            x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
+                        )
+                    if manipulate is not None:
+                        x = x.clone()
+                        for b, _ in manipulate.items():
+                            if alayer in manipulate_idx[b]:
+                                for neuron_idx, target_act in manipulate_idx[b][
+                                    alayer
+                                ].items():
+                                    x[neuron_idx, b] = target_act
+                    per_layer_acts.append(x)  # <-- no .t()
+
+            del inputs, x
+            torch.cuda.empty_cache()
+            return per_layer_acts
+
+        # ---- default (stacked) path ----
+        if use_ckpt:
+            act_chunks = [x.t().unsqueeze(-1)]
             for chunk_start in range(1, self.num_layers, checkpoint_steps):
                 chunk_end = min(chunk_start + checkpoint_steps, self.num_layers)
-                x, chunk_acts = torch_checkpoint(
+                result = torch_checkpoint(
                     self._forward_chunk,
                     x,
                     chunk_start,
@@ -788,14 +781,12 @@ class LinearNetwork(_NetworkBase):
                     taus_full,
                     use_reentrant=False,
                 )
-                act_chunks.append(chunk_acts)
-
+                x = result[0]
+                # result[1:] are (neurons, batch) — transpose each and stack along time
+                act_chunks.append(torch.stack([cx.t() for cx in result[1:]], dim=-1))
             self.activations = torch.cat(act_chunks, dim=-1).cpu()
-
         else:
-            # ---- ORIGINAL (NON-CHECKPOINTED) PATH ----
             acts = [x.t().cpu()]
-
             for alayer in range(1, self.num_layers):
                 x_previous = x.clone()
                 x = torch.sparse.mm(self.all_weights, x)
@@ -806,38 +797,23 @@ class LinearNetwork(_NetworkBase):
                     biases_full=biases_full,
                     taus_full=taus_full,
                 )
-
                 if alayer != self.num_layers - 1:
                     x = x.clone()
                     x[self.sensory_indices, :] = (
                         x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
                     )
-
                 if manipulate is not None:
                     x = x.clone()
-                    for b, this_batch in manipulate.items():
+                    for b, _ in manipulate.items():
                         if alayer in manipulate_idx[b]:
                             for neuron_idx, target_act in manipulate_idx[b][
                                 alayer
                             ].items():
                                 x[neuron_idx, b] = target_act
-
-                if monitor_neurons is not None and alayer in monitor_layers:
-
-                    def _tapL(grad, L=alayer):
-                        self.noted_grads[L] = (
-                            grad.index_select(0, monitor_indices).detach().cpu()
-                        )
-
-                    x.register_hook(_tapL)
-
                 acts.append(x.t().cpu())
-
             self.activations = torch.stack(acts, dim=-1)
 
-        # free up memory
-        del inputs
-        del x
+        del inputs, x
         torch.cuda.empty_cache()
 
         if single_input:
@@ -1020,11 +996,7 @@ class MultilayeredNetwork(_NetworkBase):
     def _forward_chunk(
         self, x, start_layer, end_layer, inputs, slopes_full, biases_full, taus_full
     ):
-        """Run a chunk of timesteps. For use with gradient checkpointing.
-
-        Returns:
-            Tuple of (x_final, stacked_chunk_activations).
-        """
+        """Returns flat tuple (x_final, *per_layer_xs), each (neurons, batch)."""
         chunk_acts = []
         for alayer in range(start_layer, end_layer):
             x_previous = x
@@ -1043,9 +1015,8 @@ class MultilayeredNetwork(_NetworkBase):
                 )
                 x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
                 x = torch.clamp(x, max=1.0)
-            chunk_acts.append(x.t())
-        # stack along last dim → (batch, neurons, chunk_len)
-        return x, torch.stack(chunk_acts, dim=-1)
+            chunk_acts.append(x)  # <-- no .t()
+        return (x, *chunk_acts)
 
     def forward(
         self,
@@ -1056,104 +1027,58 @@ class MultilayeredNetwork(_NetworkBase):
                 Dict[int, Dict[int, Dict[Union[int, str], float]]],
             ]
         ] = None,
-        monitor_neurons: Optional[
-            Union[List[Union[int, str]], np.ndarray, torch.Tensor]
-        ] = None,
-        monitor_layers: Optional[List[int]] = None,
         checkpoint_steps: int = 0,
+        return_layer_list: bool = False,
     ):
         """
-        Process inputs through the network. Use matrix-matrix multiplication for batched
-        processing.
-
         Args:
-            inputs (torch.Tensor): Either a 2D tensor (num_input, time_steps) or a 3D
-                tensor (batch_size, num_input, time_steps)
-            manipulate (Dict[int, Dict[int, float]], optional): A dictionary specifying
-                the activity of specified neurons. To be used like
-                `{layer: {neuron_group: activity}}` or `{batch: {layer: {neuron_group: activity}}}`
-                in conjunction with `idx_to_group`, e.g. {0: {'DA1_lPN': 1.0}} for "at
-                layer/timepoint 0, make DA1_lPN's activity 1". If `idx_to_group` is not
-                provided, `neuron_group` is assumed to be neuron indices. Defaults to None.
-            checkpoint_steps (int, optional): If > 0, use gradient checkpointing every
-                this many timesteps. This trades ~2x backward compute for dramatically
-                lower GPU memory usage during training, by freeing intermediate tensors
-                and recomputing them during backward. Recommended value: 32-50.
-                Not compatible with manipulate or monitor_neurons; falls back to the
-                non-checkpointed path if those are used. Defaults to 0 (disabled).
-
-        Returns:
-            torch.Tensor: The activations of all neurons across time steps (in batches).
+            return_layer_list (bool): If True, return List[Tensor] of length
+                num_layers, each shape (neurons, batch), on GPU with grad_fn
+                preserved. Required for layer-wise gradient attribution via
+                torch.autograd.grad — stacking/transposing makes per-layer
+                tensors siblings of a shared parent, which breaks the graph
+                path autograd.grad needs. When True, self.activations is not
+                populated.
         """
-
-        # if inputs is numpy, convert to tensor
         if isinstance(inputs, np.ndarray):
             inputs = torch.tensor(inputs, device=self.all_weights.device)
         elif isinstance(inputs, torch.Tensor):
             inputs = inputs.to(self.all_weights.device)
 
-        # Handle 2D inputs by expanding to 3D
         if inputs.dim() == 2:
-            inputs = inputs.unsqueeze(0)  # Add batch dimension
+            inputs = inputs.unsqueeze(0)
             single_input = True
         else:
             single_input = False
 
         if manipulate is not None:
-            # check if manipulate is per-batch
             if not all(
                 isinstance(act_dict, dict)
                 for _, this_batch in manipulate.items()
                 for _, act_dict in this_batch.items()
             ):
                 batch_manipulate = manipulate.copy()
-                # add batch dimension
                 manipulate = dict.fromkeys(range(inputs.shape[0]), batch_manipulate)
 
             if self.idx_to_group is None:
+                manipulate_idx = {
+                    b: {
+                        layer: {int(c): a for c, a in act_dict.items()}
+                        for layer, act_dict in this_batch.items()
+                    }
+                    for b, this_batch in manipulate.items()
+                }
+            else:
                 manipulate_idx = {}
                 for b, this_batch in manipulate.items():
                     manipulate_idx[b] = {}
                     for layer, act_dict in this_batch.items():
                         manipulate_idx[b][layer] = {
-                            int(cell): activity for cell, activity in act_dict.items()
+                            idx: act_dict[grp]
+                            for idx, grp in self.idx_to_group.items()
+                            if grp in act_dict
                         }
-            else:
-                # convert group names to indices
-                manipulate_idx = {}
-                for b, this_batch in manipulate.items():
-                    manipulate_idx[b] = {}
-                    for layer, act_dict in this_batch.items():
-                        manipulate_idx[b][layer] = {}
-                        for idx, grp in self.idx_to_group.items():
-                            if grp in act_dict:
-                                manipulate_idx[b][layer][idx] = act_dict[grp]
 
-        if monitor_neurons is not None:
-            if self.idx_to_group is None:
-                # assume monitor_neurons are indices
-                monitor_indices = torch.tensor(
-                    monitor_neurons, dtype=torch.long, device=self.all_weights.device
-                )
-            else:
-                # convert group names to indices
-                monitor_indices_list = []
-                for idx, grp in self.idx_to_group.items():
-                    if grp in monitor_neurons:
-                        monitor_indices_list.append(idx)
-                monitor_indices = torch.tensor(
-                    monitor_indices_list,
-                    dtype=torch.long,
-                    device=self.all_weights.device,
-                )
-
-        if monitor_layers is not None:
-            monitor_layers = set(
-                int(i)
-                for i in torch.as_tensor(monitor_layers, dtype=torch.long).tolist()
-            )
-
-        # ---- Hoist parameter gathers ONCE before the timestep loop ----
         if self.slope is not None:
             slopes_full = self.slope[self.indices].view(-1, 1)
             biases_full = self.biases[self.indices].view(-1, 1)
@@ -1166,39 +1091,24 @@ class MultilayeredNetwork(_NetworkBase):
         else:
             taus_full = None
 
-        inputs = torch.clamp(inputs, -1.0, 1.0)
         req_grad = inputs.requires_grad
         _needs_grad = req_grad or any(
             p.requires_grad for p in self.parameters() if p is not None
         )
 
-        # Decide whether to use gradient checkpointing.
-        # Checkpointing is incompatible with manipulate/monitor, so fall back.
-        use_ckpt = (
-            checkpoint_steps > 0
-            and _needs_grad
-            and manipulate is None
-            and monitor_neurons is None
-        )
+        use_ckpt = checkpoint_steps > 0 and _needs_grad and manipulate is None
 
-        # shape: (all_neurons, batch_size)
         full_input = torch.zeros(
             self.all_weights.size(1),
             inputs.size(0),
             device=inputs.device,
             requires_grad=req_grad,
         )
-
-        # replace sensory neurons activations with inputs
         full_input = full_input.scatter(
             0,
             self.sensory_indices.view(-1, 1).expand(-1, inputs.size(0)),
             inputs[:, :, 0].t(),
         )
-        full_input = torch.where(
-            full_input >= self.threshold, full_input, torch.zeros_like(full_input)
-        )
-        full_input = torch.clamp(full_input, max=1.0)
 
         # ---- Layer 0 ----
         x = torch.sparse.mm(self.all_weights, full_input)
@@ -1220,34 +1130,69 @@ class MultilayeredNetwork(_NetworkBase):
 
         if manipulate is not None:
             x = x.clone()
-            for b, this_batch in manipulate.items():
+            for b, _ in manipulate.items():
                 if 0 in manipulate_idx[b]:
                     for neuron_idx, target_act in manipulate_idx[b][0].items():
                         x[neuron_idx, b] = target_act
 
-        if monitor_neurons is not None:
-            if monitor_layers is None:
-                print("monitor_layers not provided. Assuming all layers are monitored.")
-                monitor_layers = set(range(self.num_layers))
-            elif 0 in monitor_layers:
-
-                def _tap0(grad):
-                    self.noted_grads[0] = (
-                        grad.index_select(0, monitor_indices).detach().cpu()
-                    )
-
-                x.register_hook(_tap0)
-
         # ---- Remaining layers ----
-        if use_ckpt:
-            # ---- CHECKPOINTED PATH ----
-            # Activations stay on GPU (memory is manageable since intermediates
-            # are freed by checkpointing).  Moved to CPU after stacking.
-            act_chunks = [x.t().unsqueeze(-1)]  # layer 0: (batch, neurons, 1)
+        if return_layer_list:
+            per_layer_acts = [x]  # <-- no .t()
 
+            if use_ckpt:
+                for chunk_start in range(1, self.num_layers, checkpoint_steps):
+                    chunk_end = min(chunk_start + checkpoint_steps, self.num_layers)
+                    result = torch_checkpoint(
+                        self._forward_chunk,
+                        x,
+                        chunk_start,
+                        chunk_end,
+                        inputs,
+                        slopes_full,
+                        biases_full,
+                        taus_full,
+                        use_reentrant=False,
+                    )
+                    x = result[0]
+                    per_layer_acts.extend(result[1:])
+            else:
+                for alayer in range(1, self.num_layers):
+                    x_previous = x.clone()
+                    x = torch.sparse.mm(self.all_weights, x)
+                    x = self.activation_function(
+                        x,
+                        x_previous=x_previous,
+                        slopes_full=slopes_full,
+                        biases_full=biases_full,
+                        taus_full=taus_full,
+                    )
+                    if alayer != self.num_layers - 1:
+                        x = x.clone()
+                        x[self.sensory_indices, :] = (
+                            x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
+                        )
+                        x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
+                        x = torch.clamp(x, max=1.0)
+                    if manipulate is not None:
+                        x = x.clone()
+                        for b, _ in manipulate.items():
+                            if alayer in manipulate_idx[b]:
+                                for neuron_idx, target_act in manipulate_idx[b][
+                                    alayer
+                                ].items():
+                                    x[neuron_idx, b] = target_act
+                    per_layer_acts.append(x)  # <-- no .t()
+
+            del inputs, x
+            torch.cuda.empty_cache()
+            return per_layer_acts
+
+        # ---- default (stacked) path ----
+        if use_ckpt:
+            act_chunks = [x.t().unsqueeze(-1)]
             for chunk_start in range(1, self.num_layers, checkpoint_steps):
                 chunk_end = min(chunk_start + checkpoint_steps, self.num_layers)
-                x, chunk_acts = torch_checkpoint(
+                result = torch_checkpoint(
                     self._forward_chunk,
                     x,
                     chunk_start,
@@ -1258,15 +1203,12 @@ class MultilayeredNetwork(_NetworkBase):
                     taus_full,
                     use_reentrant=False,
                 )
-                act_chunks.append(chunk_acts)
-
-            # (batch, neurons, num_layers) – on GPU, then move to CPU
+                x = result[0]
+                # result[1:] are (neurons, batch) — transpose each and stack along time
+                act_chunks.append(torch.stack([cx.t() for cx in result[1:]], dim=-1))
             self.activations = torch.cat(act_chunks, dim=-1).cpu()
-
         else:
-            # ---- ORIGINAL (NON-CHECKPOINTED) PATH ----
             acts = [x.t().cpu()]
-
             for alayer in range(1, self.num_layers):
                 x_previous = x.clone()
                 x = torch.sparse.mm(self.all_weights, x)
@@ -1277,7 +1219,6 @@ class MultilayeredNetwork(_NetworkBase):
                     biases_full=biases_full,
                     taus_full=taus_full,
                 )
-
                 if alayer != self.num_layers - 1:
                     x = x.clone()
                     x[self.sensory_indices, :] = (
@@ -1285,32 +1226,18 @@ class MultilayeredNetwork(_NetworkBase):
                     )
                     x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
                     x = torch.clamp(x, max=1.0)
-
                 if manipulate is not None:
                     x = x.clone()
-                    for b, this_batch in manipulate.items():
+                    for b, _ in manipulate.items():
                         if alayer in manipulate_idx[b]:
                             for neuron_idx, target_act in manipulate_idx[b][
                                 alayer
                             ].items():
                                 x[neuron_idx, b] = target_act
-
-                if monitor_neurons is not None and alayer in monitor_layers:
-
-                    def _tapL(grad, L=alayer):
-                        self.noted_grads[L] = (
-                            grad.index_select(0, monitor_indices).detach().cpu()
-                        )
-
-                    x.register_hook(_tapL)
-
                 acts.append(x.t().cpu())
-
             self.activations = torch.stack(acts, dim=-1)
 
-        # free up memory
-        del inputs
-        del x
+        del inputs, x
         torch.cuda.empty_cache()
 
         if single_input:
@@ -1961,7 +1888,9 @@ def get_gradients(
     method: str = "vanilla",
     batch_names: Optional[List[str]] = None,
     device: Optional[torch.device] = None,
-) -> Dict[int, torch.Tensor]:
+    checkpoint_steps: int = 50,
+    normalize_per_layer: bool = False,
+) -> pd.DataFrame:
     """
     Compute gradients of target neurons with regard to monitor neurons, i.e. the rate of
     change of target neuron activations with respect to monitor neurons.
@@ -1984,6 +1913,16 @@ def get_gradients(
             If not provided, defaults to ["batch_0", "batch_1", ...].
         device: Optional torch device to run the computations on. If None, uses CUDA if
             available, else CPU.
+        checkpoint_steps (int): Number of layers to include in each checkpoint when
+            using gradient checkpointing. Adjust based on available memory and model
+            size. Defaults to 50.
+        normalize_per_layer (bool): If True, divide each layer's gradient tensor by its
+            own L2 norm before returning. This mitigates exploding/vanishing gradients
+            across time (early layers can have gradients many orders of magnitude larger
+            than late ones when the per-step Jacobian's spectral radius is far from 1).
+            With this enabled, cross-layer comparisons reflect the *relative pattern* of
+            which inputs matter most at each layer, not the absolute magnitude. Defaults
+            to False.
 
     Returns:
         pd.DataFrame: DataFrame containing gradients with columns: 'group', 'batch_name',
@@ -1991,17 +1930,10 @@ def get_gradients(
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    assert method in ["vanilla", "input_x_gradient"]
 
-    assert method in [
-        "vanilla",
-        "input_x_gradient",
-    ], "Invalid method; choose 'vanilla' or 'input_x_gradient'."
-
-    # Convert to tensor if needed
     if isinstance(input_tensor, np.ndarray):
         input_tensor = torch.tensor(input_tensor, device=device)
-
-    # Ensure input requires gradients
     input_tensor = input_tensor.clone().detach().to(device)
     input_tensor.requires_grad = True
 
@@ -2014,56 +1946,82 @@ def get_gradients(
         # turn into indices
         target_neurons = {
             layer: [
-                idx for idx, grp in model.idx_to_group.items() if grp in neuron_indices
+                idx for idx, grp in model.idx_to_group.items() if grp in set(n.tolist())
             ]
-            for layer, neuron_indices in target_neurons.items()
+            for layer, n in target_neurons.items()
         }
+        monitor_set = set(monitor_neurons.tolist())
+        monitor_indices = [
+            idx for idx, grp in model.idx_to_group.items() if grp in monitor_set
+        ]
+    else:
+        monitor_indices = list(monitor_neurons)
 
-    # Run forward pass
-    out = model(
-        input_tensor, monitor_neurons=monitor_neurons, monitor_layers=monitor_layers
+    if monitor_layers is None:
+        monitor_layers = list(range(model.num_layers))
+    else:
+        monitor_layers = sorted(set(int(l) for l in monitor_layers))
+
+    layer_acts = model(
+        input_tensor,
+        checkpoint_steps=checkpoint_steps,
+        return_layer_list=True,
     )
+    # each layer_acts[L]: (neurons, batch), on the forward path
 
-    target = []
-    for layer, neuron_indices in target_neurons.items():
-        if input_tensor.dim() == 3:  # batched input
-            target.append(model.activations[:, neuron_indices, layer])
-        else:  # single input
-            target.append(model.activations[neuron_indices, layer])
+    # Target CAN be a slice — it's a descendant of all earlier layer_acts,
+    # so walking back from it will traverse every earlier layer_acts tensor.
+    target_pieces = [
+        layer_acts[layer][neuron_indices, :]
+        for layer, neuron_indices in target_neurons.items()
+    ]
+    target = torch.cat(target_pieces)
 
-    target = torch.cat(target)
-    target.mean().backward()
+    # Probes MUST be the full path tensors, not slices. A slice is a fresh
+    # child of layer_acts[L]; it's not on any forward path to target, so
+    # autograd.grad would return None. Slice the gradient afterwards instead.
+    probes = [layer_acts[L] for L in monitor_layers]
 
-    # prepare dataframe ----
+    grads = torch.autograd.grad(target.mean(), probes, allow_unused=True)
+
+    noted_grads = {}
+    for layer, g, probe in zip(monitor_layers, grads, probes):
+        if g is None:
+            # Only happens if probe layer is at or after target (not upstream)
+            g = torch.zeros_like(probe)
+        if normalize_per_layer:
+            g = g / (g.norm() + 1e-12)
+        # g shape: (neurons, batch). Select monitor rows NOW (safe — it's a
+        # plain tensor op on a detached gradient, no autograd implications).
+        noted_grads[layer] = g[monitor_indices, :].detach().cpu()
+
     if batch_names is None:
-        if input_tensor.dim() == 3:
-            batch_names = [f"batch_{i}" for i in range(input_tensor.shape[0])]
-        else:
-            batch_names = ["batch_0"]
+        batch_names = (
+            [f"batch_{i}" for i in range(input_tensor.shape[0])]
+            if input_tensor.dim() == 3
+            else ["batch_0"]
+        )
 
     dfs = []
-    if model.idx_to_group is not None:
-        # turn monitor_neurons into indices
-        monitor_indices = [
-            idx for idx, grp in model.idx_to_group.items() if grp in monitor_neurons
-        ]
-    for i in model.noted_grads.keys():  # number of timesteps/layers
+    for layer in monitor_layers:
         df = pd.DataFrame(
-            model.noted_grads[i].numpy(),  # shape: (num_monitor_neurons, num_batches)
+            noted_grads[layer].numpy(),
             columns=batch_names,
-            index=monitor_neurons if model.idx_to_group is None else monitor_indices,
+            index=(
+                monitor_indices
+                if model.idx_to_group is not None
+                else list(monitor_neurons)
+            ),
         )
         if model.idx_to_group is not None:
             # turn back to groups
             df.index = df.index.map(model.idx_to_group)
             df = df.groupby(df.index).sum()
-
-        # longer
         df = df.melt(
             var_name="batch_name", value_name="grad", ignore_index=False
         ).reset_index()
         df.rename(columns={"index": "group"}, inplace=True)
-        df["layer"] = i
+        df["layer"] = layer
         dfs.append(df)
 
     dfs = pd.concat(dfs, ignore_index=True)
@@ -2074,6 +2032,8 @@ def get_gradients(
     )
 
     if method == "input_x_gradient":
+        with torch.no_grad():
+            out = model(input_tensor, checkpoint_steps=checkpoint_steps)
         acts = get_neuron_activation(
             out, monitor_neurons, batch_names, model.idx_to_group
         )

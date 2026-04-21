@@ -82,6 +82,39 @@ class TestMultilayeredNetwork(unittest.TestCase):
         self.assertEqual(output.shape, expected_shape)
         self.assertTrue(torch.all(output >= -1) and torch.all(output <= 1))
 
+    def test_return_layer_list(self):
+        """return_layer_list=True returns per-layer tensors with grad_fn preserved."""
+        input_tensor = torch.rand(
+            self.batch_size, self.num_sensory, self.num_layers, requires_grad=True
+        ).to(self.device)
+
+        layer_acts = self.model(input_tensor, return_layer_list=True)
+
+        self.assertIsInstance(layer_acts, list)
+        self.assertEqual(len(layer_acts), self.num_layers)
+        for layer_t in layer_acts:
+            self.assertEqual(layer_t.shape, (self.num_neurons, self.batch_size))
+            self.assertIsNotNone(layer_t.grad_fn)
+
+    def test_return_layer_list_preserves_gradient_path(self):
+        """autograd.grad must return non-None for earlier layers.
+
+        Regression test: the threshold/clamp branch on sensory injection
+        must not sever the graph between layers.
+        """
+        input_tensor = torch.rand(
+            self.batch_size, self.num_sensory, self.num_layers, requires_grad=True
+        ).to(self.device)
+
+        layer_acts = self.model(input_tensor, return_layer_list=True)
+
+        target = layer_acts[-1].mean()
+        probes = layer_acts[:-1]
+        grads = torch.autograd.grad(target, probes, allow_unused=True)
+
+        for L, g in enumerate(grads):
+            self.assertIsNotNone(g, f"layer {L} returned None; graph is severed")
+
 
 class TestTargetActivation(unittest.TestCase):
     def setUp(self):
@@ -1154,6 +1187,100 @@ class TestGetGradients(unittest.TestCase):
         self.assertIn("time_2", df.columns)
         self.assertNotIn("time_0", df.columns)
 
+    def test_intermediate_layer_grads_are_nonzero(self):
+        """Regression: gradients at intermediate layers must flow.
+
+        Earlier bugs caused every layer's gradient to be None/zero because
+        per-layer tensors were siblings (via stack/transpose/slice) rather
+        than ancestors on the forward path.
+        """
+        monitor = [0, 1]
+        target = {2: [4]}
+        df = get_gradients(
+            self.model,
+            self.inputs_batched,
+            monitor_neurons=monitor,
+            target_neurons=target,
+            monitor_layers=[0, 1, 2],
+            batch_names=[f"b{i}" for i in range(self.batch_size)],
+            device=self.device,
+        )
+
+        # At least one intermediate layer grad must be non-zero for neuron 0
+        # (the only sensory neuron connected to the target).
+        g0_time0 = df[(df["group"] == 0)]["time_0"].to_numpy()
+        g0_time1 = df[(df["group"] == 0)]["time_1"].to_numpy()
+        self.assertTrue(
+            np.any(g0_time0 != 0) or np.any(g0_time1 != 0),
+            "all intermediate-layer grads are zero — graph is likely severed",
+        )
+
+    def test_get_gradients_with_checkpointing(self):
+        """get_gradients produces the same result with and without checkpointing."""
+        monitor = [0, 1]
+        target = {2: [4]}
+
+        df_no_ckpt = get_gradients(
+            self.model,
+            self.inputs_batched,
+            monitor_neurons=monitor,
+            target_neurons=target,
+            monitor_layers=[0, 1, 2],
+            batch_names=["A", "B"],
+            device=self.device,
+            checkpoint_steps=0,
+        )
+        df_ckpt = get_gradients(
+            self.model,
+            self.inputs_batched,
+            monitor_neurons=monitor,
+            target_neurons=target,
+            monitor_layers=[0, 1, 2],
+            batch_names=["A", "B"],
+            device=self.device,
+            checkpoint_steps=1,
+        )
+
+        # Sort both for comparison
+        df_no_ckpt = df_no_ckpt.sort_values(["group", "batch_name"]).reset_index(
+            drop=True
+        )
+        df_ckpt = df_ckpt.sort_values(["group", "batch_name"]).reset_index(drop=True)
+
+        for col in ["time_0", "time_1", "time_2"]:
+            np.testing.assert_allclose(
+                df_no_ckpt[col].to_numpy(),
+                df_ckpt[col].to_numpy(),
+                atol=1e-6,
+                err_msg=f"Checkpointed and non-checkpointed grads differ at {col}",
+            )
+
+    def test_normalize_per_layer(self):
+        """normalize_per_layer makes each layer's grads unit-norm (before
+        monitor-row selection)."""
+        monitor = [0, 1, 2, 3]  # monitor all sensory so we see full per-layer norm
+        target = {2: [4]}
+
+        df = get_gradients(
+            self.model,
+            self.inputs_batched,
+            monitor_neurons=monitor,
+            target_neurons=target,
+            monitor_layers=[0, 1, 2],
+            batch_names=["A", "B"],
+            device=self.device,
+            normalize_per_layer=True,
+        )
+
+        # Note: norm here is over monitored rows only, so it's <= 1 (not ==1)
+        # since we normalized using the full layer's norm before slicing.
+        # Still: must be finite, non-negative, and no layer should dominate.
+        for L in [0, 1, 2]:
+            col = f"time_{L}"
+            vals = df[col].to_numpy()
+            self.assertTrue(np.all(np.isfinite(vals)))
+            self.assertTrue(np.linalg.norm(vals) <= 1.0 + 1e-6)
+
 
 class TestLinearNetwork(unittest.TestCase):
     """Test suite for LinearNetwork class"""
@@ -1260,20 +1387,22 @@ class TestLinearNetwork(unittest.TestCase):
         # ReLU should produce only non-negative values
         self.assertTrue(torch.all(output >= 0))
 
-    def test_monitor_neurons(self):
-        """Test monitoring specific neurons during forward pass"""
-        monitor_neurons = [0, 2, 5]
-        # Need requires_grad=True for monitoring to work (registers hooks)
+    def test_return_layer_list(self):
+        """return_layer_list=True returns one tensor per layer, each (neurons, batch)."""
         input_tensor = torch.rand(
             self.batch_size, self.num_sensory, self.num_layers, requires_grad=True
         ).to(self.device)
 
-        output = self.model(input_tensor, monitor_neurons=monitor_neurons)
+        layer_acts = self.model(input_tensor, return_layer_list=True)
 
-        # Should return full activations
-        self.assertEqual(
-            output.shape, (self.batch_size, self.num_neurons, self.num_layers)
-        )
+        # One entry per layer
+        self.assertIsInstance(layer_acts, list)
+        self.assertEqual(len(layer_acts), self.num_layers)
+
+        # Each element is (neurons, batch) with grad_fn preserved
+        for layer_t in layer_acts:
+            self.assertEqual(layer_t.shape, (self.num_neurons, self.batch_size))
+            self.assertIsNotNone(layer_t.grad_fn)
 
     def test_sparse_input(self):
         """Test LinearNetwork with scipy sparse matrix input"""
@@ -1315,6 +1444,68 @@ class TestLinearNetwork(unittest.TestCase):
         # (unless by chance the activations are very similar)
         # We just check they both produce valid outputs
         self.assertEqual(output_with_tau.shape, output_without_tau.shape)
+
+    def test_return_layer_list_preserves_gradient_path(self):
+        """layer_acts[L] must be on the forward path to layer_acts[L+k].
+
+        Regression: storing x.t() or a slice would make per-layer tensors
+        siblings of a shared parent, and autograd.grad would return None for
+        all earlier layers.
+        """
+        input_tensor = torch.rand(
+            self.batch_size, self.num_sensory, self.num_layers, requires_grad=True
+        ).to(self.device)
+
+        layer_acts = self.model(input_tensor, return_layer_list=True)
+
+        target = layer_acts[-1].mean()
+        probes = layer_acts[:-1]
+        grads = torch.autograd.grad(target, probes, allow_unused=True)
+
+        # Every earlier layer must be upstream of the last layer → no Nones
+        for L, g in enumerate(grads):
+            self.assertIsNotNone(g, f"layer {L} returned None; graph is severed")
+            self.assertEqual(g.shape, probes[L].shape)
+
+        # Gradients closer to the target should generally have larger norms
+        # (product of fewer Jacobians). Sanity check that they're non-trivial.
+        norms = [g.norm().item() for g in grads]
+        self.assertTrue(all(n > 0 for n in norms))
+
+    def test_return_layer_list_with_checkpointing(self):
+        """Gradients flow correctly through gradient checkpointing."""
+        model = LinearNetwork(self.all_weights, self.sensory_indices, num_layers=6).to(
+            self.device
+        )
+
+        input_tensor = torch.rand(
+            self.batch_size, self.num_sensory, 6, requires_grad=True
+        ).to(self.device)
+
+        layer_acts = model(input_tensor, return_layer_list=True, checkpoint_steps=2)
+
+        self.assertEqual(len(layer_acts), 6)
+
+        # autograd.grad must work across checkpoint boundaries
+        target = layer_acts[-1].mean()
+        probes = layer_acts[:-1]
+        grads = torch.autograd.grad(target, probes, allow_unused=True)
+
+        for L, g in enumerate(grads):
+            self.assertIsNotNone(g, f"layer {L} None under checkpointing")
+
+    def test_return_layer_list_2d_input(self):
+        """return_layer_list handles single (unbatched) input."""
+        input_tensor = torch.rand(
+            self.num_sensory, self.num_layers, requires_grad=True
+        ).to(self.device)
+
+        layer_acts = self.model(input_tensor, return_layer_list=True)
+
+        self.assertEqual(len(layer_acts), self.num_layers)
+        # Internally always batched: 2D input gets unsqueeze(0) → batch dim of 1
+        for layer_t in layer_acts:
+            self.assertEqual(layer_t.shape, (self.num_neurons, 1))
 
 
 class TestNormalizeGradients(unittest.TestCase):
