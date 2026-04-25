@@ -10,7 +10,12 @@ from scipy.sparse import spmatrix
 from tqdm import tqdm
 
 from .utils import to_nparray, arrayable
-from .path_finding import group_paths, filter_paths, find_paths_of_length
+from .path_finding import (
+    group_paths,
+    filter_paths,
+    find_paths_of_length,
+    filter_all_paths_to_cumsum,
+)
 from .compress_paths import effective_conn_from_paths
 
 
