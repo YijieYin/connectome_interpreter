@@ -1911,6 +1911,8 @@ def filter_all_paths_to_cumsum(
             thre_step : float
                 Minimum edge weight threshold used to filter paths, bounded below by thre_step_min.
     """
+    from .external_paths import effective_conn_per_path_from_paths
+
     df_bool = False
     if isinstance(all_paths, pd.DataFrame):
         df_bool = True
