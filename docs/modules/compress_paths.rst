@@ -1,5 +1,5 @@
 Effective connectivity
-=====================
+=======================
 
 .. automodule:: connectome_interpreter.compress_paths
    :members:

@@ -4,9 +4,9 @@ Function documentation
 .. toctree:: 
     :maxdepth: 1
 
-    activation_maximisation
     compress_paths
     path_finding
+    activation_maximisation
     external_map
-    utils
     external_paths
+    utils

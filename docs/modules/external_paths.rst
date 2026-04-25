@@ -1,5 +1,5 @@
-External paths
-=====================
+Information flow for layers
+============================
 
 .. automodule:: connectome_interpreter.external_paths
    :members:
