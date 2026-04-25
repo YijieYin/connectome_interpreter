@@ -1,4 +1,4 @@
-Paths compression / "effective connectivity" calculation
+Effective connectivity calculation
 =========================================================
 
 All upstream partners of a neuron, by definition, occupy 100% of that neuron’s input. Each upstream partner has its own upstream partners, which also contribute 100% to their input. 

@@ -1,4 +1,4 @@
-Compress paths
+Effective connectivity
 =====================
 
 .. automodule:: connectome_interpreter.compress_paths

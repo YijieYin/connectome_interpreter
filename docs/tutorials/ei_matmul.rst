@@ -1,4 +1,4 @@
-Excitatory/Inhibitory "effective connectivity"
+Excitatory/Inhibitory effective connectivity
 ==============================================
 The :doc:`path compression method<matmul>` quantifies the influence one neuron has on another, but does not account for the sign of the connections. Using predicted neurotransmitter information (`Eckstein et al. 2024 <https://www.sciencedirect.com/science/article/pii/S0092867424003076?via%3Dihub>`_), we present a method to calculate the excitatory/inhibitory influence. 
 

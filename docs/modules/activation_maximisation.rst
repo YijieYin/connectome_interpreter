@@ -1,4 +1,4 @@
-Activation maximisation
+Modelling
 =======================
 
 .. automodule:: connectome_interpreter.activation_maximisation
