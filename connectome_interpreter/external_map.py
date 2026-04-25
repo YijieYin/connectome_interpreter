@@ -51,8 +51,9 @@ def load_dataset(dataset: str) -> pd.DataFrame:
             - 'Knaden2012_odour_valence': behavioural valence of odours, from Knaden et al. 2012 (https://www.sciencedirect.com/science/article/pii/S2211124712000733).
 
     Returns:
-        pd.DataFrame: The dataset as a pandas DataFrame. For the adult, the glomeruli
-        are in the rows. For the larva, receptors are in the rows.
+        pd.DataFrame:
+            The dataset as a pandas DataFrame. For the adult, the glomeruli are in the
+            rows. For the larva, receptors are in the rows.
     """
 
     try:
@@ -97,8 +98,9 @@ def map_to_experiment(df, dataset=None, custom_experiment=None):
             indices of df. They are the units of comparison (e.g. glomeruli).
 
     Returns:
-        pd.DataFrame: The similarity between the connectomics data and the experimental
-        data. Rows are neurons, columns are external stimulus.
+        pd.DataFrame:
+            The similarity between the connectomics data and the experimental data. Rows
+            are neurons, columns are external stimulus.
     """
 
     # try:
@@ -518,8 +520,9 @@ def looming_stimulus(start_coords, all_coords, n_time=4):
         n_time (int): Default=4. Number of time steps for the stimulus to expand.
 
     Returns:
-        stim_str (list): List of lists of strings of the form 'x,y' where x and y are
-        the coordinates of the hexes that are stimulated at each time step.
+        stim_str (list):
+            List of lists of strings of the form 'x,y' where x and y are the coordinates
+            of the hexes that are stimulated at each time step.
     """
     coords = [tuple(map(float, idx.split(","))) for idx in all_coords]
     x_vals, y_vals = zip(*coords)  # Separate into x and y lists
@@ -590,8 +593,9 @@ def make_sine_stim(phase=0, amplitude=1, n=8):
         n (int): Number of points in the sine wave. Default is 8.
 
     Returns:
-        dict: A dictionary where keys are indices from 1 to n, and values are the
-        corresponding sine wave values.
+        dict:
+            A dictionary where keys are indices from 1 to n, and values are the
+            corresponding sine wave values.
     """
     x = (phase % 180) / 180 * np.pi
     x = np.linspace(x, x + np.pi, n)
@@ -634,7 +638,8 @@ def plot_mollweide_projection(
         marker_size (int): Size of markers in the plot.
 
     Returns:
-        go.Figure: A Plotly figure object containing the mollweide projection heatmap.
+        go.Figure:
+            A Plotly figure object containing the mollweide projection heatmap.
     """
 
     def cart2sph(xyz: np.array) -> np.array:

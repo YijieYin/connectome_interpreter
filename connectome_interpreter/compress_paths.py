@@ -88,8 +88,8 @@ def compress_paths(
             the matrix is saved as dense. Defaults to 0.2.
 
     Returns:
-        List[scipy.sparse.csr_matrix or numpy.ndarray]: List of matrices representing
-        A^0 to A^n.
+        List[scipy.sparse.csr_matrix or numpy.ndarray]:
+            List of matrices representing A^0 to A^n.
     """
     assert A.shape[0] == A.shape[1], "Matrix A must be square"
     assert step_number > 0, "Power n must be positive"
@@ -387,7 +387,8 @@ def compress_paths_dense_chunked(
             filenames. Defaults to ``"step_"``.
 
     Returns:
-        list: A list of scipy.sparse.csc_matrix objects, each representing connectivity
+        list:
+            A list of scipy.sparse.csc_matrix objects, each representing connectivity
         from all neurons to all neurons n steps away.
 
     Note:
@@ -597,9 +598,8 @@ def compress_paths_signed(
 
     Returns:
         Tuple[List[scipy.sparse.csc_matrix], List[scipy.sparse.csc_matrix]]:
-            Two lists of sparse matrices representing the excitatory and
-            inhibitory influences, respectively, up to the specified target
-            layer.
+            Two lists of sparse matrices representing the excitatory and inhibitory
+            influences, respectively, up to the specified target layer.
     """
     # if inprop is not a coo matrix, convert it
     if not issparse(inprop):
@@ -994,9 +994,10 @@ def add_first_n_matrices(matrices, n):
             number must not exceed the length of the matrices list.
 
     Returns:
-        matrix: The resulting matrix after summing the first N matrices. The
-        type of the returned matrix matches the type of the input matrices
-        (scipy sparse matrix, or numpy array).
+        matrix:
+            The resulting matrix after summing the first N matrices. The type of the
+            returned matrix matches the type of the input matrices (scipy sparse matrix,
+            or numpy array).
 
     Raises:
         ValueError: If the list of matrices is empty or if n is larger than
@@ -1091,10 +1092,10 @@ def connectivity_summary(
             format (in which case display no longer works). Defaults to False.
 
     Returns:
-        pd.DataFrame: A dataframe representing the summed synaptic input from
-        presynaptic neuron groups to an average neuron in each postsynaptic
-        neuron group. This dataframe is always returned, regardless of the
-        value of display_output.
+        pd.DataFrame:
+            A dataframe representing the summed synaptic input from presynaptic neuron
+            groups to an average neuron in each postsynaptic neuron group. This
+            dataframe is always returned, regardless of the value of display_output.
 
     Displays:
         If display_output is True, the function will display a styled version
@@ -1351,10 +1352,10 @@ def result_summary(
             Defaults to 'mean'.
 
     Returns:
-        pd.DataFrame: A dataframe representing the summed synaptic input from
-        presynaptic neuron groups to an average neuron in each postsynaptic
-        neuron group. This dataframe is always returned, regardless of the
-        value of display_output.
+        pd.DataFrame:
+            A dataframe representing the summed synaptic input from presynaptic neuron
+            groups to an average neuron in each postsynaptic neuron group. This
+            dataframe is always returned, regardless of the value of display_output.
 
     Displays:
         If display_output is True, the function will display a styled version
@@ -1535,9 +1536,11 @@ def contribution_by_path_lengths_data(
             inidx_map and outidx_map should be specified.
 
     Returns:
-        pd.DataFrame: A DataFrame containing the contributions from presynaptic neurons
-        to postsynaptic neurons over different path lengths. The DataFrame has three
-        columns: 'path_length', 'presynaptic_type' (or 'postsynaptic_type'), and 'value'.
+        pd.DataFrame:
+            A DataFrame containing the contributions from presynaptic neurons to
+            postsynaptic neurons over different path lengths. The DataFrame has three
+            columns: 'path_length', 'presynaptic_type' (or 'postsynaptic_type'), and
+            'value'.
     """
     # remove nan values in inidx and outidx
     inidx = to_nparray(inidx)
@@ -1630,7 +1633,8 @@ def contribution_by_path_lengths(
         height (int, optional): The height of the plot. Defaults to 400.
 
     Returns:
-        None: Displays an interactive line plot showing the connection strength from all
+        None:
+            Displays an interactive line plot showing the connection strength from all
         of inidx to an average outidx over different path lengths.
 
     """
@@ -1701,8 +1705,9 @@ def contribution_by_path_lengths_heatmap(
             to (30, 15).
 
     Returns:
-        None: Displays an interactive heatmap showing the contribution from inidx to
-        outidx, grouped by inidx_map and outidx_map, across different path lengths.
+        None:
+            Displays an interactive heatmap showing the contribution from inidx to
+            outidx, grouped by inidx_map and outidx_map, across different path lengths.
     """
 
     inidx = to_nparray(inidx)
@@ -1803,10 +1808,11 @@ def conn_by_path_length_data(
             datasets. Defaults to 2000.
 
     Returns:
-        List[pd.DataFrame] | pd.DataFrame: If one of outidx_map and inidx_map is
-        provided, a DataFrame containing the three columns: 'path_length', 'post' (or
-        'pre'), and 'weight'. If both are provided, a list of DataFrames, where each one
-        is the connectivity of a specific path length.
+        List[pd.DataFrame] | pd.DataFrame:
+            If one of outidx_map and inidx_map is provided, a DataFrame containing the
+            three columns: 'path_length', 'post' (or 'pre'), and 'weight'. If both are
+            provided, a list of DataFrames, where each one is the connectivity of a
+            specific path length.
     """
 
     inidx = to_nparray(inidx)
@@ -1978,7 +1984,8 @@ def conn_by_path_length(
         height (int, optional): The height of the plot. Defaults to 400.
 
     Returns:
-        None: Displays an interactive line plot showing the connection strength from all
+        None:
+            Displays an interactive line plot showing the connection strength from all
         of inidx to an average outidx over different path lengths.
 
     """
@@ -2064,7 +2071,8 @@ def conn_by_path_length_heatmap(
             (30, 15).
 
     Returns:
-        None: Displays a heatmap showing the connection strength from all of inidx to an
+        None:
+            Displays a heatmap showing the connection strength from all of inidx to an
             average outidx over different path lengths with a slider.
     """
 
@@ -2169,10 +2177,10 @@ def signed_conn_by_path_length_data(
             the result will be in long format. Defaults to True.
 
     Returns:
-        List[pd.DataFrame], List[pd.DataFrame]: Two lists of DataFrames. The first list
-        contains the excitatory effective connectivity DataFrames for each path length,
-        and the second list contains the inhibitory effective connectivity DataFrames
-        for each path length.
+        List[pd.DataFrame], List[pd.DataFrame]:
+            Two lists of DataFrames. The first list contains the excitatory effective
+            connectivity DataFrames for each path length, and the second list contains
+            the inhibitory effective connectivity DataFrames for each path length.
     """
 
     inidx = to_nparray(inidx)
@@ -2242,8 +2250,9 @@ def effective_conn_from_paths(
             If GPU is not available, it will fall back to CPU.
 
     Returns:
-        pd.DataFrame: A DataFrame summarizing the effective connectivity between
-        presynaptic and postsynaptic groups.
+        pd.DataFrame:
+            A DataFrame summarizing the effective connectivity between presynaptic and
+            postsynaptic groups.
     """
     # --------------------------------------------------------------------- #
     # 0. preliminaries
@@ -2450,8 +2459,9 @@ def effective_conn_from_paths_cpu(
             Defaults to True.
 
     Returns:
-        pd.DataFrame: A dataframe representing the effective connectivity between groups
-        of neurons.
+        pd.DataFrame:
+            A dataframe representing the effective connectivity between groups of
+            neurons.
     """
 
     # it will get confusing if we didn't use the same mapping for all layers
@@ -2521,7 +2531,8 @@ def signed_effective_conn_from_paths(
             (inhibitory). Defaults to None.
 
     Returns:
-        list: A list of two dataframes representing the effective connectivity between
+        list:
+            A list of two dataframes representing the effective connectivity between
         groups of neurons, one for effective excitation, the other inhibition.
     """
 
@@ -2679,8 +2690,9 @@ def effconn_without_loops(
         quiet (bool, optional): Whether to suppress progress output. Defaults to False.
 
     Returns:
-        pd.DataFrame: A DataFrame summarizing the effective connectivity between
-        presynaptic and postsynaptic groups, excluding loops.
+        pd.DataFrame:
+            A DataFrame summarizing the effective connectivity between presynaptic and
+            postsynaptic groups, excluding loops.
     """
     if len(paths) == 0:
         return None
@@ -2857,7 +2869,8 @@ def read_precomputed(
         first_n (int, optional): Number of files to read. If None, reads all files.
 
     Returns:
-        List: A list of matrices (sparse or dense) representing the steps.
+        List:
+            A list of matrices (sparse or dense) representing the steps.
     """
     if file_path is None:
         # Check if running in Google Colab

@@ -1,4 +1,4 @@
-A simplified model of the connectome 
+A rate model of the connectome 
 =====================================
 
 Following the thinking process of a "typical neuroscientist", we construct the model with the following assumptions:
@@ -22,11 +22,30 @@ With these assumptions, we construct the following model, aiming to provide "con
 
 **Panel A** shows the implementation: *all* neurons are in *each* layer. Signed weights between adjacent layers are defined by the connectome. Each layer is therefore like a timepoint. 
 
-User can define a set of source neurons (blue/brown circles) which could be e.g. input to the central brain (sensory neurons, visual projection neurons, ascending neurons). External input is provided by activating the source neurons (brown / **Panel B**). The network is silent before any external input is fed in. 
+User can define a set of source neurons (brown circles) which could be e.g. input to the central brain (sensory neurons, visual projection neurons, ascending neurons). External input is provided by activating the source neurons at any timepoint (**Panel B**). The network is silent before any external input is fed in. 
 
-**Panel C** shows the activation function of each neuron: the (signed) weighted sum of the upstream neurons' activity (x) is passed into a Rectified Linear Unit (`ReLU()`), scaled by `excitability`, and then passed into `tanh()`, to keep the activation of each neuron between 0 and 1. 
+**Panel C** illustrates the role of the excitability parameter :math:`\beta`, which controls the steepness of each neuron's activation curve. The full update used in :py:class:`MultilayeredNetwork` is:
 
-An example implementation can be found `here <https://colab.research.google.com/drive/1_beqiKPX8pC7---DWepKO8dEv1sJ2vA4#scrollTo=LAt4e4SPZDxK>`_, which uses the :py:func:`MultilayeredNetwork`. 
+.. math::
+    r_i(t+1) = \frac{\tau - 1}{\tau}\, r_i(t) + \frac{1}{\tau} \tanh\!\Big(\big[\,\beta_i \sum_j w_{j,i}\, r_j(t) + I_i\,\big]_+\Big)
+
+where :math:`w_{j,i}` is the signed connection weight from neuron :math:`j` to :math:`i`; :math:`\beta_i` scales the total weighted input (the excitability); :math:`I_i` is a bias reflecting baseline activity; :math:`[\,\cdot\,]_+` is a (thresholded) ReLU, which keeps activations non-negative; and :math:`\tau \geq 1` is a time constant controlling how much activation persists across timesteps (:math:`\tau = 1` means the new activation depends only on the current input). Defaults for :math:`\beta`, :math:`I` and :math:`\tau` apply to all neurons, but values can be set per neuron group (e.g. per cell type) via dictionaries.
+
+An example implementation can be found `here <https://colab.research.google.com/drive/1_beqiKPX8pC7---DWepKO8dEv1sJ2vA4#scrollTo=LAt4e4SPZDxK>`_, which uses :py:class:`MultilayeredNetwork`. 
+
+Divisive normalisation 
+-----------------------
+By default, inhibitory input subtracts from the weighted sum. Selected inhibitory connections can instead act *divisively*: the pre-synaptic activity rescales the post-synaptic neuron's slope :math:`\beta`, reducing its gain rather than shifting its input. This is specified via ``divisive_normalization`` (a dict mapping pre-synaptic groups to lists of post-synaptic groups) and ``divisive_strength``.
+
+Training 
+---------
+Since the model is differentiable, its parameters (:math:`\beta`, :math:`I`, :math:`\tau`, and optionally connection weights) can be fit to data with :py:func:`train_model`. Parameter sharing within groups applies during training too, so neurons in the same group end up with the same fitted values. Targets can be full time-series activations, or a single average activation per neuron.
+
+Stimulus constructors 
+----------------------
+- :py:func:`looming_stimulus` generates a visual looming stimulus based on hex coordinates; 
+- :py:func:`make_sine_stim` generates sine-shaped stimuli which could be used for central-complex-related studies; 
+- :py:func:`load_dataset` loads a number of (primarily olfactory) datasets of neuron activities recorded from experiments.
 
 Comparison with :doc:`"effective connectivity"<matmul>` 
 --------------------------------------------------------
@@ -40,9 +59,4 @@ Pros
 
 Cons
 +++++
-- a bit more complicated; 
-
-
-Plasticity 
------------
-The connectivity in the connectome between some neurons, e.g. ring neurons and compass neurons, is only a *scaffold* for, instead of a direct reflection of, functional connectivity (`Fisher et al. 2022 <https://www.nature.com/articles/s41586-022-05485-4>`_). We therefore implemented (third-party-dependent) change in weights ("plasticity"), based also on the activation similarity of two groups of neurons (:py:func:`change_model_weights`).
+- a bit more complicated;

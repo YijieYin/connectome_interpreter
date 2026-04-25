@@ -45,6 +45,8 @@ This way, the memory consumption is the size of the sparse all-to-all connectivi
 
 Since matrix multiplication works better on GPUs, this function is a lot faster on GPU, but runs on CPU too. 
 
+In practice, users call :py:func:`compress_paths` to compute whole-network per-path-length effective connectivity matrices. :py:func:`connectivity_summary` takes a connectivity matrix, and gives a summary of connectivity between the sources and targets (grouped by groups of interest e.g. cell types), and :py:func:`conn_by_path_length` (with :py:func:`conn_by_path_length_heatmap`) shows the effective connectivity across path lengths.
+
 Glitches 
 --------
 `colsum<=1`: 

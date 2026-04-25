@@ -1604,15 +1604,11 @@ def activation_maximisation(
         tuple: A tuple containing:
 
             - numpy.ndarray: The optimized input as a numpy array.
-            - numpy.ndarray: The output of the model after optimization as a
-                numpy array.
+            - numpy.ndarray: The output of the model after optimization as a numpy array.
             - list(float): A list of output activation losses over iterations.
-            - list(float): A list of input activation regularization losses
-                over iterations.
-            - list(float): A list of output activation regularization losses
-                over iterations.
-            - list(numpy.ndarray): A list of input tensor snapshots taken
-                during optimization.
+            - list(float): A list of input activation regularization losses over iterations.
+            - list(float): A list of output activation regularization losses over iterations.
+            - list(numpy.ndarray): A list of input tensor snapshots taken during optimization.
 
 
     Examples:
@@ -1851,7 +1847,8 @@ def saliency(
         device: Computation device
 
     Returns:
-        torch.Tensor: Saliency maps with same shape as input tensor
+        torch.Tensor:
+            Saliency maps with same shape as input tensor
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1950,8 +1947,9 @@ def get_gradients(
             to False.
 
     Returns:
-        pd.DataFrame: DataFrame containing gradients with columns: 'group', 'batch_name',
-        'time_0', 'time_1', ..., 'time_N'.
+        pd.DataFrame:
+            DataFrame containing gradients with columns: 'group', 'batch_name', 'time_0',
+            'time_1', ..., 'time_N'.
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -2122,10 +2120,10 @@ def activations_to_df(
             within each layer. Defaults to True.
 
     Returns:
-        pandas.DataFrame: A dataframe representing the paths in the network.
-        Each row is a connection, with columns for 'pre' and 'post' neuron
-        indices, 'layer', and their respective activations ('pre_activation',
-        'post_activation').
+        pandas.DataFrame:
+            A dataframe representing the paths in the network. Each row is a connection,
+            with columns for 'pre' and 'post' neuron indices, 'layer', and their
+            respective activations ('pre_activation', 'post_activation').
     """
     all_indices = list(range(inprop.shape[0]))
 
@@ -2297,10 +2295,10 @@ def activations_to_df_batched(
             within each layer. Defaults to True.
 
     Returns:
-        pandas.DataFrame: A dataframe representing the paths in the network.
-        Each row is a connection, with columns for 'pre' and 'post' neuron
-        indices, 'layer', and their respective activations ('pre_activation',
-        'post_activation').
+        pandas.DataFrame:
+            A dataframe representing the paths in the network. Each row is a connection,
+            with columns for 'pre' and 'post' neuron indices, 'layer', and their
+            respective activations ('pre_activation', 'post_activation').
     """
     # use activations_to_df for each batch
     paths = []
@@ -2353,7 +2351,8 @@ def input_from_df(
             The number of layers in the model.
 
     Returns:
-        np.ndarray: The input for the model.
+        np.ndarray:
+            The input for the model.
 
     """
     # first initialise empty input
@@ -2401,8 +2400,9 @@ def get_neuron_activation(
             groups. Defaults to None.
 
     Returns:
-        pd.DataFrame: The activations for the neurons, with the first columns being
-        batch_names, neuron_indices, and group. The rest are the timesteps.
+        pd.DataFrame:
+            The activations for the neurons, with the first columns being batch_names,
+            neuron_indices, and group. The rest are the timesteps.
     """
     neuron_indices = list(to_nparray(neuron_indices))
 
@@ -2501,7 +2501,8 @@ def get_activations_for_path(
             activation_start = activations.shape[1] - path.layer.max().
 
     Returns:
-        pd.DataFrame: The activations for the pre and post neurons in the path.
+        pd.DataFrame:
+            The activations for the pre and post neurons in the path.
     """
     pathdf = path.copy()
 
@@ -2582,8 +2583,9 @@ def activated_path_for_ngl(path):
             `get_activations_for_path()`).
 
     Returns:
-        pd.DataFrame: A DataFrame with columns 'neuron_id', 'layer', and
-            'activation', suitable for Neuroglancer visualization.
+        pd.DataFrame:
+            A DataFrame with columns 'neuron_id', 'layer', and 'activation', suitable
+            for Neuroglancer visualization.
     """
     dfs = []
     for l in path.layer.unique():
@@ -2647,9 +2649,10 @@ def get_input_activation(
 
 
     Returns:
-        pd.DataFrame: The input activation for the model. For 2D input, columns are
-        'group' and 'time_0', 'time_1', etc. For 3D input, columns are 'batch_name',
-        'group' and 'time_0', 'time_1', etc.
+        pd.DataFrame:
+            The input activation for the model. For 2D input, columns are 'group' and
+            'time_0', 'time_1', etc. For 3D input, columns are 'batch_name', 'group' and
+            'time_0', 'time_1', etc.
     """
     sensory_indices = to_nparray(sensory_indices)
 
@@ -2770,7 +2773,8 @@ def add_sign(inprop: sparse.spmatrix, idx_to_sign: dict):
         idx_to_sign (dict): A dictionary mapping indices to their sign (-1 or 1).
 
     Returns:
-        scipy.sparse matrix: The matrix with the sign added.
+        scipy.sparse matrix:
+            The matrix with the sign added.
     """
     # add negative connections
     neg_indices = [idx for idx, val in idx_to_sign.items() if val == -1]
@@ -2821,9 +2825,10 @@ def activity_by_column(
             Defaults to None.
 
     Returns:
-        pd.DataFrame: A dataframe with columns 'normalised_column', 'cell_group',
-        'time_point', 'activation', and 'time_step'. The first timepoint of `model_input`
-        is also included if `model_input` is provided.
+        pd.DataFrame:
+            A dataframe with columns 'normalised_column', 'cell_group', 'time_point',
+            'activation', and 'time_step'. The first timepoint of `model_input` is also
+            included if `model_input` is provided.
     """
 
     # if one of model_input or sensory_indices is provided, the other must also be provided
@@ -2945,7 +2950,8 @@ def plot_activity_by_column(
             across all groups and time steps. Defaults to None.
 
     Returns:
-        plotly.graph_objects.Figure: A Plotly figure object.
+        plotly.graph_objects.Figure:
+            A Plotly figure object.
     """
 
     column_acts = activity_by_column(
@@ -3287,8 +3293,9 @@ def guess_optimal_stimulus(
         longest_plen (int, optional): The longest path length to consider. Defaults to 5.
 
     Returns:
-        np.ndarray: The guessed optimal stimulus. Shape is
-        ((batch,) num_sensory_neurons, min(longest_plen, max_layer_in_target_activations)).
+        np.ndarray:
+            The guessed optimal stimulus. Shape is ((batch,) num_sensory_neurons,
+            min(longest_plen, max_layer_in_target_activations)).
     """
 
     all_layers = set()
@@ -3364,7 +3371,8 @@ def legacy_activation_function(
         x_previous (Optional[torch.Tensor]): The previous activations of the neurons.
 
     Returns:
-        torch.Tensor: The output tensor after applying the activation function.
+        torch.Tensor:
+            The output tensor after applying the activation function.
     """
     if self.custom_activation_function is not None:
         return self.custom_activation_function(self, x, x_previous)
@@ -3414,7 +3422,8 @@ def legacy_activation_function_linear(
         x_previous (Optional[torch.Tensor]): The previous activations of the neurons.
 
     Returns:
-        torch.Tensor: The output tensor after applying the activation function.
+        torch.Tensor:
+            The output tensor after applying the activation function.
     """
     if self.custom_activation_function is not None:
         return self.custom_activation_function(self, x, x_previous)

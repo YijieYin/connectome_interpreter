@@ -32,8 +32,9 @@ def compute_flow_hitting_time(
         flow_thre (float): Threshold for activation in flow calculation.
 
     Returns:
-        pd.DataFrame: DataFrame with columns 'idx' and 'hitting_time',
-        where 'idx' is the cell index and 'hitting_time' is the computed hitting time.
+        pd.DataFrame:
+            DataFrame with columns 'idx' and 'hitting_time', where 'idx' is the cell
+            index and 'hitting_time' is the computed hitting time.
     """
 
     try:
@@ -136,9 +137,10 @@ def find_instance_flow(
         flow_thre (float): Threshold for flow calculation.
 
     Returns:
-        pd.DataFrame: DataFrame with columns 'cell_group' and 'hitting_time', where
-        'cell_group' is the name of the cell group and 'hitting_time' is the median
-        hitting time for that group.
+        pd.DataFrame:
+            DataFrame with columns 'cell_group' and 'hitting_time', where 'cell_group'
+            is the name of the cell group and 'hitting_time' is the median hitting time
+            for that group.
     """
 
     if file_path is None:
@@ -243,12 +245,17 @@ def layered_el(
         flow (pd.DataFrame, optional): DataFrame containing the flow hitting time.
             If provided, it should have columns 'cell_group' and 'hitting_time'.
             If None, the flow hitting time is computed from `inprop` and `idx_to_group`.
+
     Returns:
-        pd.DataFrame: DataFrame containing the edgelist with flow layers.
-        float: The total effective weight of the filtered paths.
-        float: The total effective weight of all paths before filtering.
-        float: The minimum edge weight threshold used to filter paths which is
-            minimally thre_step_min.
+        tuple:
+            pd.DataFrame:
+                DataFrame containing the edgelist with flow layers.
+            float:
+                The total effective weight of the filtered paths.
+            float:
+                The total effective weight of all paths before filtering.
+            float:
+                The minimum edge weight threshold used to filter paths which is minimally thre_step_min.
     """
 
     inidx = to_nparray(inidx)
@@ -345,10 +352,13 @@ def effective_conn_per_path_from_paths(
             'layer', 'pre', 'post', and 'weight'.
 
     Returns:
-        total_effective_weight (float): Total effective weight of all paths
-            ending in target group.
-        all_path_weights (np.array): Array of weights for each individual path.
-        min_path_weights (np.array): Array of minimum edge weights for each individual path.
+        tuple:
+            total_effective_weight (float):
+                Total effective weight of all paths ending in target group.
+            all_path_weights (np.array):
+                Array of weights for each individual path.
+            min_path_weights (np.array):
+                Array of minimum edge weights for each individual path.
     """
     if paths_df is None or paths_df.empty:
         return 0.0, [], []
@@ -431,9 +441,9 @@ def filter_all_paths_to_cumsum(
 
     Args:
         all_paths (pd.DataFrame | list[pd.DataFrame]): The DataFrame or list of DataFrames containing the path data,
-            where each DataFrame is like the output from `find_paths_of_length()`, i.e., contains paths of a 
+            where each DataFrame is like the output from `find_paths_of_length()`, i.e., contains paths of a
             specific length.
-        thre_cumsum (float): The cumulative effective weight threshold to reach for filtered paths. 
+        thre_cumsum (float): The cumulative effective weight threshold to reach for filtered paths.
             Should be a number between 0 and 1. Defaults to 0.5.
         thre_step_min (float, optional): The minimum threshold for the weight of the
             direct connection between pre and post. Defaults to 0.0.
@@ -444,11 +454,15 @@ def filter_all_paths_to_cumsum(
             or pandas.Series). Defaults to None.
 
     Returns:
-        paths (list[pd.DataFrame]): List of DataFrames containing the paths that meet the criteria.
-        w_filter (float): The total effective weight of the filtered paths.
-        w_all (float): The total effective weight of all paths before filtering.
-        thre_step (float): The minimum edge weight threshold used to filter paths which is
-            minimally thre_step_min.
+        tuple:
+            paths: list of pd.DataFrame
+                Filtered paths.
+            w_filter: float
+                Total effective weight of the filtered paths.
+            w_all: float
+                Total effective weight of all paths before filtering.
+            thre_step : float
+                Minimum edge weight threshold used to filter paths, bounded below by thre_step_min.
     """
     df_bool = False
     if isinstance(all_paths, pd.DataFrame):
@@ -471,7 +485,7 @@ def filter_all_paths_to_cumsum(
     idx_sort = np.argsort(-w_prod)
     idx_thre = np.where(np.cumsum(w_prod[idx_sort] / w_all) > thre_cumsum)[0][0]
     # since in filter_paths, threshold > thre_step, take 99.9%, with a minimum of thre_step_min
-    thre_step = max(0.999 * np.min(w_min[idx_sort[:idx_thre + 1]]), thre_step_min)
+    thre_step = max(0.999 * np.min(w_min[idx_sort[: idx_thre + 1]]), thre_step_min)
 
     # filter paths and compute total effective weight across those paths
     w_filter = 0.0

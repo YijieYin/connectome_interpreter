@@ -54,7 +54,8 @@ def torch_sparse_where(x, threshold):
       threshold (float): The threshold value.
 
     Returns:
-      torch.Tensor: A new tensor with values below the threshold set to zero.
+      torch.Tensor:
+        A new tensor with values below the threshold set to zero.
     """
     if x.is_sparse:
         values = x._values()
@@ -91,7 +92,8 @@ def tensor_to_csc(tensor):
       tensor (torch.Tensor): A (sparse) tensor.
 
     Returns:
-      scipy.sparse.csc_matrix: A Scipy sparse Compressed Sparse Column matrix.
+      scipy.sparse.csc_matrix:
+        A Scipy sparse Compressed Sparse Column matrix.
     """
     if tensor.is_sparse:
         tensor = tensor.coalesce()
@@ -125,8 +127,9 @@ def coo_tensor_to_el(coo_tensor):
         COO format or dense.
 
     Returns:
-      pd.DataFrame: A DataFrame with columns 'pre', 'post', and 'weight',
-        representing the edge list of the graph.
+      pd.DataFrame:
+        A DataFrame with columns 'pre', 'post', and 'weight', representing the edge list
+        of the graph.
     """
 
     if not coo_tensor.is_sparse:
@@ -157,8 +160,9 @@ def coo_to_el(coo, row_indices=None, col_indices=None):
       col_indices: Optional; A list or array of column indices of interest.
 
     Returns:
-      pd.DataFrame: A DataFrame with columns 'pre', 'post', and 'value',
-        representing the edge list of the graph.
+      pd.DataFrame:
+        A DataFrame with columns 'pre', 'post', and 'value', representing the edge list
+        of the graph.
     """
     # Determine whether to filter on rows/columns based on provided indices
     row_mask = (
@@ -200,8 +204,9 @@ def adjacency_df_to_el(adjacency, threshold=None):
         threshold are removed. Default to None.
 
     Returns:
-      pd.DataFrame: A DataFrame with columns 'pre', 'post', and 'weight',
-        representing the edge list of the graph.
+      pd.DataFrame:
+        A DataFrame with columns 'pre', 'post', and 'weight', representing the edge list
+        of the graph.
     """
     if threshold is not None:
         adjacency = adjacency.where(adjacency >= threshold, 0)
@@ -259,8 +264,8 @@ def modify_coo_matrix(
         update mode.
 
     Returns:
-        coo_matrix or csr_matrix: The updated sparse matrix, in the same format
-        as the input.
+        coo_matrix or csr_matrix:
+            The updated sparse matrix, in the same format as the input.
     """
 
     if not issparse(sparse_matrix):
@@ -471,8 +476,8 @@ def to_nparray(input_data: arrayable, unique: bool = True) -> npt.NDArray:
             to True. NOTE: np.unique() sorts the array.
 
     Returns:
-        numpy.ndarray: A unique numpy array created from the input data, with
-            all NaN values removed.
+        numpy.ndarray:
+            A unique numpy array created from the input data, with all NaN values removed.
     """
     # First, ensure the input is in array form and convert pd.Series to
     # np.ndarray
@@ -557,7 +562,8 @@ def get_ngl_link(
         height (int, optional): The height of the Neuroglancer scene. Default to 800.
 
     Returns:
-        str: A URL to the generated Neuroglancer scene.
+        str:
+            A URL to the generated Neuroglancer scene.
 
     Note:
         The function assumes that the 'scene1' variable is defined in the
@@ -784,10 +790,10 @@ def get_activations(
             column is specified by the column index. Defaults to None.
 
     Returns:
-        dict: A dictionary where each key is a column index and each value is
-        a nested dictionary of neuron identifiers and their activations, for
-        those activations that are either in the top n, above the threshold,
-        or both.
+        dict:
+            A dictionary where each key is a column index and each value is a nested
+            dictionary of neuron identifiers and their activations, for those
+            activations that are either in the top n, above the threshold, or both.
 
     Note:
         The `global_indices` have to be in the same order as the indices in
@@ -967,8 +973,9 @@ def plot_layered_paths(
         node_size (int, optional): The size of the nodes in the plot. Defaults to 500.
 
     Returns:
-        None: This function does not return a value. It generates a plot using
-            matplotlib or pyvis.
+        None:
+            This function does not return a value. It generates a plot using matplotlib
+            or pyvis.
 
     Note:
         If 'pre_layer' and 'post_layer' columns are not in the dataframe, they will be
@@ -1379,7 +1386,8 @@ def change_model_weights(model, df, mode, coefficient=0.1, offset=0, normalise=T
             Default to True.
 
     Returns:
-        None: This function modifies the model weights in place.
+        None:
+            This function modifies the model weights in place.
     """
 
     if "conditional" in df.columns:
@@ -1468,8 +1476,9 @@ def count_keys_per_value(d):
         d (dict): The input dictionary.
 
     Returns:
-        dict: A dictionary where each key is a value from the input dictionary,
-        and each value is the number of keys that map to that value.
+        dict:
+            A dictionary where each key is a value from the input dictionary, and each
+            value is the number of keys that map to that value.
     """
     value_counts = defaultdict(int)
     for value in d.values():
@@ -1496,11 +1505,11 @@ def sc_connectivity_summary(df, inidx_map=None, outidx_map=None):
             as group identifiers. Defaults to None.
 
     Returns:
-        pd.DataFrame: A DataFrame, with values in `outidx_map` as column names.
-            Row indices are a subset of the original row indices: the top input
-            in each group. The values in the dataframe are the sum of the
-            weights from each `inidx_map` group to an average member of the
-            `outidx_map` group.
+        pd.DataFrame:
+            A DataFrame, with values in `outidx_map` as column names. Row indices are a
+            subset of the original row indices: the top input in each group. The values
+            in the dataframe are the sum of the weights from each `inidx_map` group to
+            an average member of the `outidx_map` group.
 
     """
 
@@ -1545,7 +1554,8 @@ def check_consecutive_layers(df):
         df (pd.DataFrame): A DataFrame containing the column 'layer' (integer).
 
     Returns:
-        bool: True if the layers are consecutive, False otherwise
+        bool:
+            True if the layers are consecutive, False otherwise
     """
 
     all_layers = sorted(df["layer"].unique())
@@ -1570,7 +1580,8 @@ def display_df(df, cmap="Blues", vmin=None, vmax=None):
             the maximum value of the DataFrame is used. Defaults to None.
 
     Returns:
-        None: This function displays the DataFrame using the `display` function
+        None:
+            This function displays the DataFrame using the `display` function
     """
     if vmin is None:
         vmin = df.min().min()
@@ -1643,8 +1654,9 @@ def compare_connectivity(
             Possible values are 'row' and 'column'. Defaults to 'column'.
 
     Returns:
-        pd.DataFrame: A DataFrame containing the connectivity values from the
-            two matrices, with columns suffixed by the values in `suffices`.
+        pd.DataFrame:
+            A DataFrame containing the connectivity values from the two matrices, with
+            columns suffixed by the values in `suffices`.
 
     """
 
@@ -1741,8 +1753,11 @@ def make_grid_inputs(
             to 1.0.
 
     Returns:
-        torch.Tensor: A tensor of shape (grid_size**2, len(v1), num_layers).
-        list: A list of grid coordinates.
+        tuple:
+            torch.Tensor:
+                A tensor of shape (grid_size**2, len(v1), num_layers).
+            list:
+                A list of grid coordinates.
     """
     # first convert to np array
     v1 = to_nparray(v1, unique=False)
@@ -1796,8 +1811,9 @@ def output_grid_data(
         selected_index (arrayable): The index or indices to extract.
 
     Returns:
-        list: A list of length `num_layers` of mean values with shape
-            (grid_size, grid_size) for the selected indices.
+        list:
+            A list of length `num_layers` of mean values with shape (grid_size,
+            grid_size) for the selected indices.
     """
 
     selected_index = to_nparray(selected_index)
@@ -1850,7 +1866,8 @@ def plot_output_grid(
         fmt (str, optional): The format of the values. Defaults to '.2f'.
 
     Returns:
-        None: This function displays the plot.
+        None:
+            This function displays the plot.
     """
     selected_index = to_nparray(selected_index)
 
@@ -1905,7 +1922,8 @@ def pytorch_sparse_to_scipy(sparse_tensor, scipy_format="csr"):
             'csr', 'csc', 'coo'.
 
     Returns:
-        scipy.sparse.csr_matrix: SciPy CSR sparse matrix
+        scipy.sparse.csr_matrix:
+            SciPy CSR sparse matrix
     """
     assert sparse_tensor.is_sparse, "Input tensor must be sparse"
 
@@ -1941,7 +1959,8 @@ def scipy_sparse_to_pytorch(
             to GPU if available, otherwise CPU.
 
     Returns:
-        torch.sparse.Tensor: PyTorch sparse tensor
+        torch.sparse.Tensor:
+            PyTorch sparse tensor
     """
     # Convert to COO format if not already
     coo = scipy_sparse.tocoo()

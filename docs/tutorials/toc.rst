@@ -9,3 +9,4 @@ How is it done?
    path_finding
    simple_model
    act_max
+   saliency

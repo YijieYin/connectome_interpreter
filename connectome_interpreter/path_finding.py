@@ -57,8 +57,9 @@ def find_path_once(
         from inidx to an average outidx.
 
     Returns:
-      np.ndarray: An array of neuron indices in the previous layer that have
-        significant connectivity, connecting between the `inidx` and `outidx`.
+      np.ndarray:
+        An array of neuron indices in the previous layer that have significant
+        connectivity, connecting between the `inidx` and `outidx`.
     """
 
     inprop_csc = inprop.copy()
@@ -172,7 +173,8 @@ def find_paths_of_length(
         target_layer_number = 1, we are looking at the direct synaptic connectivity.
 
     Returns:
-      pd.DataFrame: A DataFrame containing the path data, including the pre-synaptic and
+      pd.DataFrame:
+        A DataFrame containing the path data, including the pre-synaptic and
         post-synaptic neuron indices, the layer (direct connections from inidx: layer =
         1), and the weight (input proportion of the postsynaptic neuron) of the direct
         connection between pre and post. If no path is found, returns None.
@@ -326,9 +328,10 @@ def enumerate_paths(
         Useful for large graphs to avoid memory issues. Defaults to False.
 
     Returns:
-      Union[List[List[Tuple]], Generator]: If return_generator is False, returns a list
-        of valid paths. If True, returns a generator. Each path is a list of
-        (pre, post, weight) tuples, ordered from start to end.
+      Union[List[List[Tuple]], Generator]:
+        If return_generator is False, returns a list of valid paths. If True, returns a
+        generator. Each path is a list of (pre, post, weight) tuples, ordered from start
+        to end.
     """
     if end_layer is None:
         end_layer = edgelist["layer"].max()
@@ -423,11 +426,11 @@ def find_path_iteratively(
       quiet (bool, optional): If True, suppresses print statements. Defaults to False.
 
     Returns:
-        pd.DataFrame: A DataFrame containing the path data, including the
-            pre-synaptic and post-synaptic neuron indices, the layer (direct
-            connections from inidx: layer = 1), and the weight (input
-            proportion of the postsynaptic neuron) of the direct connection
-            between pre and post.
+        pd.DataFrame:
+            A DataFrame containing the path data, including the pre-synaptic and
+            post-synaptic neuron indices, the layer (direct connections from inidx:
+            layer = 1), and the weight (input proportion of the postsynaptic neuron) of
+            the direct connection between pre and post.
     """
 
     if not quiet:
@@ -592,9 +595,9 @@ def remove_excess_neurons(
             target in the last layer. Defaults to False.
 
     Returns:
-        pd.Dataframe: a dataframe with similar structure as the result of
-        `find_paths_of_length()`, with the excess neurons removed. If no path is found,
-        returns None.
+        pd.Dataframe:
+            A dataframe with similar structure as the result of `find_paths_of_length()`,
+            with the excess neurons removed. If no path is found, returns None.
     """
 
     if df.shape[0] == 0:
@@ -810,8 +813,9 @@ def remove_excess_neurons_batched(
         quiet (bool, optional): If True, suppresses print statements. Defaults to False.
 
     Returns:
-        pd.DataFrame: The filtered DataFrame containing the path data, including the
-            layer number, pre-synaptic index, post-synaptic index, and weight
+        pd.DataFrame:
+            The filtered DataFrame containing the path data, including the layer number,
+            pre-synaptic index, post-synaptic index, and weight
     """
     # first check if 'batch' is in the columns
     if "batch" not in df.columns:
@@ -851,8 +855,9 @@ def filter_paths(
             list, set, numpy.ndarray, or pandas.Series). Defaults to None.
 
     Returns:
-        pd.DataFrame: The filtered DataFrame containing the path data, including the
-            layer number, pre-synaptic index, post-synaptic index, and weight.
+        pd.DataFrame:
+            The filtered DataFrame containing the path data, including the layer number,
+            pre-synaptic index, post-synaptic index, and weight.
     """
     if df.shape[0] == 0:
         if quiet:
@@ -945,9 +950,9 @@ def group_paths(
             or outputs (outprop=True). Can be 'sum', 'mean', or 'median'. Defaults to
             'mean'.
     Returns:
-        pd.DataFrame: The grouped DataFrame containing the path data,
-            including the layer number, pre-synaptic index, post-synaptic
-            index, and weight.
+        pd.DataFrame:
+            The grouped DataFrame containing the path data, including the layer number,
+            pre-synaptic index, post-synaptic index, and weight.
     """
     # if path is empty, return it directly
     if paths is None or paths.shape[0] == 0:
@@ -1405,9 +1410,9 @@ def path_for_ngl(path):
             weight.
 
     Returns:
-        pd.DataFrame: A DataFrame with columns 'neuron_id', 'layer', and
-            'activation' (which is (indirect) connectivity in this case),
-            suitable for Neuroglancer visualization.
+        pd.DataFrame:
+            A DataFrame with columns 'neuron_id', 'layer', and 'activation' (which is
+            (indirect) connectivity in this case), suitable for Neuroglancer visualization.
     """
 
     out = []
@@ -1463,7 +1468,8 @@ def connected_components(
             direct connection between pre and post. Defaults to 0.
 
     Returns:
-        list: A list of DataFrames, each representing a connected component
+        list:
+            A list of DataFrames, each representing a connected component
             in the directed graph.
     """
     paths = filter_paths(paths, threshold)
@@ -1548,10 +1554,11 @@ def el_within_n_steps(
         quiet (bool, optional): If True, suppresses output messages. Defaults to False.
 
     Returns:
-        pd.DataFrame: A DataFrame containing the edges of the paths found, including
-        columns 'pre', 'post', and 'weight'. If `return_raw_el` is True, returns a
-        tuple of two DataFrames: the first is the grouped edges, and the second is the
-        raw edges before grouping. If not paths are found, returns None.
+        pd.DataFrame or tuple:
+            A DataFrame containing the edges of the paths found, including columns 'pre',
+            'post', and 'weight'. If `return_raw_el` is True, returns a tuple of two
+            DataFrames: the first is the grouped edges, and the second is the raw edges
+            before grouping. If not paths are found, returns None.
     """
 
     inidx = to_nparray(inidx)
@@ -1622,8 +1629,9 @@ def find_shortest_paths(
         end_nodes (list): List of 'post' groups.
 
     Returns:
-        list: A list of shortest paths, where each path is a list of groups
-            that connect the start and end nodes (ordered from start to end).
+        list:
+            A list of shortest paths, where each path is a list of groups that connect
+            the start and end nodes (ordered from start to end).
     """
 
     if paths.shape[0] == 0:
@@ -1698,18 +1706,21 @@ def count_paths(
       start_layer (int): Starting layer.
       end_layer (int): Ending layer. If None, uses max layer.
       loop_mode (str, optional): How to handle loops in paths. Options:
+
         - "allow" (default): Count all paths including those with loops.
         - "exclude": Count only loop-free paths.
         - "both": Return tuple (count_with_loops, count_without_loops) computed
           efficiently in a single DFS pass.
+
         Note: a node appearing at both the start and end of a path is allowed
         (e.g., A-B-C-D-A is not considered a loop), but a node appearing again
         in the middle is a loop (e.g., A-B-C-A-A has a loop).
 
     Returns:
-      int or tuple: If loop_mode is "allow" or "exclude", returns an int with the
-        total number of valid paths. If loop_mode is "both", returns a tuple
-        (count_with_loops, count_without_loops).
+      int or tuple:
+        If loop_mode is "allow" or "exclude", returns an int with the total number of
+        valid paths. If loop_mode is "both", returns a tuple (count_with_loops,
+        count_without_loops).
     """
     if end_layer is None:
         end_layer = edgelist["layer"].max()
