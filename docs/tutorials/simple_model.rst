@@ -1,7 +1,7 @@
 A rate model of the connectome 
 =====================================
 
-Following the thinking process of a "typical neuroscientist", we construct the model with the following assumptions:
+Following the thinking process of a "typical neuroscientist", we construct a rate model (`Miller & Fumarola 2012 <https://direct.mit.edu/neco/article-abstract/24/1/25/7727/Mathematical-Equivalence-of-Two-Common-Forms-of?redirectedFrom=fulltext>`_) with the following assumptions:
 
 - Signals pass in a stepwise manner from one neuron to another through the synapses. So target neurons multiple synaptic hops away are reached later than those one synaptic hop away.
 - Excitation and inhibition take the same time to propagate (that is, one step). 
