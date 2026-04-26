@@ -2326,6 +2326,7 @@ def input_from_df(
     idx_to_group: dict,
     num_layers: int,
     timepoints: Union[int, List[int], np.ndarray, set] = 0,
+    dtype: type = np.float32,
 ) -> np.ndarray:
     """
     Make well-formatted input for the model, based on defined vectors of
@@ -2349,6 +2350,10 @@ def input_from_df(
             glomerulus they innervate (rows of df).
         num_layers : int
             The number of layers in the model.
+        timepoints : int or list or np.ndarray or set, optional
+            The timepoints to put the input in. For instance, if timepoints=[0, 1], then the same input will be put in timepoint 0 and 1. Defaults to 0.
+        dtype : type, optional
+            The data type of the output array. Defaults to np.float32.
 
     Returns:
         np.ndarray:
@@ -2356,7 +2361,7 @@ def input_from_df(
 
     """
     # first initialise empty input
-    inarray = np.zeros((df.shape[1], len(sensory_indices), num_layers))
+    inarray = np.zeros((df.shape[1], len(sensory_indices), num_layers), dtype=dtype)
 
     # Ensure timepoints is iterable
     if isinstance(timepoints, int):
