@@ -1,50 +1,61 @@
 ![Build](https://img.shields.io/github/actions/workflow/status/YijieYin/connectome_interpreter/python-app.yml?branch=main)&emsp;
 ![PyPI](https://img.shields.io/pypi/v/connectome_interpreter)&emsp;
 ![Docs](https://readthedocs.org/projects/connectome-interpreter/badge/?version=latest)&emsp;
-[![PyPI Downloads](https://static.pepy.tech/badge/connectome-interpreter)](https://pepy.tech/projects/connectome-interpreter)  
-This package is intended to be used for interpreting connectomics data. 
+[![PyPI Downloads](https://static.pepy.tech/badge/connectome-interpreter)](https://pepy.tech/projects/connectome-interpreter)
 
-To install: 
+`connectome_interpreter` turns synaptic wiring diagrams into testable hypotheses about circuit function. It runs comfortably on a laptop or in Colab, including for whole-brain analyses on connectomes of ~140,000 neurons.
+
 ```
 pip install connectome-interpreter
 ```
-Or to install the bleeding edge development version: 
+
+For the bleeding-edge version: 
 ```
 pip install git+https://github.com/YijieYin/connectome_interpreter.git
 ```
 
-Documentation [here](https://connectome-interpreter.readthedocs.io/en/latest/) (with some text snippets explaining various things). 
+# What's inside
 
-# Example notebooks 
-## maleCNS, BANC, FAFB/FlyWire, Hemibrain, MANC altogether 
-maleCNS obtained from [Berg et al. 2025](https://www.biorxiv.org/content/10.1101/2025.10.09.680999v2), BANC from [Bates et al. 2025](https://www.biorxiv.org/content/10.1101/2025.07.31.667571v1), FAFB/FlyWire listed below, Hemibrain from [Scheffer et al. 2020](https://doi.org/10.7554/eLife.57443), and MANC (male adult nerve cord) from [Cheong et al. 2025](https://www.biorxiv.org/content/10.1101/2023.06.07.543976v3), [Marin et al. 2024](https://www.biorxiv.org/content/10.1101/2023.06.05.543407v2), and [Takemura et al. 2024](https://elifesciences.org/reviewed-preprints/97769).
-- [single-neuron level](https://colab.research.google.com/drive/1ODzTLxnHRZOCcs0jUO4ZAvCg_Ax0qrSP?usp=sharing)
+- **Effective connectivity** — polysynaptic connectivity strength between any two groups of neurons, with or without excitation/inhibition (`compress_paths`, `compress_paths_signed`, `effective_conn_from_paths`, `signed_effective_conn_from_paths`).
+- **Path-finding** — retrieve the actual subcircuit between sources and targets, group, filter, and plot (`find_paths_of_length`, `el_within_n_steps`, `group_paths`, `filter_paths`, `plot_paths`).
+- **Differentiable connectome model** — a simple firing-rate model layered onto the connectome, with per-cell-type slopes, biases, time constants, and divisive normalisation (`MultilayeredNetwork`).
+- **Gradient methods** — activation maximisation (find the input that activates a target), saliency and `get_gradients` (find which inputs or intermediates matter for a stimulus), and `train_model` (fit parameters to data).
+- **Visualisation** — interactive wiring diagrams, hex-eye and Mollweide receptive fields ([Zhao et al. 2025](https://www.nature.com/articles/s41586-025-09276-5)), [neuroglancer](https://github.com/google/neuroglancer) scenes (`plot_paths`, `hex_heatmap`, `plot_mollweide_projection`, `get_ngl_link`).
+- **Resources** — a community-curated [table of fly cell types with experimentally tested functions](https://tinyurl.com/known-neuron-function), and bundled published odour-response datasets (`load_dataset`).
 
-## Full Adult Fly Brain (FAFB/FlyWire)
-Data obtained from [Dorkenwald et al. 2024](https://www.nature.com/articles/s41586-024-07558-y), [Schlegel et al. 2024](https://www.nature.com/articles/s41586-024-07686-5), and [Matsliah et al. 2024](https://www.nature.com/articles/s41586-024-07981-1). To visualise the neurons, you can use this url: [https://tinyurl.com/flywire783](https://tinyurl.com/flywire783). By using the connectivity information, you agree to follow the [FlyWire citation guidelines and principles](https://codex.flywire.ai/api/download).
-  - [central brain, single-neuron level](https://colab.research.google.com/drive/1_beqiKPX8pC7---DWepKO8dEv1sJ2vA4?usp=sharing) (recommended. Shows a variety of capabilities)
-  - [full brain, single-neuron level](https://colab.research.google.com/drive/1wHah__f5XP7hKRtZ71ObVlLkUNZGsoz1?usp=sharing)
+Full documentation: [connectome-interpreter.readthedocs.io](https://connectome-interpreter.readthedocs.io/en/latest/).
 
-## MaleCNS 
-Data obtained from [neuPrint](https://neuprint.janelia.org/?dataset=optic-lobe%3Av1.0&qt=findneurons) and [Nern et al. 2024](https://www.biorxiv.org/content/10.1101/2024.04.16.589741v2), with the help of [neuprint-python](https://connectome-neuprint.github.io/neuprint-python/docs/). 
-- [Optic lobe, single-neuron level](https://colab.research.google.com/drive/1qEmO1tOOjSksa41OZ4_mX7KnJ8vBsvLU?usp=sharing)
+# Tutorial notebooks
 
-## Larva 
-Data from [Winding et al. 2023](https://www.science.org/doi/10.1126/science.add9330). You can also e.g. visualise the neurons in 3D in [catmaid](https://catmaid.virtualflybrain.org/).
-- [single-neuron level](https://colab.research.google.com/drive/1VIMNFBp7dCgN5XOQ9vvzPaqb80BGPZx4?usp=sharing) 
+A three-notebook tour using the FAFB/FlyWire connectome ([Dorkenwald et al. 2024](https://www.nature.com/articles/s41586-024-07558-y), [Schlegel et al. 2024](https://www.nature.com/articles/s41586-024-07686-5)) — open in Colab, no local install needed:
 
-# Mapping known to unknown 
-To facilitate neural circuit interpretation, we compile a [list](https://docs.google.com/spreadsheets/d/1VHCEnurOdb4FDC_NUKZX_BpBckQ9LpKxv0CsK_ObVok/edit?usp=sharing) of cell types with known, *experimentally tested*, functions. [This example notebook](https://colab.research.google.com/drive/1oETJthJbdLEBhzApEbRynGxTMrOcwsf-?usp=sharing) uses this list for query of neuron receptive field. The list aims to serve as a quick look-up of literature, instead of a stipulation of neural function. 
-- **Everyone is given edit access, to help make the list more comprehensive and correct, and to make sure the publications you care about are cited correctly. Your contributions would be much appreciated. Please handle with care.**
-- When multiple entries are to be added in the same cell (e.g. when multiple publications are related to the same cell type), please separate the entries with `; ` (semicolon + space), to facilitate programmatic access. 
+1. [**Linear methods**](https://colab.research.google.com/drive/145Td8_fFTPwTsDdEkQGAgdZ7CFQ8qXnr) — effective connectivity, path-finding, visual receptive fields.
+2. [**Modelling**](https://colab.research.google.com/drive/1PcwEBaqwtak1YkhHdlrhkmFyMmMwJIVF) — running the differentiable model upon odour input.
+3. [**Gradient methods**](https://colab.research.google.com/drive/1mmgW5Od2aB6MylfABs5sEZNLrcUK3Ws1) — activation maximisation, saliency, and training to experimental data.
 
-# Structure-function relationship 
-Using `connectome_interpreter`, we compare the published connectomes against published experimental papers: 
-- [Taisz et al. 2023](https://colab.research.google.com/drive/1WNNnNCjTey-iSlHPkxMlr_EaLsRMs9iX?usp=drive_link): Generating parallel representations of position and identity in the olfactory system ([paper](https://www.cell.com/cell/abstract/S0092-8674(23)00472-5))
-- [Huoviala et al. 2020](https://colab.research.google.com/drive/1EyrGWO7MqpCZLvT2h4RyT4SaQy2fwYQT?usp=sharing): Neural circuit basis of aversive odour processing in Drosophila from sensory input to descending output ([paper](https://www.biorxiv.org/content/10.1101/394403v2))
-- [Frechter et al. 2019](https://colab.research.google.com/drive/1cSWNUdaU8Pll77eh4kOEz-NmrKHLnj-K?usp=sharing): Functional and anatomical specificity in a higher olfactory centre ([paper](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6550879/))
-- [Olsen et al. 2010](https://colab.research.google.com/drive/1dA5GTHg25S3Mc9CBtexplfjk1z1kM04V?usp=sharing): Divisive normalization in olfactory population codes ([paper](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2866644/))
+Each notebook also loads BANC ([Bates et al. 2025](https://www.biorxiv.org/content/10.1101/2025.07.31.667571v1)), maleCNS ([Berg et al. 2025](https://www.biorxiv.org/content/10.1101/2025.10.09.680999v2)), hemibrain ([Scheffer et al. 2020](https://elifesciences.org/articles/57443)), and MANC ([Cheong et al. 2025](https://www.biorxiv.org/content/10.1101/2023.06.07.543976v3); [Marin et al. 2024](https://www.biorxiv.org/content/10.1101/2023.06.05.543407v2); [Takemura et al. 2024](https://elifesciences.org/reviewed-preprints/97769)) so you can swap connectomes by changing one variable.
 
-# Notes 
-- Pre-processed connectomics data (and scripts used for pre-processing) are [here](https://github.com/YijieYin/connectome_data_prep/tree/main), in `scipy.sparse.matrix` (`.npz`) format for the adjacency matrices; and in `.csv` for the metadata.
-- For dataset requests / feature requests / feedback, please make an issue or email me at `yy432`at`cam.ac.uk` :). 
+A separate notebook covers the [larval connectome](https://colab.research.google.com/drive/1VIMNFBp7dCgN5XOQ9vvzPaqb80BGPZx4?usp=sharing) ([Winding et al. 2023](https://www.science.org/doi/10.1126/science.add9330); 3D viewer: [catmaid](https://catmaid.virtualflybrain.org/)).
+
+# Mapping known to unknown
+
+To facilitate neural circuit interpretation, we maintain a [list of cell types with known, *experimentally tested* functions](https://tinyurl.com/known-neuron-function). [This example notebook](https://colab.research.google.com/drive/1oETJthJbdLEBhzApEbRynGxTMrOcwsf-?usp=sharing) uses the list to query receptive fields. The list is a quick look-up of literature, not a stipulation of neural function.
+
+- **Everyone has edit access** — please help make the list more comprehensive and correct, and check that the publications you care about are cited correctly. Handle with care.
+- When adding multiple entries to one cell (e.g. several papers per cell type), separate them with `; ` (semicolon + space) for programmatic access.
+
+<!--
+# Structure-function relationships
+
+Notebooks comparing published connectomes against published experimental papers:
+
+- [Taisz et al. 2023](https://colab.research.google.com/drive/1WNNnNCjTey-iSlHPkxMlr_EaLsRMs9iX?usp=drive_link) — parallel representations of position and identity in the olfactory system ([paper](https://www.cell.com/cell/abstract/S0092-8674(23)00472-5))
+- [Huoviala et al. 2020](https://colab.research.google.com/drive/1EyrGWO7MqpCZLvT2h4RyT4SaQy2fwYQT?usp=sharing) — neural circuit basis of aversive odour processing ([paper](https://www.biorxiv.org/content/10.1101/394403v2))
+- [Frechter et al. 2019](https://colab.research.google.com/drive/1cSWNUdaU8Pll77eh4kOEz-NmrKHLnj-K?usp=sharing) — functional and anatomical specificity in a higher olfactory centre ([paper](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6550879/))
+- [Olsen et al. 2010](https://colab.research.google.com/drive/1dA5GTHg25S3Mc9CBtexplfjk1z1kM04V?usp=sharing) — divisive normalization in olfactory population codes ([paper](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2866644/))
+-->
+
+# Notes
+
+- Pre-processed connectomics data and pre-processing scripts are at [connectome_data_prep](https://github.com/YijieYin/connectome_data_prep/tree/main): adjacency matrices in `scipy.sparse` (`.npz`), metadata in `.csv`.
+- Dataset requests, feature requests, feedback: open an issue, or email `yy432`at`cam.ac.uk` :).
