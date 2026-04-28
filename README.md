@@ -1,7 +1,8 @@
 ![Build](https://img.shields.io/github/actions/workflow/status/YijieYin/connectome_interpreter/python-app.yml?branch=main)&emsp;
 ![PyPI](https://img.shields.io/pypi/v/connectome_interpreter)&emsp;
 ![Docs](https://readthedocs.org/projects/connectome-interpreter/badge/?version=latest)&emsp;
-[![PyPI Downloads](https://static.pepy.tech/badge/connectome-interpreter)](https://pepy.tech/projects/connectome-interpreter)
+[![PyPI Downloads](https://static.pepy.tech/badge/connectome-interpreter)](https://pepy.tech/projects/connectome-interpreter)&emsp;
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/145Td8_fFTPwTsDdEkQGAgdZ7CFQ8qXnr)
 
 `connectome_interpreter` turns synaptic wiring diagrams into testable hypotheses about circuit function. It runs comfortably on a laptop or in Colab, including for whole-brain analyses on connectomes of ~140,000 neurons.
 
