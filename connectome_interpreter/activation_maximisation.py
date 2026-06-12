@@ -1509,6 +1509,9 @@ def train_model(
                 [p for p in model.parameters() if p.requires_grad], max_norm=1.0
             )
             optimizer.step()
+            if train_slopes:
+                with torch.no_grad():
+                    model.slope.clamp_(min=1e-6)
 
             # validation loss
             with torch.no_grad():
