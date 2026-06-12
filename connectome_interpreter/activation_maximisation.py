@@ -2521,6 +2521,7 @@ def get_activations_for_path(
     sensory_indices: arrayable | None = None,
     idx_to_group: dict | None = None,
     activation_start: int = 0,
+    aggregate: str | None = None,
 ) -> pd.DataFrame:
     """
     Get the activations for the pre and post neurons in the path, based on
@@ -2530,12 +2531,15 @@ def get_activations_for_path(
         path (pd.DataFrame): A dataframe representing the paths in the network.
             Each row is a connection, with columns for 'pre' and 'post' neuron
             indices, and 'layer'.
-        activations (torch.Tensor | numpy.ndarray): The activations of the
-            model. Shape should be (num_neurons, num_layers).
+        activations (torch.Tensor | numpy.ndarray): The activations of the model. 
+            Shape should be (num_neurons, num_layers). If the shape is (num_neurons, 1)
+            or (num_neurons,), then the same activation will be used for all layers in 
+            the path.
         model_in (torch.Tensor | numpy.ndarray): The input to the model. Shape
             should be (num_neurons, something) -  only the first column
             (num_neurons, 0), is used, when there is 1 in 'layer' in `path`. It
-            is otherwise not used.
+            is otherwise not used. Note: if aggregate is not None, then the input will 
+            be ignored. 
         sensory_indices (arrayable): The indices of sensory neurons.
         idx_to_group (dict, optional): A dictionary mapping indices from the
             model to the groups in path (e.g. cell type). Defaults to None.
@@ -2546,6 +2550,10 @@ def get_activations_for_path(
             path.pre[path.layer == 1], set activation_start = 2. If you want
             the last timepoint to correspond to the last layer in path, set
             activation_start = activations.shape[1] - path.layer.max().
+        aggregate (str or None, optional): Whether to aggregate activations across time 
+            first before mapping to path. If e.g. 'mean', will take the mean across 
+            timepoints. If None (default), each layer in the path corresponds to one 
+            timepoint in the activations. 
 
     Returns:
         pd.DataFrame:
@@ -2557,6 +2565,14 @@ def get_activations_for_path(
         activations = activations.cpu().detach().numpy()
     if isinstance(model_in, torch.Tensor):
         model_in = model_in.cpu().detach().numpy()
+    
+    # single column = already aggregated; otherwise aggregate across time if requested
+    if activations.ndim == 1:
+        activations = activations[:, None]
+    aggregated = aggregate is not None or activations.shape[1] == 1
+    if aggregate is not None and activations.shape[1] > 1:
+        fn = aggregate if callable(aggregate) else getattr(np, aggregate)
+        activations = np.asarray(fn(activations, axis=1)).reshape(-1, 1)
 
     if idx_to_group is not None:
         # turn value into string
@@ -2574,7 +2590,7 @@ def get_activations_for_path(
         # pre activations
         prenodes = set(layer_path.pre)
         pre_indices = [idx for idx, group in idx_to_group.items() if group in prenodes]
-        if l == 1:
+        if l == 1 and not aggregated:
             # raise error if sensory_indices or model_in doesn't exist
             if sensory_indices is None or model_in is None:
                 raise ValueError(
@@ -2585,7 +2601,7 @@ def get_activations_for_path(
             local_indices = [global2local[idx] for idx in pre_indices]
             pre_activations = model_in[local_indices, 0]
         else:
-            pre_activations = activations[pre_indices, l - 2]
+            pre_activations = activations[pre_indices, 0 if aggregated else l - 2]
         pre_group_act = pd.DataFrame(
             {"idx": pre_indices, "activation": pre_activations}
         )
@@ -2598,7 +2614,7 @@ def get_activations_for_path(
         post_indices = [
             idx for idx, group in idx_to_group.items() if group in postnodes
         ]
-        post_activations = activations[post_indices, l - 1]
+        post_activations = activations[post_indices, 0 if aggregated else l - 1]
         post_group_act = pd.DataFrame(
             {"idx": post_indices, "activation": post_activations}
         )

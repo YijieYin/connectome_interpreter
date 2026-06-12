@@ -18,6 +18,7 @@ from connectome_interpreter.activation_maximisation import (
     guess_optimal_stimulus,
     training_mode,
     train_model,
+    get_activations_for_path
 )
 
 
@@ -3273,6 +3274,97 @@ class TestMultiGroupDivnorm(unittest.TestCase):
         self.assertEqual(model.divisive_strength.numel(), 1)
         # all divnorm edges point at the single strength parameter
         self.assertTrue(torch.all(model.edge_pre_param_idx == 0))
+
+class TestGetActivationsForPath(unittest.TestCase):
+    def setUp(self):
+        self.num_neurons = 6
+        self.num_layers = 3
+        self.sensory_indices = [0, 1, 2]
+        # deterministic activations, shape (num_neurons, num_layers)
+        self.activations = np.arange(
+            self.num_neurons * self.num_layers, dtype=float
+        ).reshape(self.num_neurons, self.num_layers)
+        # model_in shape (num_sensory, k); only column 0 used
+        self.model_in = np.array([[10.0, 0], [20.0, 0], [30.0, 0]])
+        # path: layer1: 0->3, 1->4 ; layer2: 3->5
+        self.path = pd.DataFrame(
+            {"pre": [0, 1, 3], "post": [3, 4, 5], "layer": [1, 1, 2]}
+        )
+
+    def _row(self, out, pre, post):
+        r = out[(out.pre == pre) & (out.post == post)].iloc[0]
+        return r.pre_activation, r.post_activation
+
+    def test_non_aggregated(self):
+        out = get_activations_for_path(
+            self.path, self.activations, self.model_in, self.sensory_indices
+        )
+        # layer1 pre from model_in[:,0]; post from activations[:,0]
+        pre, post = self._row(out, 0, 3)
+        self.assertEqual(pre, 10.0)                      # model_in[0,0]
+        self.assertEqual(post, self.activations[3, 0])
+        pre, post = self._row(out, 1, 4)
+        self.assertEqual(pre, 20.0)                      # model_in[1,0]
+        self.assertEqual(post, self.activations[4, 0])
+        # layer2 pre from activations[:,0], post from activations[:,1]
+        pre, post = self._row(out, 3, 5)
+        self.assertEqual(pre, self.activations[3, 0])
+        self.assertEqual(post, self.activations[5, 1])
+        self.assertEqual(sorted(out.layer.unique()), [1, 2])
+
+    def test_layer1_requires_model_in(self):
+        with self.assertRaises(ValueError):
+            get_activations_for_path(self.path, self.activations)
+
+    def test_aggregate_mean_ignores_model_in(self):
+        out = get_activations_for_path(
+            self.path, self.activations, model_in=None,
+            sensory_indices=None, aggregate="mean"
+        )
+        means = self.activations.mean(axis=1)
+        # layer1 pre now from aggregated activations, not model_in
+        pre, post = self._row(out, 0, 3)
+        self.assertAlmostEqual(pre, means[0])
+        self.assertAlmostEqual(post, means[3])
+        # layer2 also uses same aggregated column
+        pre, post = self._row(out, 3, 5)
+        self.assertAlmostEqual(pre, means[3])
+        self.assertAlmostEqual(post, means[5])
+
+    def test_aggregate_callable(self):
+        out = get_activations_for_path(
+            self.path, self.activations, aggregate=lambda a, axis: a.max(axis=axis)
+        )
+        mx = self.activations.max(axis=1)
+        pre, post = self._row(out, 3, 5)
+        self.assertAlmostEqual(pre, mx[3])
+        self.assertAlmostEqual(post, mx[5])
+
+    def test_single_column_pre_aggregated(self):
+        single = self.activations.mean(axis=1, keepdims=True)  # (num_neurons, 1)
+        out = get_activations_for_path(self.path, single)
+        pre, post = self._row(out, 0, 3)
+        self.assertAlmostEqual(pre, single[0, 0])
+        self.assertAlmostEqual(post, single[3, 0])
+        pre, post = self._row(out, 3, 5)
+        self.assertAlmostEqual(pre, single[3, 0])
+        self.assertAlmostEqual(post, single[5, 0])
+
+    def test_1d_activations_treated_as_aggregated(self):
+        vec = self.activations.mean(axis=1)  # shape (num_neurons,)
+        out = get_activations_for_path(self.path, vec)
+        pre, post = self._row(out, 1, 4)
+        self.assertAlmostEqual(pre, vec[1])
+        self.assertAlmostEqual(post, vec[4])
+
+    def test_torch_input(self):
+        out = get_activations_for_path(
+            self.path, torch.tensor(self.activations),
+            torch.tensor(self.model_in), self.sensory_indices
+        )
+        pre, post = self._row(out, 0, 3)
+        self.assertEqual(pre, 10.0)
+        self.assertEqual(post, self.activations[3, 0])
 
 
 if __name__ == "__main__":
