@@ -2572,6 +2572,10 @@ def get_activations_for_path(
     # single column = already aggregated; otherwise aggregate across time if requested
     if activations.ndim == 1:
         activations = activations[:, None]
+    if activations.ndim > 2:
+        raise ValueError(
+            f"activations must be 1D or 2D, but got shape {activations.shape}."
+        )
     aggregated = aggregate is not None or activations.shape[1] == 1
     if aggregate is not None and activations.shape[1] > 1:
         fn = aggregate if callable(aggregate) else getattr(np, aggregate)
@@ -2633,6 +2637,77 @@ def get_activations_for_path(
     # reset layer numbers
     out.loc[:, ["layer"]] -= activation_start
     return out
+
+
+def get_activations_for_el(
+    el: pd.DataFrame,
+    activations: torch.Tensor | npt.NDArray,
+    idx_to_group: dict | None = None,
+    aggregate: str | None = None,
+) -> pd.DataFrame:
+    """
+    Add node activations to an edgelist with non-discrete (continuous) layers,
+    such as the output of `external_paths.layered_el()` (columns 'pre', 'post',
+    'pre_layer', 'post_layer'). Written by Claude, adapted from 
+    `get_activations_for_path()`.
+
+    Unlike `get_activations_for_path()`, layers here are continuous (in
+    'pre_layer'/'post_layer'), so activations cannot be indexed by layer. A single
+    (aggregated) activation per group is used: each group is given the mean
+    activation across its member neurons. The resulting 'pre_activation' and
+    'post_activation' columns are consumed directly by `plot_paths()` in flow mode.
+
+    Args:
+        el (pd.DataFrame): Edgelist with 'pre' and 'post' columns holding group
+            labels (as produced by `layered_el()`).
+        activations (torch.Tensor | numpy.ndarray): Aggregated activations of shape
+            (num_neurons, num_cols) or (num_neurons,). A single column is used as-is;
+            if there is more than one column, `aggregate` must be set to collapse
+            across columns (e.g. across time).
+        idx_to_group (dict, optional): Maps model indices (rows of `activations`) to
+            the group labels used in `el.pre`/`el.post`. If None, indices are used
+            directly as group labels. Defaults to None.
+        aggregate (str or callable, optional): How to aggregate across columns of
+            `activations` (e.g. 'mean'). Required when `activations` has >1 column;
+            ignored otherwise. Defaults to None.
+
+    Returns:
+        pd.DataFrame:
+            A copy of `el` with added 'pre_activation' and 'post_activation' columns.
+            Groups absent from `activations`/`idx_to_group` get NaN.
+    """
+    eldf = el.copy()
+
+    if isinstance(activations, torch.Tensor):
+        activations = activations.cpu().detach().numpy()
+    activations = np.asarray(activations)
+    if activations.ndim == 1:
+        activations = activations[:, None]
+    if activations.ndim > 2:
+        raise ValueError(
+            f"activations must be 1D or 2D, got shape {activations.shape}"
+        )
+    if activations.shape[1] > 1:
+        if aggregate is None:
+            raise ValueError(
+                "activations has >1 column; set `aggregate` (e.g. 'mean') to "
+                "collapse across columns."
+            )
+        fn = aggregate if callable(aggregate) else getattr(np, aggregate)
+        activations = np.asarray(fn(activations, axis=1)).reshape(-1, 1)
+    act = activations[:, 0]
+
+    if idx_to_group is None:
+        idx_to_group = {i: i for i in range(act.shape[0])}
+
+    # mean activation per group, indexed by the group labels found in el.pre/el.post
+    idx = np.fromiter(idx_to_group.keys(), dtype=int)
+    groups = np.array([idx_to_group[i] for i in idx], dtype=object)
+    group_act = pd.Series(act[idx]).groupby(groups).mean()
+
+    eldf["pre_activation"] = eldf.pre.map(group_act)
+    eldf["post_activation"] = eldf.post.map(group_act)
+    return eldf
 
 
 def activated_path_for_ngl(path):
