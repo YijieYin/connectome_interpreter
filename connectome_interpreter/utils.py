@@ -2319,6 +2319,7 @@ def plot_paths(
     neuron_to_sign: dict | None = None,
     sign_color_map: dict = {1: "red", -1: "blue"},
     neuron_to_color: dict | None = None,
+    activation_cmap: str | mpl.colors.Colormap | None = None,
     node_activation_min: float | None = None,
     node_activation_max: float | None = None,
     edge_text: bool = True,
@@ -2372,6 +2373,10 @@ def plot_paths(
         neuron_to_color (dict, optional): Dictionary mapping neuron identifiers to
             colors. If None, a default color will be used for all neurons. Defaults to
             None.
+        activation_cmap (str | Colormap, optional): Activation colourmap. If None 
+            (default), uses 'viridis', or 'bwr' centred on white at 0 when any 
+            activation is negative. A colormap name or ready-made Colormap may be
+            passed to override.
         node_activation_min (float, optional): Minimum activation value for node
             coloring. If None, the minimum activation value from the DataFrame will be
             used. Defaults to None.
@@ -2541,10 +2546,25 @@ def plot_paths(
 
     if {"pre_activation", "post_activation"}.issubset(df.columns):
         acts = np.concatenate([df.pre_activation, df.post_activation])
-        node_activation_min = node_activation_min or acts.min()
-        node_activation_max = node_activation_max or acts.max()
+        has_negative = acts.min() < 0
+
+        # explicit arg wins; otherwise auto-pick by sign
+        if activation_cmap is None:
+            cmap = plt.get_cmap("bwr" if has_negative else "viridis")
+        elif isinstance(activation_cmap, str):
+            cmap = plt.get_cmap(activation_cmap)
+        else:
+            cmap = activation_cmap  # ready-made Colormap
+
+        # auto-bwr: symmetric limits put 0 at white
+        if activation_cmap is None and has_negative:
+            vabs = max(abs(acts.min()), abs(acts.max()))
+            lo, hi = -vabs, vabs
+        else:
+            lo, hi = acts.min(), acts.max()
+        node_activation_min = lo if node_activation_min is None else node_activation_min
+        node_activation_max = hi if node_activation_max is None else node_activation_max
         norm = plt.Normalize(vmin=node_activation_min, vmax=node_activation_max)
-        cmap = plt.get_cmap("viridis")
         nx.set_node_attributes(
             G,
             dict(zip(df.pre_layer_id if layered_mode else df.pre, df.pre_activation)),
