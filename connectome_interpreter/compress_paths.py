@@ -1309,10 +1309,19 @@ def result_summary(
     outprop: bool = False,
     combining_method: str = "mean",
 ):
-    """Generates a summary of connections between different types of neurons,
-    represented by their input and output indexes. The function calculates the
-    total synaptic input from presynaptic neuron groups to an average neuron in
-    each postsynaptic neuron group.
+    """Generates a summary of connections between different types of neurons, 
+    represented by their input and output indexes. The function calculates the total 
+    synaptic input from presynaptic neuron groups to an average neuron in each 
+    postsynaptic neuron group.
+
+    This function is equivalent to `connectivity_summary()`. It densifies the selected
+    submatrix, which makes it faster on small subsets, whereas `connectivity_summary()` 
+    operates on a sparse edge list and is faster and lighter on large subsets.
+
+    Note on averaging: for `combining_method='mean'`/`'median'`, the average is
+    taken over *all* members of each group as defined by `inidx_map`/
+    `outidx_map`, including members that are absent from `inidx`/`outidx`
+    (absent members contribute 0). This matches `connectivity_summary()`.
 
     Args:
         stepsn (scipy.sparse matrix or numpy.ndarray): Matrix representing the
@@ -1365,9 +1374,6 @@ def result_summary(
         "The combining_method should be either 'mean', 'median', or 'sum'. "
         f"Currently it is {combining_method}."
     )
-    print(
-        "Feel free to try `connectivity_summary()` - the same function with less memory usage!"
-    )
 
     if inidx_map is None:
         inidx_map = {idx: idx for idx in range(stepsn.shape[0])}
@@ -1408,11 +1414,39 @@ def result_summary(
         columns=[str(outidx_map[key]) for key in outidx],
     )
 
+    # Full group sizes across the whole map. Averages are divided by these so
+    # that group members absent from inidx/outidx are counted as 0, matching
+    # connectivity_summary().
+    full_pre = pd.Series([str(v) for v in inidx_map.values()]).value_counts()
+    full_post = pd.Series([str(v) for v in outidx_map.values()]).value_counts()
+
+    def _expand_to_full(frame, axis, full_sizes):
+        """Append zero rows/columns so every present group reaches its full
+        size from the map (axis=1 expands columns/post, axis=0 expands
+        rows/pre)."""
+        labels = frame.columns if axis == 1 else frame.index
+        present = pd.Series(labels).value_counts()
+        extra = [
+            g
+            for g in present.index
+            for _ in range(int(full_sizes.get(g, 0) - present[g]))
+        ]
+        if not extra:
+            return frame
+        if axis == 1:
+            zeros = pd.DataFrame(0.0, index=frame.index, columns=extra)
+            return pd.concat([frame, zeros], axis=1)
+        zeros = pd.DataFrame(0.0, index=extra, columns=frame.columns)
+        return pd.concat([frame, zeros], axis=0)
+
     if not outprop:
         # Sum across rows: presynaptic neuron is in the rows
         # summing across neurons of the same type: total amount of input from that
         # type for the postsynaptic neuron
         summed_df = df.groupby(df.index).sum()
+
+        # expand post groups to all their members (absent ones count as 0)
+        summed_df = _expand_to_full(summed_df, axis=1, full_sizes=full_post)
 
         # Average across columns and transpose back
         # averaging across columns of the same type:
@@ -1427,6 +1461,10 @@ def result_summary(
         # calculate the output proportion from an average source neuron to a target type
         # so first sum across columns
         summed_df = df.T.groupby(level=0).sum().T
+
+        # expand pre groups to all their members (absent ones count as 0)
+        summed_df = _expand_to_full(summed_df, axis=0, full_sizes=full_pre)
+
         # then average across rows
         if combining_method == "sum":
             result_df = summed_df.groupby(summed_df.index).sum()

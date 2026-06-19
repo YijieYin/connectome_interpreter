@@ -3770,3 +3770,130 @@ class TestConnectivitySummaryLong(unittest.TestCase):
     def test_long_no_nan_values(self):
         result = self._run_long()
         self.assertFalse(result["value"].isna().any())
+
+
+class TestResultSummaryFullGroupAveraging(unittest.TestCase):
+    """result_summary averages over *all* members of each group defined by the
+    map, including members absent from inidx/outidx (absent members count as 0).
+    This is the behaviour that makes it equivalent to connectivity_summary.
+    """
+
+    def _run(self, inidx, outidx, sparse=True, **kwargs):
+        return result_summary(
+            make_stepsn(WEIGHTS, sparse=sparse),
+            inidx,
+            outidx,
+            inidx_map=INIDX_MAP,
+            outidx_map=OUTIDX_MAP,
+            display_output=False,
+            display_threshold=0.0,
+            **kwargs,
+        )
+
+    def test_mean_divides_by_full_group_size(self):
+        """outidx omits neuron 1 (group X), so X has 1 present member but a full
+        size of 2. A->X input is 0.3 from neuron 0; mean = 0.3 / 2 = 0.15
+        (not 0.3, which would average over present members only).
+        """
+        result = self._run(INIDX, np.array([0, 2, 3]))
+        self.assertAlmostEqual(result.loc["A", "X"], 0.15, places=5)
+
+    def test_sum_unaffected_by_absent_members(self):
+        """Absent members contribute 0, so they never change a sum."""
+        full = self._run(INIDX, OUTIDX, combining_method="sum")
+        subset = self._run(INIDX, np.array([0, 2, 3]), combining_method="sum")
+        # full A->X sum over X neurons 0,1 = 0.3 + 0.5 = 0.8
+        self.assertAlmostEqual(full.loc["A", "X"], 0.8, places=5)
+        # omitting neuron 1 leaves only neuron 0's input = 0.3 (sum unchanged by
+        # the absent member, which contributes 0)
+        self.assertAlmostEqual(subset.loc["A", "X"], 0.3, places=5)
+
+    def test_outprop_divides_by_full_pre_group_size(self):
+        """With outprop=True the averaging is over pre-group members; omitting a
+        pre neuron still divides by the full pre-group size.
+        neuron 0 sends 0.5 to X (neuron 1 absent -> 0); mean over full A
+        (size 2) = (0.5 + 0) / 2 = 0.25.
+        """
+        result = self._run(np.array([0, 2, 3]), OUTIDX, outprop=True)
+        self.assertAlmostEqual(result.loc["A", "X"], 0.25, places=5)
+
+
+class TestResultSummaryConnectivityEquivalence(unittest.TestCase):
+    """result_summary and connectivity_summary should produce identical values
+    for every argument combination. Axis-name metadata and float dtype are not
+    compared (connectivity_summary names its axes and returns float64).
+    """
+
+    def _both(self, inidx, outidx, sparse=True, **kwargs):
+        kw = dict(
+            inidx_map=INIDX_MAP,
+            outidx_map=OUTIDX_MAP,
+            display_output=False,
+            display_threshold=0.0,
+            **kwargs,
+        )
+        rs = result_summary(make_stepsn(WEIGHTS, sparse=sparse), inidx, outidx, **kw)
+        cs = connectivity_summary(
+            make_stepsn(WEIGHTS, sparse=sparse), inidx, outidx, **kw
+        )
+        return (
+            rs.sort_index().sort_index(axis=1),
+            cs.sort_index().sort_index(axis=1),
+        )
+
+    def _assert_equal(self, rs, cs):
+        pd.testing.assert_frame_equal(
+            rs, cs, check_like=True, check_names=False, check_dtype=False, atol=1e-6
+        )
+
+    def test_equivalence_full_grid(self):
+        for cm in ("mean", "median", "sum"):
+            for outprop in (False, True):
+                for pic in (False, True):
+                    with self.subTest(
+                        combining_method=cm, outprop=outprop, pre_in_column=pic
+                    ):
+                        rs, cs = self._both(
+                            INIDX,
+                            OUTIDX,
+                            combining_method=cm,
+                            outprop=outprop,
+                            pre_in_column=pic,
+                        )
+                        self._assert_equal(rs, cs)
+
+    def test_equivalence_on_subset(self):
+        """The case that previously diverged: outidx is a strict subset, so the
+        averaging denominators differ between present-only and full-group."""
+        for cm in ("mean", "median", "sum"):
+            with self.subTest(combining_method=cm):
+                rs, cs = self._both(
+                    INIDX, np.array([0, 2, 3]), combining_method=cm
+                )
+                self._assert_equal(rs, cs)
+
+    def test_equivalence_sparse_vs_dense(self):
+        rs_sp, cs_sp = self._both(INIDX, np.array([0, 2, 3]), sparse=True)
+        rs_dn, _ = self._both(INIDX, np.array([0, 2, 3]), sparse=False)
+        pd.testing.assert_frame_equal(rs_sp, rs_dn)
+        self._assert_equal(rs_sp, cs_sp)
+
+    def test_equivalence_with_undefined_groups(self):
+        nan_map = {0: "A", 1: float("nan"), 2: "B", 3: "B"}
+        kw = dict(
+            inidx_map=nan_map,
+            outidx_map=nan_map,
+            display_output=False,
+            display_threshold=0.0,
+            include_undefined_groups=True,
+        )
+        rs = result_summary(make_stepsn(WEIGHTS), INIDX, OUTIDX, **kw)
+        cs = connectivity_summary(make_stepsn(WEIGHTS), INIDX, OUTIDX, **kw)
+        pd.testing.assert_frame_equal(
+            rs.sort_index().sort_index(axis=1),
+            cs.sort_index().sort_index(axis=1),
+            check_like=True,
+            check_names=False,
+            check_dtype=False,
+            atol=1e-6,
+        )
