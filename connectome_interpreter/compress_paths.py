@@ -2189,6 +2189,7 @@ def signed_conn_by_path_length_data(
     intermediate_map: Optional[dict] = None,
     combining_method: str = "mean",
     wide: bool = True,
+    quiet: bool = False,
 ):
     """Calculates the signed connectivity from all of inidx to outidx within `n` hops,
     grouped by inidx_map and outidx_map, aggregated by `combining_method`. The sign of
@@ -2213,6 +2214,7 @@ def signed_conn_by_path_length_data(
             'mean', 'median', or 'sum'. Defaults to 'mean'.
         wide (bool, optional): Whether to return the result in wide format. If False,
             the result will be in long format. Defaults to True.
+        quiet (bool, optional): If True, suppresses progress output. Defaults to False.
 
     Returns:
         List[pd.DataFrame], List[pd.DataFrame]:
@@ -2230,8 +2232,8 @@ def signed_conn_by_path_length_data(
     # group_paths() turns groups into strings. So let's also make groups string here
     group_to_sign = {str(k): v for k, v in group_to_sign.items()}
 
-    for path_length in tqdm(range(n)):
-        paths = find_paths_of_length(inprop, inidx, outidx, path_length + 1)
+    for path_length in tqdm(range(n), disable=quiet):
+        paths = find_paths_of_length(inprop, inidx, outidx, path_length + 1, quiet=quiet)
         paths = group_paths(
             paths,
             inidx_map,
