@@ -933,6 +933,35 @@ class TestResultSummary(unittest.TestCase):
         self.all_indices = [0, 1, 2, 3, 4, 5, 6, 7, 8]
         self.subset_indices = [1, 3, 7]
 
+    def test_verbose_default_prints_message(self):
+        """By default (verbose=True) the informational message is printed."""
+        with patch("builtins.print") as mock_print:
+            result_summary(
+                self.test_matrix,
+                self.all_indices,
+                self.all_indices,
+                self.inidx_map,
+                self.outidx_map,
+                display_output=False,
+            )
+        self.assertTrue(mock_print.called)
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("connectivity_summary", printed)
+
+    def test_verbose_false_silences_message(self):
+        """verbose=False suppresses the informational message."""
+        with patch("builtins.print") as mock_print:
+            result_summary(
+                self.test_matrix,
+                self.all_indices,
+                self.all_indices,
+                self.inidx_map,
+                self.outidx_map,
+                display_output=False,
+                verbose=False,
+            )
+        mock_print.assert_not_called()
+
     def test_basic_functionality_dense(self):
         """Test basic functionality with dense matrix."""
         result = result_summary(

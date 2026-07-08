@@ -422,7 +422,6 @@ def compress_paths_dense_chunked(
 
     with torch.no_grad():
         for i in tqdm(range(step_number)):
-
             if i == 0:
                 out_tensor = torch.tensor(inprop.toarray(), dtype=dtype)
             else:
@@ -1308,6 +1307,7 @@ def result_summary(
     include_undefined_groups: bool = False,
     outprop: bool = False,
     combining_method: str = "mean",
+    verbose: bool = True,
 ):
     """Generates a summary of connections between different types of neurons,
     represented by their input and output indexes. The function calculates the
@@ -1350,6 +1350,8 @@ def result_summary(
         combining_method (str, optional): Method to combine inputs (outprop=False)
             or outputs (outprop=True). Can be 'sum', 'mean', or 'median'.
             Defaults to 'mean'.
+        verbose (bool, optional): Whether to print informational messages.
+            Defaults to True.
 
     Returns:
         pd.DataFrame:
@@ -1365,9 +1367,10 @@ def result_summary(
         "The combining_method should be either 'mean', 'median', or 'sum'. "
         f"Currently it is {combining_method}."
     )
-    print(
-        "Feel free to try `connectivity_summary()` - the same function with less memory usage!"
-    )
+    if verbose:
+        print(
+            "Feel free to try `connectivity_summary()` - the same function with less memory usage!"
+        )
 
     if inidx_map is None:
         inidx_map = {idx: idx for idx in range(stepsn.shape[0])}
