@@ -2302,6 +2302,27 @@ def _find_flow_positions_tidy(
     return positions
 
 
+def _partition_edges_by_x_position(
+    edges: Sequence[tuple[str, str]],
+    pos: Mapping[str, tuple[float, float]],
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Split edges into ordinary and same-layer (vertical) connections.
+
+    Self-loops stay in the ordinary group so NetworkX can use its dedicated
+    self-loop rendering. Distinct nodes with matching x coordinates are
+    returned in the same-layer group.
+    """
+    ordinary_edges = []
+    same_layer_edges = []
+    for edge in edges:
+        source, target = edge
+        if source != target and np.isclose(pos[source][0], pos[target][0]):
+            same_layer_edges.append(edge)
+        else:
+            ordinary_edges.append(edge)
+    return ordinary_edges, same_layer_edges
+
+
 # ------------------------------------------------------------------
 # main API
 # ------------------------------------------------------------------
@@ -2340,6 +2361,7 @@ def plot_paths(
     post_pad: float = 0.2,
     seed: Optional[int] = None,
     edge_width_scale: float = 15,
+    same_layer_edge_curvature: float = 0.25,
 ) -> None:
     """
     Plotting function for both layered (where layers are discrete, in `layer` column of
@@ -2413,6 +2435,10 @@ def plot_paths(
         seed (int, optional): Random seed for reproducibility. Defaults to None.
         edge_width_scale (float, optional): Scale factor for edge widths. Defaults to
             15.
+        same_layer_edge_curvature (float, optional): Curvature of edges between
+            distinct neurons at the same horizontal layer. Positive and negative
+            values bend in opposite directions; set to 0 for the previous straight
+            rendering. Defaults to 0.25.
 
     Returns:
         fig, ax:
@@ -2662,6 +2688,18 @@ def plot_paths(
             net.show(f"{file_name}.html", notebook=False)
     else:
         fig, ax = plt.subplots(figsize=figsize)
+        all_edges = list(G.edges())
+        ordinary_edges, same_layer_edges = _partition_edges_by_x_position(
+            all_edges, pos
+        )
+        if same_layer_edge_curvature == 0:
+            ordinary_edges = all_edges
+            same_layer_edges = []
+
+        edge_widths = {
+            edge: G[edge[0]][edge[1]]["weight"] for edge in all_edges
+        }
+        edge_color_map = dict(zip(all_edges, edge_colors))
         nx.draw(
             G,
             pos=pos,
@@ -2671,10 +2709,25 @@ def plot_paths(
             arrows=True,
             arrowstyle="-|>",
             arrowsize=10,
-            width=[G[u][v]["weight"] for u, v in G.edges()],
-            edge_color=edge_colors,
+            edgelist=ordinary_edges,
+            width=[edge_widths[edge] for edge in ordinary_edges],
+            edge_color=[edge_color_map[edge] for edge in ordinary_edges],
             ax=ax,
         )
+        if same_layer_edges:
+            nx.draw_networkx_edges(
+                G,
+                pos=pos,
+                edgelist=same_layer_edges,
+                node_size=node_size,
+                arrows=True,
+                arrowstyle="-|>",
+                arrowsize=10,
+                width=[edge_widths[edge] for edge in same_layer_edges],
+                edge_color=[edge_color_map[edge] for edge in same_layer_edges],
+                connectionstyle=f"arc3,rad={same_layer_edge_curvature}",
+                ax=ax,
+            )
         if {"pre_activation", "post_activation"}.issubset(df.columns):
             plt.colorbar(
                 plt.cm.ScalarMappable(norm=norm, cmap=cmap),
