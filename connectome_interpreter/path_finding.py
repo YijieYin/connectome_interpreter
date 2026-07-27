@@ -997,10 +997,16 @@ def group_paths(
     if paths is None or paths.shape[0] == 0:
         return paths
 
-    assert combining_method in ["mean", "sum", "median"], (
-        "The combining_method should be either 'mean', 'sum' or 'median'. "
+    assert combining_method in ["mean", "sum", "median", "percentile_95"], (
+        "The combining_method should be either 'mean', 'sum', 'median' or 'percentile_95'. "
         f"Currently it is {combining_method}."
     )
+
+    if combining_method == "percentile_95":
+        def aggregation_method(x):
+            return np.percentile(x, 95)
+    else:
+        aggregation_method = combining_method
 
     # (new) auto-fill missing keys so every node has a group
     all_nodes = set(paths["pre"]).union(set(paths["post"]))
@@ -1101,7 +1107,7 @@ def group_paths(
                 ).fillna(0)
 
         paths = (
-            paths.groupby(group_columns)["weight"].agg(combining_method).reset_index()
+            paths.groupby(group_columns)["weight"].agg(aggregation_method).reset_index()
         )
 
     else:  # outprop
@@ -1154,7 +1160,7 @@ def group_paths(
                 ).fillna(0)
 
         paths = (
-            paths.groupby(group_columns)["weight"].agg(combining_method).reset_index()
+            paths.groupby(group_columns)["weight"].agg(aggregation_method).reset_index()
         )
     if has_activation:
         paths_act = (
