@@ -64,3 +64,4 @@ Notebooks comparing published connectomes against published experimental papers:
 
 - Pre-processed connectomics data and pre-processing scripts are at [connectome_data_prep](https://github.com/YijieYin/connectome_data_prep/tree/main): adjacency matrices in `scipy.sparse` (`.npz`), metadata in `.csv`.
 - Dataset requests, feature requests, feedback: open an issue, or email `yy432`at`cam.ac.uk` :).
+- Want to contribute code? See [CONTRIBUTING.md](CONTRIBUTING.md).
