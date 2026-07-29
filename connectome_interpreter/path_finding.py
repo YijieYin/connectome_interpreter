@@ -1,6 +1,7 @@
 # Standard library imports
 import itertools
 from dataclasses import dataclass
+from functools import partial
 from typing import Dict, List, Union, Tuple, Optional, Generator
 from collections import defaultdict
 
@@ -957,6 +958,7 @@ def group_paths(
     avg_within_connected: bool = False,
     outprop: bool = False,
     combining_method: str = "mean",
+    percentile: Optional[float] = None,
 ) -> pd.DataFrame:
     """
     Group the paths by user-specified variable (e.g. cell type, cell class etc.).
@@ -986,8 +988,10 @@ def group_paths(
             False (default), get the summed input proportion across all senders for
             each average recipient.
         combining_method (str, optional): Method to combine inputs (outprop=False)
-            or outputs (outprop=True). Can be 'sum', 'mean', or 'median'. Defaults to
-            'mean'.
+            or outputs (outprop=True). Can be 'sum', 'mean', 'median', or
+            'percentile'. Defaults to 'mean'.
+        percentile (float, optional): Percentile to use when combining_method is
+            'percentile'. Must be between 0 and 100. Defaults to None.
     Returns:
         pd.DataFrame:
             The grouped DataFrame containing the path data, including the layer number,
@@ -997,9 +1001,23 @@ def group_paths(
     if paths is None or paths.shape[0] == 0:
         return paths
 
-    assert combining_method in ["mean", "sum", "median"], (
-        "The combining_method should be either 'mean', 'sum' or 'median'. "
+    assert combining_method in ["mean", "sum", "median", "percentile"], (
+        "The combining_method should be either 'mean', 'sum', 'median' or "
+        "'percentile'. "
         f"Currently it is {combining_method}."
+    )
+    if combining_method == "percentile":
+        assert (
+            percentile is not None
+        ), "The percentile must be provided when combining_method is 'percentile'."
+        assert (
+            0 <= percentile <= 100
+        ), f"The percentile should be between 0 and 100. Currently it is {percentile}."
+
+    aggregation_method = (
+        partial(np.percentile, q=percentile)
+        if combining_method == "percentile"
+        else combining_method
     )
 
     # (new) auto-fill missing keys so every node has a group
@@ -1101,7 +1119,7 @@ def group_paths(
                 ).fillna(0)
 
         paths = (
-            paths.groupby(group_columns)["weight"].agg(combining_method).reset_index()
+            paths.groupby(group_columns)["weight"].agg(aggregation_method).reset_index()
         )
 
     else:  # outprop
@@ -1154,7 +1172,7 @@ def group_paths(
                 ).fillna(0)
 
         paths = (
-            paths.groupby(group_columns)["weight"].agg(combining_method).reset_index()
+            paths.groupby(group_columns)["weight"].agg(aggregation_method).reset_index()
         )
     if has_activation:
         paths_act = (
