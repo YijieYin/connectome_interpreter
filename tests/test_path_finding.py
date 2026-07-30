@@ -1151,6 +1151,19 @@ class TestGroupPaths(unittest.TestCase):
         # median(1, 3, 100) = 3
         self.assertAlmostEqual(self.weight_of(out, "A", "B"), 3.0)
 
+    def test_outprop_false_percentile_across_post_type(self):
+        df = self.mk_df([("a1", "b1", 1.0), ("a1", "b2", 2.0), ("a1", "b3", 3.0), ("a1", "b4", 4.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A"},
+            post_group={"b1": "B", "b2": "B", "b3": "B", "b4": "B"},
+            combining_method="percentile",
+            percentile=75,
+            avg_within_connected=True,
+        )
+        # 75th percentile of (1, 2, 3, 4) = 3.25
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 3.25)
+
     # --------------------------------------------- basic grouping (outprop=True)
     def test_outprop_true_sum(self):
         """outprop=True: sum over posts of same type per pre, then sum across pre."""
@@ -1192,6 +1205,20 @@ class TestGroupPaths(unittest.TestCase):
         )
         # median(1, 3, 100) = 3
         self.assertAlmostEqual(self.weight_of(out, "A", "B"), 3.0)
+
+    def test_outprop_true_percentile(self):
+        df = self.mk_df([("a1", "b1", 1.0), ("a2", "b1", 2.0), ("a3", "b1", 3.0), ("a4", "b1", 4.0)])
+        out = group_paths(
+            df,
+            pre_group={"a1": "A", "a2": "A", "a3": "A", "a4": "A"},
+            post_group={"b1": "B"},
+            outprop=True,
+            combining_method="percentile",
+            percentile=75,
+            avg_within_connected=True,
+        )
+        # 75th percentile of (1, 2, 3, 4) = 3.25
+        self.assertAlmostEqual(self.weight_of(out, "A", "B"), 3.25)
 
     # ------------------------------------------- avg_within_connected distinction
     def test_avg_within_connected_true_ignores_disconnected(self):
