@@ -1309,13 +1309,13 @@ def result_summary(
     outprop: bool = False,
     combining_method: str = "mean",
 ):
-    """Generates a summary of connections between different types of neurons, 
-    represented by their input and output indexes. The function calculates the total 
-    synaptic input from presynaptic neuron groups to an average neuron in each 
+    """Generates a summary of connections between different types of neurons,
+    represented by their input and output indexes. The function calculates the total
+    synaptic input from presynaptic neuron groups to an average neuron in each
     postsynaptic neuron group.
 
     This function is equivalent to `connectivity_summary()`. It densifies the selected
-    submatrix, which makes it faster on small subsets, whereas `connectivity_summary()` 
+    submatrix, which makes it faster on small subsets, whereas `connectivity_summary()`
     operates on a sparse edge list and is faster and lighter on large subsets.
 
     Note on averaging: for `combining_method='mean'`/`'median'`, the average is
@@ -2234,7 +2234,9 @@ def signed_conn_by_path_length_data(
     group_to_sign = {str(k): v for k, v in group_to_sign.items()}
 
     for path_length in tqdm(range(n), disable=quiet):
-        paths = find_paths_of_length(inprop, inidx, outidx, path_length + 1, quiet=quiet)
+        paths = find_paths_of_length(
+            inprop, inidx, outidx, path_length + 1, quiet=quiet
+        )
         paths = group_paths(
             paths,
             inidx_map,
