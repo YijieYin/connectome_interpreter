@@ -2290,9 +2290,10 @@ def effective_conn_from_paths(
             multiplication.
         chunk_size (int, optional): Number of rows to process in each chunk when using
             GPU. Defaults to 2000.
-        density_threshold (float, optional): Threshold for converting sparse matrices to
-            dense. If the density of the intermediate result exceeds this value, it will
-            be converted to a dense matrix, which is faster to multiply. Defaults to 0.2.
+        density_threshold (float, optional): Threshold for converting sparse matrices
+            to dense. If the density of the intermediate result exceeds this value, it
+            will be converted to a dense matrix, which is faster to multiply. Defaults
+            to 0.2.
         use_gpu (bool, optional): Whether to use GPU for computation. Defaults to True.
             If GPU is not available, it will fall back to CPU.
         root (bool, optional): If True, take the n-th root of the weights, where n is
@@ -2349,14 +2350,15 @@ def effective_conn_from_paths(
                 print("GPU not available, using CPU instead.")
 
     if not use_gpu:
-        for i, layer in enumerate(layers):
+        csr = None
+        for layer in layers:
             el = paths[paths.layer == layer]
             layer_csr = csr_matrix(
                 (el.weight, (el.pre_idx.values, el.post_idx.values)),
                 shape=(m, m),
                 dtype=np.float32,
             )  # sparse matrix of the shape all_elements, all_elements
-            csr = layer_csr if i == 0 else csr @ layer_csr
+            csr = layer_csr if csr is None else csr @ layer_csr
 
         coo = csr.tocoo()
         all_rows, all_cols, all_vals = coo.row, coo.col, coo.data
