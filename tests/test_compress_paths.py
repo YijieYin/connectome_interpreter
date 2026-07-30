@@ -1726,6 +1726,186 @@ class TestEffectiveConnFromPaths(unittest.TestCase):
         self.assertIsNotNone(cpu_out)
         self.assertIsNotNone(ref_out)
 
+    # -------------------------------------------------- #
+    # 9. output_threshold drops exactly the small weights
+    # -------------------------------------------------- #
+    def test_output_threshold(self):
+        thresh = 0.05
+        cases = [(False, 0.2)]
+        if torch.cuda.is_available():
+            # 1.0 never densifies, 0.0 always does: both extraction paths
+            cases += [(True, 1.0), (True, 0.0)]
+
+        for use_gpu, density_threshold in cases:
+            with self.subTest(use_gpu=use_gpu, density_threshold=density_threshold):
+                kwargs = dict(
+                    wide=False,
+                    use_gpu=use_gpu,
+                    density_threshold=density_threshold,
+                    chunk_size=10,
+                )
+                full = effective_conn_from_paths(self.rand_paths.copy(), **kwargs)
+                thinned = effective_conn_from_paths(
+                    self.rand_paths.copy(), output_threshold=thresh, **kwargs
+                )
+                expected = full[full.weight.abs() > thresh]
+
+                # the test is meaningless if nothing was below the threshold
+                self.assertGreater(len(full), len(expected))
+                cols = ["pre", "post", "weight"]
+                assert_frame_equal(
+                    thinned.sort_values(cols[:2]).reset_index(drop=True)[cols],
+                    expected.sort_values(cols[:2]).reset_index(drop=True)[cols],
+                    rtol=1e-6,
+                    atol=1e-8,
+                )
+
+    def test_output_threshold_zero_is_a_no_op(self):
+        """The default must not drop anything the CPU reference keeps."""
+        ref = effective_conn_from_paths_cpu(self.rand_paths.copy(), wide=True)
+        out = effective_conn_from_paths(
+            self.rand_paths.copy(), wide=True, use_gpu=False, output_threshold=0
+        )
+        assert_frame_equal(
+            out.sort_index().sort_index(axis=1),
+            ref.sort_index().sort_index(axis=1),
+            rtol=1e-6,
+            atol=1e-8,
+        )
+
+    # -------------------------------------------------- #
+    # 10. neuron labels keep their dtype
+    # -------------------------------------------------- #
+    def test_integer_labels_stay_int64(self):
+        """Integer neuron labels must come back as int64, matching the CPU
+        reference, rather than the platform default (int32 on Windows)."""
+        int_paths = pd.DataFrame(
+            {
+                "pre": [10, 10, 20, 31],
+                "post": [31, 32, 32, 40],
+                "weight": [0.5, 0.4, 0.3, 0.2],
+                "layer": [1, 1, 1, 2],
+            }
+        )
+        ref = effective_conn_from_paths_cpu(int_paths.copy(), wide=True)
+
+        for use_gpu in [False] + ([True] if torch.cuda.is_available() else []):
+            with self.subTest(use_gpu=use_gpu):
+                long_out = effective_conn_from_paths(
+                    int_paths.copy(), wide=False, use_gpu=use_gpu, chunk_size=2
+                )
+                self.assertEqual(long_out.pre.dtype, np.dtype("int64"))
+                self.assertEqual(long_out.post.dtype, np.dtype("int64"))
+
+                wide_out = effective_conn_from_paths(
+                    int_paths.copy(), wide=True, use_gpu=use_gpu, chunk_size=2
+                )
+                self.assertEqual(wide_out.index.dtype, ref.index.dtype)
+                self.assertEqual(wide_out.columns.dtype, ref.columns.dtype)
+
+    def test_string_labels_stay_object(self):
+        str_paths = pd.DataFrame(
+            {
+                "pre": ["a", "a", "b", "c"],
+                "post": ["c", "d", "d", "e"],
+                "weight": [0.5, 0.4, 0.3, 0.2],
+                "layer": [1, 1, 1, 2],
+            }
+        )
+        ref = effective_conn_from_paths_cpu(str_paths.copy(), wide=False)
+        out = effective_conn_from_paths(str_paths.copy(), wide=False, use_gpu=False)
+        # whatever pandas calls its string dtype (object, or `str` from pandas 3),
+        # we must land on the same one the reference does -- notably not a
+        # fixed-width numpy unicode array, which would materialise a fresh str
+        # per output row
+        self.assertEqual(out.pre.dtype, ref.pre.dtype)
+        self.assertEqual(out.post.dtype, ref.post.dtype)
+        self.assertEqual(set(out.pre), {"a"})
+        self.assertEqual(set(out.post), {"e"})
+
+    # -------------------------------------------------- #
+    # 11. GPU: every chunk_size x density_threshold combination
+    #     agrees with the CPU reference
+    # -------------------------------------------------- #
+    @skipIf(
+        not (torch.cuda.is_available() and torch.__version__ >= "2.2"),
+        "CUDA ≥2.2 required for sparse.mm",
+    )
+    def test_gpu_chunking_and_density_vs_cpu(self):
+        ref = effective_conn_from_paths_cpu(self.rand_paths.copy(), wide=True)
+        # chunk_size=7 over 50 nodes forces several chunks, so the chunk-local
+        # row offsets get exercised; density_threshold=0.0 forces the dense
+        # extraction path rather than the sparse one
+        for chunk_size in (7, 10_000):
+            for density_threshold in (1.0, 0.0):
+                with self.subTest(
+                    chunk_size=chunk_size, density_threshold=density_threshold
+                ):
+                    out = effective_conn_from_paths(
+                        self.rand_paths.copy(),
+                        wide=True,
+                        chunk_size=chunk_size,
+                        density_threshold=density_threshold,
+                        use_gpu=True,
+                    )
+                    assert_frame_equal(
+                        out.sort_index().sort_index(axis=1),
+                        ref.sort_index().sort_index(axis=1),
+                        rtol=1e-4,
+                        atol=1e-6,
+                    )
+        torch.cuda.empty_cache()
+
+    # -------------------------------------------------- #
+    # 12. negative weights: cancellation must not desync the
+    #     dense and sparse extraction paths
+    # -------------------------------------------------- #
+    def test_signed_weights(self):
+        rng = np.random.default_rng(7)
+        signed = self.rand_paths.copy()
+        signed["weight"] = (
+            signed.weight.values * rng.choice([-1.0, 1.0], len(signed))
+        ).astype(np.float32)
+        ref = effective_conn_from_paths_cpu(signed.copy(), wide=True)
+
+        cases = [dict(use_gpu=False)]
+        if torch.cuda.is_available():
+            cases += [
+                dict(use_gpu=True, density_threshold=d, chunk_size=7)
+                for d in (1.0, 0.0)
+            ]
+        for kwargs in cases:
+            with self.subTest(**kwargs):
+                out = effective_conn_from_paths(signed.copy(), wide=True, **kwargs)
+                assert_frame_equal(
+                    out.sort_index().sort_index(axis=1),
+                    ref.sort_index().sort_index(axis=1),
+                    rtol=1e-4,
+                    atol=1e-6,
+                )
+
+    # -------------------------------------------------- #
+    # 13. root and empty input
+    # -------------------------------------------------- #
+    def test_root(self):
+        n_layers = self.rand_paths.layer.nunique()
+        base = effective_conn_from_paths(
+            self.rand_paths.copy(), wide=False, use_gpu=False
+        )
+        rooted = effective_conn_from_paths(
+            self.rand_paths.copy(), wide=False, use_gpu=False, root=True
+        )
+        np.testing.assert_allclose(
+            rooted.weight.values,
+            base.weight.values ** (1 / n_layers),
+            rtol=1e-5,
+        )
+
+    def test_empty_paths_returns_none(self):
+        self.assertIsNone(
+            effective_conn_from_paths(self.rand_paths.iloc[0:0].copy(), quiet=True)
+        )
+
 
 class TestEffconnWithoutLoops(unittest.TestCase):
     """Tests for the effconn_without_loops function."""
