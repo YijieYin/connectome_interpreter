@@ -11,7 +11,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from connectome_interpreter.utils import (
-    _partition_edges_by_x_position,
+    _EDGE_LABELS_FOLLOW_CURVES,
+    _partition_edges_for_curvature,
     plot_paths,
 )
 
@@ -42,8 +43,38 @@ class FakeNetwork:
         return None
 
 
-class TestPlotPathsSameLayerEdges(unittest.TestCase):
+class TestPartitionEdgesForCurvature(unittest.TestCase):
+    """A and B share a layer; B and C are reciprocally connected; D self-loops."""
+
+    edges = [("A", "B"), ("B", "C"), ("C", "B"), ("C", "D"), ("D", "D")]
+    pos = {"A": (1.0, 0.2), "B": (1.0, 0.8), "C": (2.0, 0.5), "D": (3.0, 0.5)}
+
+    def assert_curved(self, curve_edges, expected):
+        straight, curved = _partition_edges_for_curvature(
+            self.edges, self.pos, curve_edges
+        )
+        self.assertEqual(curved, expected)
+        self.assertEqual(straight, [e for e in self.edges if e not in expected])
+
+    def test_same_layer_mode(self):
+        self.assert_curved("same_layer", [("A", "B")])
+
+    def test_reciprocal_mode(self):
+        self.assert_curved("reciprocal", [("B", "C"), ("C", "B")])
+
+    def test_overlapping_mode_covers_both(self):
+        self.assert_curved("overlapping", [("A", "B"), ("B", "C"), ("C", "B")])
+
+    def test_all_mode_keeps_self_loops_straight(self):
+        self.assert_curved("all", [("A", "B"), ("B", "C"), ("C", "B"), ("C", "D")])
+
+    def test_none_mode(self):
+        self.assert_curved("none", [])
+
+
+class TestPlotPathsCurvedEdges(unittest.TestCase):
     def setUp(self):
+        # A and B sit in the same layer, so A -> B would be drawn vertically.
         self.paths = pd.DataFrame(
             {
                 "pre": ["A", "B"],
@@ -51,6 +82,16 @@ class TestPlotPathsSameLayerEdges(unittest.TestCase):
                 "weight": [1.0, 0.5],
                 "pre_layer": [1.0, 1.0],
                 "post_layer": [1.0, 2.0],
+            }
+        )
+        # B -> C and C -> B would be drawn on top of each other.
+        self.reciprocal_paths = pd.DataFrame(
+            {
+                "pre": ["A", "B", "C"],
+                "post": ["B", "C", "B"],
+                "weight": [1.0, 0.5, 0.5],
+                "pre_layer": [1.0, 2.0, 3.0],
+                "post_layer": [2.0, 3.0, 2.0],
             }
         )
 
@@ -67,15 +108,6 @@ class TestPlotPathsSameLayerEdges(unittest.TestCase):
             {"pyvis": pyvis, "pyvis.network": pyvis_network},
         )
 
-    def test_partition_keeps_self_loops_with_ordinary_edges(self):
-        edges = [("A", "B"), ("B", "C"), ("C", "C")]
-        pos = {"A": (1.0, 0.2), "B": (1.0, 0.8), "C": (2.0, 0.5)}
-
-        ordinary, same_layer = _partition_edges_by_x_position(edges, pos)
-
-        self.assertEqual(ordinary, [("B", "C"), ("C", "C")])
-        self.assertEqual(same_layer, [("A", "B")])
-
     @patch("connectome_interpreter.utils.nx.draw")
     @patch("connectome_interpreter.utils.nx.draw_networkx_edges")
     def test_static_same_layer_edges_use_requested_curvature(self, draw_edges, draw):
@@ -84,7 +116,7 @@ class TestPlotPathsSameLayerEdges(unittest.TestCase):
             show=False,
             edge_text=False,
             node_text=False,
-            same_layer_curvature=0.4,
+            edge_curvature=0.4,
             seed=0,
         )
 
@@ -95,8 +127,42 @@ class TestPlotPathsSameLayerEdges(unittest.TestCase):
 
     @patch("connectome_interpreter.utils.nx.draw")
     @patch("connectome_interpreter.utils.nx.draw_networkx_edges")
+    def test_static_reciprocal_edges_are_curved_by_default_mode(self, draw_edges, draw):
+        plot_paths(
+            self.reciprocal_paths,
+            show=False,
+            edge_text=False,
+            node_text=False,
+            edge_curvature=0.4,
+            seed=0,
+        )
+
+        self.assertEqual(draw.call_args.kwargs["edgelist"], [("A", "B")])
+        self.assertEqual(
+            sorted(draw_edges.call_args.kwargs["edgelist"]),
+            [("B", "C"), ("C", "B")],
+        )
+
+    @patch("connectome_interpreter.utils.nx.draw")
+    @patch("connectome_interpreter.utils.nx.draw_networkx_edges")
+    def test_static_curve_edges_mode_restricts_selection(self, draw_edges, draw):
+        plot_paths(
+            self.reciprocal_paths,
+            show=False,
+            edge_text=False,
+            node_text=False,
+            edge_curvature=0.4,
+            curve_edges="same_layer",
+            seed=0,
+        )
+
+        draw_edges.assert_not_called()
+        self.assertEqual(len(draw.call_args.kwargs["edgelist"]), 3)
+
+    @patch("connectome_interpreter.utils.nx.draw")
+    @patch("connectome_interpreter.utils.nx.draw_networkx_edges")
     @patch("connectome_interpreter.utils.nx.draw_networkx_edge_labels")
-    def test_static_same_layer_labels_follow_curved_edges(
+    def test_static_curved_labels_follow_curved_edges(
         self, draw_edge_labels, draw_edges, draw
     ):
         plot_paths(
@@ -104,16 +170,20 @@ class TestPlotPathsSameLayerEdges(unittest.TestCase):
             show=False,
             edge_text=True,
             node_text=False,
-            same_layer_curvature=0.4,
+            edge_curvature=0.4,
             seed=0,
         )
 
-        same_layer_call = next(
+        curved_call = next(
             call
             for call in draw_edge_labels.call_args_list
             if ("A", "B") in call.kwargs["edge_labels"]
         )
-        self.assertEqual(same_layer_call.kwargs["connectionstyle"], "arc3,rad=0.4")
+        if _EDGE_LABELS_FOLLOW_CURVES:
+            self.assertEqual(curved_call.kwargs["connectionstyle"], "arc3,rad=0.4")
+        else:
+            # older networkx cannot route labels along arcs, so the kwarg is omitted
+            self.assertNotIn("connectionstyle", curved_call.kwargs)
 
     @patch("connectome_interpreter.utils.nx.draw")
     @patch("connectome_interpreter.utils.nx.draw_networkx_edges")
@@ -129,14 +199,14 @@ class TestPlotPathsSameLayerEdges(unittest.TestCase):
         draw_edges.assert_not_called()
         self.assertEqual(draw.call_args.kwargs["edgelist"], [("A", "B"), ("B", "C")])
 
-    def test_interactive_same_layer_edges_use_requested_curvature(self):
+    def test_interactive_curved_edges_use_requested_curvature(self):
         with self.fake_pyvis():
             plot_paths(
                 self.paths,
                 interactive=True,
                 edge_text=False,
                 node_text=False,
-                same_layer_curvature=0.4,
+                edge_curvature=0.4,
                 seed=0,
             )
 
@@ -156,17 +226,17 @@ class TestPlotPathsSameLayerEdges(unittest.TestCase):
                 interactive=True,
                 edge_text=False,
                 node_text=False,
-                same_layer_curvature=-0.4,
+                edge_curvature=-0.4,
                 seed=0,
             )
 
-        same_layer_edge = next(
+        curved_edge = next(
             edge
             for edge in FakeNetwork.last_instance.edges
             if (edge["from"], edge["to"]) == ("A", "B")
         )
         self.assertEqual(
-            same_layer_edge["smooth"],
+            curved_edge["smooth"],
             {"enabled": True, "type": "curvedCCW", "roundness": 0.4},
         )
 
@@ -175,8 +245,16 @@ class TestPlotPathsSameLayerEdges(unittest.TestCase):
             with self.subTest(curvature=curvature), self.assertRaises(ValueError):
                 plot_paths(
                     self.paths,
-                    same_layer_curvature=curvature,
+                    edge_curvature=curvature,
                 )
+
+    def test_unknown_curve_edges_mode_is_rejected(self):
+        with self.assertRaises(ValueError):
+            plot_paths(
+                self.paths,
+                edge_curvature=0.4,
+                curve_edges="between_layers",
+            )
 
 
 if __name__ == "__main__":

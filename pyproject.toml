@@ -13,6 +13,9 @@ readme = "README.md"
 license = {file="LICENSE"}
 urls = {"Source & example notebooks" = "https://github.com/YijieYin/connectome_interpreter", "Documentation" = "https://connectome-interpreter.readthedocs.io/en/latest/"}
 
+# networkx>=3.4 (needed to place edge labels along curved edges) requires Python 3.10
+requires-python = ">=3.10"
+
 dependencies = [
     "numpy",
     "pandas",
@@ -20,7 +23,7 @@ dependencies = [
     "tqdm",
     "plotly",
     "matplotlib",
-    "networkx",
+    "networkx>=3.4",  # earlier versions cannot place edge labels along curved edges
     "seaborn",
     "ipywidgets",
     "IPython",

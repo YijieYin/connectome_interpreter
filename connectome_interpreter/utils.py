@@ -1,4 +1,5 @@
 # Standard library imports
+import inspect
 import random
 import warnings
 from collections import defaultdict
@@ -2302,25 +2303,50 @@ def _find_flow_positions_tidy(
     return positions
 
 
-def _partition_edges_by_x_position(
+CURVE_EDGE_MODES = ("overlapping", "same_layer", "reciprocal", "all", "none")
+
+# networkx places edge labels along curved edges only from version 3.4 onwards; with
+# older versions labels of curved edges sit on the straight line between the nodes.
+_EDGE_LABELS_FOLLOW_CURVES = (
+    "connectionstyle" in inspect.signature(nx.draw_networkx_edge_labels).parameters
+)
+
+
+def _partition_edges_for_curvature(
     edges: Sequence[tuple[str, str]],
     pos: Mapping[str, tuple[float, float]],
+    curve_edges: str,
 ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
-    """Split edges into ordinary and same-layer connections.
+    """Split edges into straight ones and ones to draw as arcs.
 
-    Distinct nodes with matching x coordinates are treated as same-layer
-    connections. Self-loops remain ordinary so each plotting backend can use
-    its dedicated self-loop rendering.
+    Which edges are curved depends on `curve_edges`: "same_layer" picks distinct
+    nodes sharing an x coordinate, "reciprocal" picks edges whose reverse is also
+    present, "overlapping" picks either, "all" picks everything and "none"
+    nothing. The first three are the cases where straight lines would coincide.
+    Self-loops are never curved, so each plotting backend keeps using its
+    dedicated self-loop rendering.
     """
-    ordinary_edges = []
-    same_layer_edges = []
+    edge_set = set(edges)
+    straight_edges = []
+    curved_edges = []
     for edge in edges:
         source, target = edge
-        if source != target and np.isclose(pos[source][0], pos[target][0]):
-            same_layer_edges.append(edge)
+        if curve_edges == "none" or source == target:
+            straight_edges.append(edge)
+        elif curve_edges == "all":
+            curved_edges.append(edge)
+        elif curve_edges in ("same_layer", "overlapping") and np.isclose(
+            pos[source][0], pos[target][0]
+        ):
+            curved_edges.append(edge)
+        elif (
+            curve_edges in ("reciprocal", "overlapping")
+            and (target, source) in edge_set
+        ):
+            curved_edges.append(edge)
         else:
-            ordinary_edges.append(edge)
-    return ordinary_edges, same_layer_edges
+            straight_edges.append(edge)
+    return straight_edges, curved_edges
 
 
 # ------------------------------------------------------------------
@@ -2361,7 +2387,8 @@ def plot_paths(
     post_pad: float = 0.2,
     seed: Optional[int] = None,
     edge_width_scale: float = 15,
-    same_layer_curvature: float = 0,
+    edge_curvature: float = 0,
+    curve_edges: str = "overlapping",
 ) -> None:
     """
     Plotting function for both layered (where layers are discrete, in `layer` column of
@@ -2435,10 +2462,16 @@ def plot_paths(
         seed (int, optional): Random seed for reproducibility. Defaults to None.
         edge_width_scale (float, optional): Scale factor for edge widths. Defaults to
             15.
-        same_layer_curvature (float, optional): Curvature of edges between
-            distinct neurons at the same horizontal layer. Must be between -1 and 1.
-            Positive and negative values bend in opposite directions; set to 0 for
-            straight edges. Defaults to 0.
+        edge_curvature (float, optional): Curvature of the edges selected by
+            `curve_edges`. Must be between -1 and 1. Positive and negative values bend
+            in opposite directions; set to 0 for straight edges throughout. Defaults
+            to 0.
+        curve_edges (str, optional): Which edges `edge_curvature` applies to. Edges
+            that would be drawn on top of each other if straight are "same_layer"
+            (distinct neurons in the same horizontal layer) and "reciprocal" (both
+            directions between the same pair of neurons); "overlapping" (default)
+            covers both. Use "all" to curve every edge, or "none" for none. Self-loops
+            are never curved.
 
     Returns:
         fig, ax:
@@ -2447,8 +2480,10 @@ def plot_paths(
     """
     if paths.empty:
         raise ValueError("paths DataFrame is empty")
-    if not -1 <= same_layer_curvature <= 1:
-        raise ValueError("same_layer_curvature must be between -1 and 1")
+    if not -1 <= edge_curvature <= 1:
+        raise ValueError("edge_curvature must be between -1 and 1")
+    if curve_edges not in CURVE_EDGE_MODES:
+        raise ValueError(f"curve_edges must be one of {CURVE_EDGE_MODES}")
 
     df = paths.copy()
 
@@ -2627,11 +2662,13 @@ def plot_paths(
             edge_colors.append(default_edge_color)
 
     all_edges = list(G.edges())
-    ordinary_edges, same_layer_edges = _partition_edges_by_x_position(all_edges, pos)
-    if same_layer_curvature == 0:
-        ordinary_edges = all_edges
-        same_layer_edges = []
-    same_layer_edge_set = set(same_layer_edges)
+    if edge_curvature == 0:
+        straight_edges, curved_edges = all_edges, []
+    else:
+        straight_edges, curved_edges = _partition_edges_for_curvature(
+            all_edges, pos, curve_edges
+        )
+    curved_edge_set = set(curved_edges)
     edge_widths = {edge: G[edge[0]][edge[1]]["weight"] for edge in all_edges}
     edge_color_map = dict(zip(all_edges, edge_colors))
 
@@ -2670,11 +2707,11 @@ def plot_paths(
         for e in net.edges:
             u, v = e["from"], e["to"]
             e["color"] = ec_dict[(u, v)]
-            if (u, v) in same_layer_edge_set:
+            if (u, v) in curved_edge_set:
                 e["smooth"] = {
                     "enabled": True,
-                    "type": ("curvedCW" if same_layer_curvature > 0 else "curvedCCW"),
-                    "roundness": abs(same_layer_curvature),
+                    "type": ("curvedCW" if edge_curvature > 0 else "curvedCCW"),
+                    "roundness": abs(edge_curvature),
                 }
             if edge_text:
                 e["label"] = f"{e['weight_original']:.{weight_decimals}f}"
@@ -2714,23 +2751,23 @@ def plot_paths(
             arrows=True,
             arrowstyle="-|>",
             arrowsize=10,
-            edgelist=ordinary_edges,
-            width=[edge_widths[edge] for edge in ordinary_edges],
-            edge_color=[edge_color_map[edge] for edge in ordinary_edges],
+            edgelist=straight_edges,
+            width=[edge_widths[edge] for edge in straight_edges],
+            edge_color=[edge_color_map[edge] for edge in straight_edges],
             ax=ax,
         )
-        if same_layer_edges:
+        if curved_edges:
             nx.draw_networkx_edges(
                 G,
                 pos=pos,
-                edgelist=same_layer_edges,
+                edgelist=curved_edges,
                 node_size=node_size,
                 arrows=True,
                 arrowstyle="-|>",
                 arrowsize=10,
-                width=[edge_widths[edge] for edge in same_layer_edges],
-                edge_color=[edge_color_map[edge] for edge in same_layer_edges],
-                connectionstyle=f"arc3,rad={same_layer_curvature}",
+                width=[edge_widths[edge] for edge in curved_edges],
+                edge_color=[edge_color_map[edge] for edge in curved_edges],
+                connectionstyle=f"arc3,rad={edge_curvature}",
                 ax=ax,
             )
         if {"pre_activation", "post_activation"}.issubset(df.columns):
@@ -2767,29 +2804,32 @@ def plot_paths(
                 ): f"{G[u][v]['weight_original']:.{weight_decimals}f}"
                 for u, v in G.edges()
             }
-            ordinary_elbl = {edge: elbl[edge] for edge in ordinary_edges}
-            same_layer_elbl = {edge: elbl[edge] for edge in same_layer_edges}
-            if ordinary_elbl:
+            straight_elbl = {edge: elbl[edge] for edge in straight_edges}
+            curved_elbl = {edge: elbl[edge] for edge in curved_edges}
+            if straight_elbl:
                 nx.draw_networkx_edge_labels(
                     G,
                     pos=pos,
-                    edge_labels=ordinary_elbl,
+                    edge_labels=straight_elbl,
                     label_pos=label_pos,
                     font_size=edge_text_size,
                     rotate=False,
-                    connectionstyle="arc3",
                     ax=ax,
                 )
-            if same_layer_elbl:
+            if curved_elbl:
                 nx.draw_networkx_edge_labels(
                     G,
                     pos=pos,
-                    edge_labels=same_layer_elbl,
+                    edge_labels=curved_elbl,
                     label_pos=label_pos,
                     font_size=edge_text_size,
                     rotate=False,
-                    connectionstyle=f"arc3,rad={same_layer_curvature}",
                     ax=ax,
+                    **(
+                        {"connectionstyle": f"arc3,rad={edge_curvature}"}
+                        if _EDGE_LABELS_FOLLOW_CURVES
+                        else {}
+                    ),
                 )
         if layered_mode:
             ax.set_ylim(0, 1)
