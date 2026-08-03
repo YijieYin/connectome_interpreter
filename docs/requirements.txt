@@ -10,7 +10,7 @@ torch>=1.10
 tqdm>=4.65
 plotly>=5.19
 matplotlib>=3.4
-networkx>3.0 
+networkx>=3.4
 ipywidgets>=7.6
 seaborn>=0.11
 IPython>=7.23
