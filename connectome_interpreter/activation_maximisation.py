@@ -526,11 +526,16 @@ class _NetworkBase(nn.Module):
         """Optional per-postsynaptic-neuron L1 budget on incoming ``|weights|``.
 
         When set (pair mode only), :attr:`effective_weights` reparametrizes each
-        row so the sum of absolute incoming weights stays strictly below
-        ``incoming_weight_budget``. Frozen edges keep their exact connectome
-        magnitude and pre-consume the budget; the trainable edges share the
-        remainder via a normalized (softmax-with-slack) allocation. ``None``
-        disables it and reproduces the plain per-edge behaviour (the default).
+        row so the sum of absolute incoming weights never exceeds
+        ``incoming_weight_budget``, reaching it exactly once the row's gains sum
+        to 1. Frozen edges keep their exact connectome magnitude and pre-consume
+        the budget; the trainable edges share the remainder. ``None`` disables it
+        and reproduces the plain per-edge behaviour (the default).
+
+        Note that this *replaces* ``slope_bounds`` as the capping mechanism rather
+        than complementing it: a box on the gain does not translate into a fixed
+        box on the effective weight, because the weight also depends on the rest
+        of the row. Callers using a budget should pass open bounds.
         """
         if incoming_weight_budget is None or self.slope_edge_indices is None:
             self.incoming_weight_budget = None
@@ -544,9 +549,9 @@ class _NetworkBase(nn.Module):
         budget = float(incoming_weight_budget)
         if budget <= 0:
             raise ValueError("incoming_weight_budget must be positive.")
-        # The bound relies on sum(m)/(1 + sum(m)) < 1, which needs m >= 0. A
-        # negative gain can drive the denominator to 0 (sum(m) = -1) or make the
-        # row L1 many times the budget, so reject negative lower bounds outright.
+        # The bound relies on sum(|m|) == sum(m) == T, which needs m >= 0: with a
+        # negative gain the row L1 is R * sum(|m|) / max(1, T), whose numerator can
+        # grow without the denominator following. Reject negative bounds outright.
         if self.slope_lower_bound is not None and bool(
             (self.slope_lower_bound < 0).any()
         ):
@@ -672,11 +677,16 @@ class _NetworkBase(nn.Module):
                 ].to(values.dtype)
             new_values = values * multipliers
         else:
-            # Per-postsynaptic-neuron L1 budget. For each row i the trainable
-            # incoming edges get magnitude R_i * m_j / (1 + sum_k m_k), where
-            # m = effective_slope >= 0, R_i = max(budget - frozen_row_l1_i, 0),
-            # and the "+1" is a slack (unused-budget) slot. Frozen edges keep
-            # their exact magnitude. Row |w| sum = frozen + R_i*T/(1+T) < budget.
+            # Per-postsynaptic-neuron L1 budget. For each post neuron j the
+            # trainable incoming edge i -> j gets magnitude
+            #     R_j * m_ij / max(1, T_j),
+            # where m = effective_slope >= 0, T_j = sum_k m_kj over j's trainable
+            # incoming edges, and R_j = max(budget - frozen_row_l1_j, 0). Frozen
+            # edges keep their exact magnitude, so the row |w| sum comes to
+            # frozen_j + R_j * min(T_j, 1) <= budget: still a hard cap, but one
+            # the row reaches exactly once T_j >= 1 rather than approaching it
+            # asymptotically. Below T_j = 1 the row spends less than its budget,
+            # so the total incoming drive stays learnable.
             n = self.all_weights.shape[0]
             post = indices[0]
             trainable_mask = edge_param_idx >= 0
@@ -693,7 +703,7 @@ class _NetworkBase(nn.Module):
                 self.incoming_weight_budget - self.frozen_row_l1.to(values.dtype),
                 min=0.0,
             )
-            row_scale = remaining / (1.0 + row_T)
+            row_scale = remaining / torch.clamp(row_T, min=1.0)
             trainable_new = torch.sign(values) * edge_m * row_scale[post]
             new_values = torch.where(trainable_mask, trainable_new, values)
 

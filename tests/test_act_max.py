@@ -4060,11 +4060,12 @@ class TestOutputRectify(unittest.TestCase):
 class TestIncomingWeightBudget(unittest.TestCase):
     """incoming_weight_budget: per-postsynaptic-neuron L1 cap (pair mode only).
 
-    effective_weights reparametrizes each row so the sum of absolute incoming
-    weights stays strictly below the budget. Frozen edges (pairs not declared in
-    slope_dict) keep their exact connectome magnitude and pre-consume the budget;
-    the trainable edges share the remainder R_i * m_j / (1 + sum_k m_k), where the
-    "+1" is a slack slot that makes the bound strict for any slope values.
+    For a post neuron j, the trainable incoming edge i -> j gets magnitude
+    R_j * m_ij / max(1, T_j), with T_j the sum of j's trainable gains and
+    R_j = max(budget - frozen_j, 0). Frozen edges (pairs not declared in
+    slope_dict) keep their exact connectome magnitude and pre-consume the budget.
+    The row L1 is therefore frozen_j + R_j * min(T_j, 1): capped at the budget,
+    reached exactly once T_j >= 1, and below it while the gains are small.
     """
 
     def setUp(self):
@@ -4097,22 +4098,66 @@ class TestIncomingWeightBudget(unittest.TestCase):
     def _row_l1(self, model):
         return self._dense_effective(model).abs().sum(dim=1)
 
-    def test_row_l1_stays_strictly_under_budget(self):
+    def test_row_l1_never_exceeds_budget(self):
         row_l1 = self._row_l1(self._model(budget=1.0))
         self.assertTrue(
-            bool((row_l1 < 1.0).all()), f"row L1 {row_l1.tolist()} not all < 1.0"
+            bool((row_l1 <= 1.0 + 1e-6).all()), f"row L1 {row_l1.tolist()} over 1.0"
         )
 
     def test_matches_closed_form(self):
         w = self._dense_effective(self._model(budget=1.0))
         # rows 1 and 2: no frozen mass, one trainable edge with m = 1.0, so
-        # R = 1.0, T = 1.0 and the magnitude is 1.0 * 1.0 / (1 + 1.0) = 0.5
-        self.assertAlmostEqual(float(w[1, 0]), 0.5, places=5)
-        self.assertAlmostEqual(float(w[2, 0]), 0.5, places=5)
+        # R = 1.0, T = 1.0 and the magnitude is 1.0 * 1.0 / max(1, 1.0) = 1.0
+        self.assertAlmostEqual(float(w[1, 0]), 1.0, places=5)
+        self.assertAlmostEqual(float(w[2, 0]), 1.0, places=5)
         # row 3: frozen 0.2 -> R = 0.8, two trainable edges with m = 2.0 -> T = 4,
-        # so each magnitude is 2.0 * 0.8 / (1 + 4) = 0.32
-        self.assertAlmostEqual(float(w[3, 1]), 0.32, places=5)
-        self.assertAlmostEqual(float(w[3, 2]), -0.32, places=5)
+        # so each magnitude is 2.0 * 0.8 / max(1, 4) = 0.4
+        self.assertAlmostEqual(float(w[3, 1]), 0.4, places=5)
+        self.assertAlmostEqual(float(w[3, 2]), -0.4, places=5)
+        self.assertAlmostEqual(float(w[3, 0]), 0.2, places=5)
+
+    def test_budget_is_reached_exactly_once_gains_sum_to_one(self):
+        """T_j >= 1 in every row here, so each row sits exactly at the budget."""
+        row_l1 = self._row_l1(self._model(budget=1.0))
+        np.testing.assert_allclose(row_l1.numpy()[1:], [1.0, 1.0, 1.0], atol=1e-6)
+
+    def test_small_gains_spend_less_than_the_budget(self):
+        """Below T_j = 1 the row uses only part of its budget, so the total
+        incoming drive stays learnable rather than being pinned at the cap."""
+        model = self._model(budget=1.0)
+        with torch.no_grad():
+            model.slope.copy_(torch.full_like(model.slope, 0.1))
+        row_l1 = self._row_l1(model)
+        # row 1: T = 0.1, R = 1.0 -> 0.1.  row 3: frozen 0.2 + 0.8 * 0.2 = 0.36
+        self.assertAlmostEqual(float(row_l1[1]), 0.1, places=5)
+        self.assertAlmostEqual(float(row_l1[3]), 0.36, places=5)
+
+    def test_connectome_init_reproduces_the_connectome(self):
+        """m_ij = t_ij / R_j makes effective_weights reproduce the connectome.
+
+        This is the initialization the cell-type fits use, and it is why the
+        connectome magnitudes are not lost under the reparametrization: they
+        enter through the init rather than through the forward multiplication.
+        """
+        dense = np.zeros((4, 4), dtype=np.float32)
+        dense[3, 1] = 0.4  # A -> B, trainable
+        dense[3, 2] = -0.2  # C -> B, trainable and inhibitory
+        dense[3, 0] = 0.2  # S -> B, frozen
+        groups = {0: "S", 1: "A", 2: "C", 3: "B"}
+        budget = 1.0
+        remaining = budget - 0.2  # R_j, frozen mass pre-consumed
+        init = {("A", "B"): 0.4 / remaining, ("C", "B"): 0.2 / remaining}
+        model = MultilayeredNetwork(
+            csr_matrix(dense),
+            sensory_indices=[0],
+            num_layers=2,
+            idx_to_group=groups,
+            slope_dict=init,
+            incoming_weight_budget=budget,
+        ).to(self.device)
+        w = self._dense_effective(model)
+        self.assertAlmostEqual(float(w[3, 1]), 0.4, places=5)
+        self.assertAlmostEqual(float(w[3, 2]), -0.2, places=5)
         self.assertAlmostEqual(float(w[3, 0]), 0.2, places=5)
 
     def test_frozen_edges_keep_connectome_magnitude(self):
@@ -4127,13 +4172,13 @@ class TestIncomingWeightBudget(unittest.TestCase):
         self.assertGreater(float(w[3, 1]), 0.0)
 
     def test_budget_holds_for_large_slopes(self):
-        """m/(1 + sum m) < 1 for any m, so no slope value can breach the budget."""
+        """T/max(1, T) <= 1 for any T, so no slope value can breach the budget."""
         model = self._model(budget=1.0)
         with torch.no_grad():
             model.slope.copy_(torch.full_like(model.slope, 1e3))
         row_l1 = self._row_l1(model)
         self.assertTrue(
-            bool((row_l1 < 1.0).all()), f"row L1 {row_l1.tolist()} not all < 1.0"
+            bool((row_l1 <= 1.0 + 1e-5).all()), f"row L1 {row_l1.tolist()} over 1.0"
         )
 
     def test_frozen_row_l1_buffer(self):
