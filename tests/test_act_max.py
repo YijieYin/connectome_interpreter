@@ -18,7 +18,7 @@ from connectome_interpreter.activation_maximisation import (
     guess_optimal_stimulus,
     training_mode,
     train_model,
-    get_activations_for_path
+    get_activations_for_path,
 )
 
 
@@ -269,7 +269,6 @@ class TestActivationsToDFBatched(unittest.TestCase):
 
 
 class TestGetNeuronActivation(unittest.TestCase):
-
     def test_2d_output_with_groups(self):
         output = torch.tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]])
         neuron_indices = [0, 2]
@@ -1110,6 +1109,26 @@ class TestDivisiveNormalization(unittest.TestCase):
                 divisive_normalization=dn,
             )
 
+    def test_positive_divnorm_weight_reports_offending_pairs(self):
+        # Regression: divnorm_indices is (2, n_edges), so the offending edges select
+        # columns, not rows. Indexing rows instead is in-bounds (and silently reports
+        # the wrong numbers) for 1-2 offending edges, but raises IndexError from 3 on.
+        dense = np.zeros((4, 4), dtype=float)
+        dense[1, 0] = 0.7  # post 1 (B) <- pre 0 (A)
+        dense[2, 0] = 0.8  # post 2 (B) <- pre 0 (A)
+        dense[3, 0] = 0.9  # post 3 (B) <- pre 0 (A)
+        idx_to_group = {0: "A", 1: "B", 2: "B", 3: "B"}
+        with self.assertRaises(ValueError) as ctx:
+            MultilayeredNetwork(
+                csr_matrix(dense),
+                [0],
+                idx_to_group=idx_to_group,
+                divisive_normalization={"A": ["B"]},
+            )
+        msg = str(ctx.exception)
+        for pair in ("[1, 0]", "[2, 0]", "[3, 0]"):
+            self.assertIn(pair, msg)
+
     def test_weight_removal_and_storage(self):
         dense = np.array([[0.0, -0.5], [0.3, 0.0]], dtype=float)  # from B to A, -0.5
         weights = csr_matrix(dense)
@@ -1509,6 +1528,22 @@ class TestLinearNetwork(unittest.TestCase):
             "Weights matrices are not equal within tolerance",
         )
 
+    def test_sparse_torch_weight_initialization(self):
+        weights = torch.eye(3, dtype=torch.float32).to_sparse()
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=1,
+        ).to(self.device)
+
+        self.assertTrue(model.all_weights.is_sparse)
+        self.assertTrue(
+            torch.allclose(
+                model.all_weights.to_dense().cpu(),
+                torch.eye(3, dtype=torch.float32),
+            )
+        )
+
     def test_forward_pass_2d(self):
         """Test 2D forward pass (single batch)"""
         input_tensor = torch.rand(self.num_sensory, self.num_layers).to(self.device)
@@ -1558,6 +1593,213 @@ class TestLinearNetwork(unittest.TestCase):
         self.assertEqual(
             output.shape, (self.batch_size, self.num_neurons, self.num_layers)
         )
+
+    def test_pair_slope_scales_selected_pre_post_edges(self):
+        weights = csr_matrix(
+            np.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                    [3.0, 0.0, 0.0],
+                ],
+                dtype=np.float32,
+            )
+        )
+        idx_to_group = {0: "lum", 1: "A", 2: "B"}
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=1,
+            tanh_steepness=1.0,
+            tau=1.0,
+            idx_to_group=idx_to_group,
+            slope_dict={("lum", "A"): 0.5},
+        ).to(self.device)
+
+        inputs = torch.tensor([[[1.0]]], device=self.device)
+        output = model(inputs)
+
+        self.assertTrue(torch.allclose(output[0, 1, 0], torch.tensor(1.0)))
+        self.assertTrue(torch.allclose(output[0, 2, 0], torch.tensor(3.0)))
+        self.assertEqual(model.slope_pairs, (("lum", "A"),))
+
+    def test_pair_slope_receives_gradients(self):
+        weights = csr_matrix(
+            np.array(
+                [
+                    [0.0, 0.0],
+                    [1.0, 0.0],
+                ],
+                dtype=np.float32,
+            )
+        )
+        idx_to_group = {0: "lum", 1: "A"}
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=1,
+            tanh_steepness=1.0,
+            tau=1.0,
+            idx_to_group=idx_to_group,
+            slope_dict={("lum", "A"): 1.0},
+        ).to(self.device)
+        model.set_param_grads(slopes=True)
+
+        output = model(torch.tensor([[[1.0]]], device=self.device))
+        loss = (output[0, 1, 0] - 2.0) ** 2
+        loss.backward()
+
+        self.assertIsNotNone(model.slope.grad)
+        self.assertGreater(torch.abs(model.slope.grad).item(), 0.0)
+
+    def test_pair_slope_bounds_project_effective_multiplier(self):
+        weights = csr_matrix(np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32))
+        idx_to_group = {0: "lum", 1: "A"}
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=1,
+            tanh_steepness=1.0,
+            tau=1.0,
+            idx_to_group=idx_to_group,
+            slope_dict={("lum", "A"): 2.0},
+            slope_bounds={("lum", "A"): (0.5, 1.5)},
+        ).to(self.device)
+
+        self.assertTrue(
+            torch.allclose(model.effective_slope.cpu(), torch.tensor([1.5]))
+        )
+        model.project_parameter_bounds_()
+        self.assertTrue(torch.allclose(model.slope.cpu(), torch.tensor([1.5])))
+
+    def test_pair_slope_update_rescale_uses_configured_scale(self):
+        weights = csr_matrix(np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32))
+        idx_to_group = {0: "lum", 1: "A"}
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=1,
+            tanh_steepness=1.0,
+            tau=1.0,
+            idx_to_group=idx_to_group,
+            slope_dict={("lum", "A"): 1.0},
+            slope_update_scales={("lum", "A"): 0.1},
+        ).to(self.device)
+
+        before = model.slope.detach().clone()
+        with torch.no_grad():
+            model.slope.add_(0.2)
+        model.rescale_slope_update_(before)
+
+        self.assertTrue(torch.allclose(model.slope.cpu(), torch.tensor([3.0])))
+
+    def test_sensory_replace_mode_keeps_sensory_trace(self):
+        weights = csr_matrix(np.array([[1.0]], dtype=np.float32))
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=3,
+            tanh_steepness=1.0,
+            tau=1.0,
+            sensory_input_mode="replace",
+        ).to(self.device)
+
+        inputs = torch.tensor([[[1.0, 2.0, 3.0]]], device=self.device)
+        output = model(inputs)
+
+        self.assertTrue(torch.allclose(output[0, 0, :], inputs[0, 0, :].cpu()))
+
+    def test_initial_state_sets_first_full_state(self):
+        weights = csr_matrix(np.zeros((2, 2), dtype=np.float32))
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=1,
+            tanh_steepness=1.0,
+            tau=2.0,
+            sensory_input_mode="replace",
+        ).to(self.device)
+
+        inputs = torch.tensor([[[3.0]]], device=self.device)
+        initial_state = torch.tensor([7.0, 2.0], device=self.device)
+        output = model(inputs, initial_state=initial_state)
+
+        self.assertTrue(torch.allclose(output[0, 0, 0], torch.tensor(3.0)))
+        self.assertTrue(torch.allclose(output[0, 1, 0], torch.tensor(1.0)))
+
+    def test_bias_transform_identity_allows_negative_biases(self):
+        idx_to_group = {i: f"group_{i}" for i in range(3)}
+        bias_dict = {"group_0": -0.2, "group_1": 0.3, "group_2": -0.4}
+        model = LinearNetwork(
+            csr_matrix(np.eye(3, dtype=np.float32)),
+            sensory_indices=[0],
+            num_layers=1,
+            idx_to_group=idx_to_group,
+            bias_dict=bias_dict,
+            bias_transform="identity",
+        ).to(self.device)
+
+        expected = torch.tensor([-0.2, 0.3, -0.4], device=self.device)
+        self.assertTrue(torch.allclose(model.biases, expected))
+
+    def test_train_model_trains_pair_slope_with_single_batch(self):
+        weights = csr_matrix(
+            np.array(
+                [
+                    [0.0, 0.0],
+                    [1.0, 0.0],
+                ],
+                dtype=np.float32,
+            )
+        )
+        idx_to_group = {0: "lum", 1: "A"}
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=1,
+            tanh_steepness=1.0,
+            tau=1.0,
+            idx_to_group=idx_to_group,
+            slope_dict={("lum", "A"): 1.0},
+        ).to(self.device)
+        before = model.slope.detach().clone()
+        inputs = torch.tensor([[[1.0]]], device=self.device)
+        targets = pd.DataFrame(
+            [{"batch": 0, "neuron_idx": 1, "layer": 0, "value": 2.0}]
+        )
+
+        (
+            _,
+            history,
+            _,
+            val_inputs,
+            _,
+            val_targets,
+            train_indices,
+            val_indices,
+        ) = train_model(
+            model,
+            inputs,
+            targets,
+            num_epochs=5,
+            learning_rate=0.1,
+            param_reg_lambda=0.0,
+            wandb=False,
+            train_fraction=1.0,
+            train_slopes=True,
+            train_biases=False,
+            train_divisive_strength=False,
+            train_tau=False,
+            project_parameter_bounds=True,
+            checkpoint_steps=0,
+        )
+
+        self.assertEqual(len(history["loss"]), 5)
+        self.assertEqual(val_inputs.shape[0], 0)
+        self.assertEqual(len(val_targets), 0)
+        self.assertEqual(train_indices.tolist(), [0])
+        self.assertEqual(val_indices.tolist(), [])
+        self.assertGreater(model.slope.detach().item(), before.item())
 
     def test_custom_activation_function(self):
         """Test LinearNetwork with custom activation function"""
@@ -3275,6 +3517,7 @@ class TestMultiGroupDivnorm(unittest.TestCase):
         # all divnorm edges point at the single strength parameter
         self.assertTrue(torch.all(model.edge_pre_param_idx == 0))
 
+
 class TestGetActivationsForPath(unittest.TestCase):
     def setUp(self):
         self.num_neurons = 6
@@ -3301,10 +3544,10 @@ class TestGetActivationsForPath(unittest.TestCase):
         )
         # layer1 pre from model_in[:,0]; post from activations[:,0]
         pre, post = self._row(out, 0, 3)
-        self.assertEqual(pre, 10.0)                      # model_in[0,0]
+        self.assertEqual(pre, 10.0)  # model_in[0,0]
         self.assertEqual(post, self.activations[3, 0])
         pre, post = self._row(out, 1, 4)
-        self.assertEqual(pre, 20.0)                      # model_in[1,0]
+        self.assertEqual(pre, 20.0)  # model_in[1,0]
         self.assertEqual(post, self.activations[4, 0])
         # layer2 pre from activations[:,0], post from activations[:,1]
         pre, post = self._row(out, 3, 5)
@@ -3318,8 +3561,11 @@ class TestGetActivationsForPath(unittest.TestCase):
 
     def test_aggregate_mean_ignores_model_in(self):
         out = get_activations_for_path(
-            self.path, self.activations, model_in=None,
-            sensory_indices=None, aggregate="mean"
+            self.path,
+            self.activations,
+            model_in=None,
+            sensory_indices=None,
+            aggregate="mean",
         )
         means = self.activations.mean(axis=1)
         # layer1 pre now from aggregated activations, not model_in
@@ -3359,12 +3605,424 @@ class TestGetActivationsForPath(unittest.TestCase):
 
     def test_torch_input(self):
         out = get_activations_for_path(
-            self.path, torch.tensor(self.activations),
-            torch.tensor(self.model_in), self.sensory_indices
+            self.path,
+            torch.tensor(self.activations),
+            torch.tensor(self.model_in),
+            self.sensory_indices,
         )
         pre, post = self._row(out, 0, 3)
         self.assertEqual(pre, 10.0)
         self.assertEqual(post, self.activations[3, 0])
+
+
+class TestTrainModelGroupTargets(unittest.TestCase):
+    """train_model(..., target_node_groups=...) fits group (cell-type) averages."""
+
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        torch.manual_seed(0)
+        np.random.seed(0)
+        dense_weights = np.random.rand(6, 6) * 0.1
+        self.all_weights = csr_matrix(dense_weights)
+        self.sensory_indices = [0, 1]
+        self.idx_to_group = {i: f"type_{i // 2}" for i in range(6)}
+        self.inputs = torch.rand(3, 2, 2).to(self.device)
+
+    def _make_model(self, cls):
+        return cls(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+        ).to(self.device)
+
+    def test_runs_and_finite_for_both_model_classes(self):
+        groups = {0: [2, 3], 1: [4, 5]}
+        targets = pd.DataFrame(
+            [
+                {"batch": 0, "neuron_idx": 0, "layer": 1, "value": 0.5},
+                {"batch": 1, "neuron_idx": 1, "layer": 1, "value": 0.3},
+                {"batch": 2, "neuron_idx": 0, "layer": 0, "value": 0.7},
+            ]
+        )
+        for cls in (LinearNetwork, MultilayeredNetwork):
+            with self.subTest(model=cls.__name__):
+                model = self._make_model(cls)
+                _, history, *_ = train_model(
+                    model,
+                    self.inputs,
+                    targets,
+                    num_epochs=3,
+                    wandb=False,
+                    train_fraction=1.0,
+                    checkpoint_steps=0,
+                    target_node_groups=groups,
+                )
+                self.assertEqual(len(history["loss"]), 3)
+                self.assertTrue(all(np.isfinite(history["activation_loss"])))
+
+    def test_group_mean_matches_manual_loss(self):
+        """Epoch-0 activation loss equals the manual MSE of the group means."""
+        model = self._make_model(LinearNetwork)
+        groups = {0: [2, 3, 4]}
+        target_value = 0.42
+        targets = pd.DataFrame(
+            [
+                {"batch": b, "neuron_idx": 0, "layer": 1, "value": target_value}
+                for b in range(3)
+            ]
+        )
+
+        with torch.no_grad():
+            outputs = model(self.inputs, checkpoint_steps=0)  # (batch, nodes, layers)
+            group_mean = outputs[:, groups[0], :].mean(dim=1)  # (batch, layers)
+            pred = group_mean[:, 1]  # layer 1, all batches
+            expected = float(((pred - target_value) ** 2).mean().cpu())
+
+        _, history, *_ = train_model(
+            model,
+            self.inputs,
+            targets,
+            num_epochs=1,
+            wandb=False,
+            train_fraction=1.0,
+            checkpoint_steps=0,
+            param_reg_lambda=0.0,
+            activation_loss_fn="mse",
+            target_node_groups=groups,
+        )
+        self.assertAlmostEqual(history["activation_loss"][0], expected, places=5)
+
+    def test_single_member_groups_match_per_node_targets(self):
+        """Single-member groups reproduce ordinary per-node training exactly."""
+        per_node_targets = pd.DataFrame(
+            [
+                {"batch": 0, "neuron_idx": 2, "layer": 1, "value": 0.5},
+                {"batch": 1, "neuron_idx": 3, "layer": 1, "value": 0.3},
+                {"batch": 2, "neuron_idx": 2, "layer": 0, "value": 0.7},
+            ]
+        )
+        group_targets = per_node_targets.copy()
+        group_targets["neuron_idx"] = group_targets["neuron_idx"].map({2: 0, 3: 1})
+        groups = {0: [2], 1: [3]}
+
+        torch.manual_seed(1)
+        model_a = self._make_model(LinearNetwork)
+        _, hist_node, *_ = train_model(
+            model_a,
+            self.inputs,
+            per_node_targets,
+            num_epochs=4,
+            wandb=False,
+            train_fraction=1.0,
+            checkpoint_steps=0,
+            seed=7,
+        )
+        torch.manual_seed(1)
+        model_b = self._make_model(LinearNetwork)
+        _, hist_group, *_ = train_model(
+            model_b,
+            self.inputs,
+            group_targets,
+            num_epochs=4,
+            wandb=False,
+            train_fraction=1.0,
+            checkpoint_steps=0,
+            seed=7,
+            target_node_groups=groups,
+        )
+        np.testing.assert_allclose(
+            hist_node["activation_loss"],
+            hist_group["activation_loss"],
+            rtol=1e-5,
+            atol=1e-7,
+        )
+
+    def test_unknown_group_id_in_targets_raises(self):
+        model = self._make_model(LinearNetwork)
+        targets = pd.DataFrame(
+            [{"batch": 0, "neuron_idx": 9, "layer": 1, "value": 0.5}]
+        )
+        with self.assertRaises(ValueError):
+            train_model(
+                model,
+                self.inputs,
+                targets,
+                num_epochs=1,
+                wandb=False,
+                train_fraction=1.0,
+                target_node_groups={0: [2, 3]},
+            )
+
+
+class TestTrainModelExtraParamsAndInputTransform(unittest.TestCase):
+    """train_model(..., extra_parameters=..., input_transform=...)."""
+
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        torch.manual_seed(0)
+        np.random.seed(0)
+        dense_weights = np.random.rand(6, 6) * 0.1
+        self.all_weights = csr_matrix(dense_weights)
+        self.sensory_indices = [0, 1]
+        self.idx_to_group = {i: f"type_{i // 2}" for i in range(6)}
+        # positive inputs so log(inputs + epsilon) is well defined
+        self.inputs = torch.rand(3, 2, 2).to(self.device)
+        self.targets = pd.DataFrame(
+            [
+                {"batch": 0, "neuron_idx": 2, "layer": 1, "value": 0.5},
+                {"batch": 1, "neuron_idx": 3, "layer": 1, "value": 0.3},
+                {"batch": 2, "neuron_idx": 4, "layer": 1, "value": 0.7},
+            ]
+        )
+
+    def _make_model(self, cls):
+        return cls(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+        ).to(self.device)
+
+    def test_input_transform_matches_precomputed_transform(self):
+        """Passing input_transform=t equals pre-applying t to the inputs."""
+        transform = lambda x: torch.log(x + 0.3)
+
+        torch.manual_seed(1)
+        model_a = self._make_model(LinearNetwork)
+        _, hist_pre, *_ = train_model(
+            model_a,
+            transform(self.inputs),
+            self.targets,
+            num_epochs=4,
+            wandb=False,
+            train_fraction=1.0,
+            checkpoint_steps=0,
+            seed=7,
+        )
+        torch.manual_seed(1)
+        model_b = self._make_model(LinearNetwork)
+        _, hist_tf, *_ = train_model(
+            model_b,
+            self.inputs,
+            self.targets,
+            num_epochs=4,
+            wandb=False,
+            train_fraction=1.0,
+            checkpoint_steps=0,
+            seed=7,
+            input_transform=transform,
+        )
+        np.testing.assert_allclose(
+            hist_pre["activation_loss"],
+            hist_tf["activation_loss"],
+            rtol=1e-5,
+            atol=1e-7,
+        )
+
+    def test_extra_parameter_is_trained(self):
+        """A model-external epsilon used by input_transform receives updates."""
+        for cls in (LinearNetwork, MultilayeredNetwork):
+            with self.subTest(model=cls.__name__):
+                torch.manual_seed(0)
+                model = self._make_model(cls)
+                epsilon = torch.nn.Parameter(torch.tensor(0.2, device=self.device))
+                transform = lambda x: torch.log(
+                    x + torch.nn.functional.softplus(epsilon)
+                )
+                eps0 = float(epsilon.detach().cpu())
+                _, history, *_ = train_model(
+                    model,
+                    self.inputs,
+                    self.targets,
+                    num_epochs=5,
+                    wandb=False,
+                    train_fraction=1.0,
+                    checkpoint_steps=0,
+                    learning_rate=0.05,
+                    param_reg_lambda=0.0,
+                    extra_parameters=[epsilon],
+                    input_transform=transform,
+                )
+                self.assertTrue(np.isfinite(float(epsilon.detach().cpu())))
+                self.assertNotAlmostEqual(float(epsilon.detach().cpu()), eps0, places=6)
+                self.assertEqual(len(history["loss"]), 5)
+                self.assertTrue(all(np.isfinite(history["activation_loss"])))
+
+    def test_extra_parameter_regularized_toward_initial_value(self):
+        """extra_parameters contribute to the L1 parameter-change regularization."""
+        torch.manual_seed(0)
+        model = self._make_model(LinearNetwork)
+        epsilon = torch.nn.Parameter(torch.tensor(0.2, device=self.device))
+        transform = lambda x: torch.log(x + torch.nn.functional.softplus(epsilon))
+        _, history, *_ = train_model(
+            model,
+            self.inputs,
+            self.targets,
+            num_epochs=3,
+            wandb=False,
+            train_fraction=1.0,
+            checkpoint_steps=0,
+            learning_rate=0.05,
+            param_reg_lambda=1.0,
+            train_slopes=False,
+            train_biases=False,
+            train_tau=False,
+            extra_parameters=[epsilon],
+            input_transform=transform,
+        )
+        # Only epsilon moves (all model params frozen), so a positive reg loss
+        # after epoch 0 can only come from the extra parameter being included.
+        self.assertGreater(history["param_reg_loss"][-1], 0.0)
+
+    def test_input_transform_not_callable_raises(self):
+        model = self._make_model(LinearNetwork)
+        with self.assertRaises(TypeError):
+            train_model(
+                model,
+                self.inputs,
+                self.targets,
+                num_epochs=1,
+                wandb=False,
+                train_fraction=1.0,
+                input_transform=123,
+            )
+
+    def test_nonfinite_gradient_step_is_skipped(self):
+        """An inf gradient skips the step instead of corrupting parameters to NaN."""
+        torch.manual_seed(0)
+        model = self._make_model(LinearNetwork)
+        state = {"n": 0}
+
+        def inject_inf_once(grad):
+            state["n"] += 1
+            if state["n"] == 1:  # first backward only
+                return torch.full_like(grad, float("inf"))
+            return grad
+
+        model.raw_biases.requires_grad_(True)  # hooks require grad at registration
+        model.raw_biases.register_hook(inject_inf_once)
+        _, history, *_ = train_model(
+            model,
+            self.inputs,
+            self.targets,
+            num_epochs=3,
+            wandb=False,
+            train_fraction=1.0,
+            checkpoint_steps=0,
+            train_biases=True,
+        )
+        # Without the guard, clip_grad_norm_ would turn the inf grad into NaN and
+        # optimizer.step() would write NaN into the bias.
+        self.assertTrue(torch.isfinite(model.raw_biases).all())
+        self.assertTrue(all(np.isfinite(history["activation_loss"])))
+
+
+class TestOutputClampMax(unittest.TestCase):
+    """MultilayeredNetwork.output_clamp_max controls the post-layer rate ceiling."""
+
+    @staticmethod
+    def _unbounded_activation(model, x, x_previous=None):
+        # Deterministic activation whose output exceeds 1, so the [0, 1] output
+        # clamp (when active) is observable on the non-sensory nodes.
+        return torch.relu(x) + 5.0
+
+    def _build(self, output_clamp_max):
+        n, s, layers = 6, 2, 4
+        weights = np.zeros((n, n), dtype=np.float32)
+        weights[s:, s:] = 0.3  # positive recurrence among non-sensory nodes
+        return MultilayeredNetwork(
+            csr_matrix(weights),
+            sensory_indices=list(range(s)),
+            num_layers=layers,
+            threshold=0.0,
+            activation_function=self._unbounded_activation,
+            sensory_input_mode="replace",
+            output_clamp_max=output_clamp_max,
+        )
+
+    def test_default_attribute_is_one(self):
+        model = MultilayeredNetwork(
+            csr_matrix(np.zeros((4, 4), dtype=np.float32)),
+            sensory_indices=[0],
+            num_layers=2,
+        )
+        self.assertEqual(model.output_clamp_max, 1.0)
+
+    def test_default_clamps_non_sensory_to_one(self):
+        model = self._build(1.0)
+        inp = torch.full((2, 4), 0.5)
+        out = model(inp)  # (n_neurons, num_layers)
+        non_sensory = out[2:, :]
+        self.assertLessEqual(float(non_sensory.max()), 1.0 + 1e-5)
+
+    def test_none_disables_clamp(self):
+        model = self._build(None)
+        inp = torch.full((2, 4), 0.5)
+        out = model(inp)
+        non_sensory = out[2:, :]
+        self.assertGreater(float(non_sensory.max()), 1.0)
+
+    def test_none_matches_default_where_checkpointed(self):
+        # The checkpointed path (_forward_chunk) must honour output_clamp_max too.
+        model = self._build(None)
+        inp = torch.full((2, 4), 0.5, requires_grad=True)
+        out = model(inp, checkpoint_steps=2)
+        self.assertGreater(float(out[2:, :].max()), 1.0)
+
+
+class TestOutputRectify(unittest.TestCase):
+    """MultilayeredNetwork.output_rectify controls the post-layer >= 0 floor."""
+
+    @staticmethod
+    def _negative_activation(model, x, x_previous=None):
+        # Deterministic activation whose output is negative, so the hard
+        # rectification (when active) is observable on the non-sensory nodes.
+        return torch.relu(x) - 3.0
+
+    def _build(self, output_rectify):
+        n, s, layers = 6, 2, 4
+        weights = np.zeros((n, n), dtype=np.float32)
+        weights[s:, s:] = 0.3  # positive recurrence among non-sensory nodes
+        return MultilayeredNetwork(
+            csr_matrix(weights),
+            sensory_indices=list(range(s)),
+            num_layers=layers,
+            threshold=0.0,
+            activation_function=self._negative_activation,
+            sensory_input_mode="replace",
+            output_clamp_max=None,  # isolate the floor from the ceiling
+            output_rectify=output_rectify,
+        )
+
+    def test_default_attribute_is_true(self):
+        model = MultilayeredNetwork(
+            csr_matrix(np.zeros((4, 4), dtype=np.float32)),
+            sensory_indices=[0],
+            num_layers=2,
+        )
+        self.assertTrue(model.output_rectify)
+
+    def test_default_rectifies_non_sensory_to_floor(self):
+        model = self._build(True)
+        inp = torch.full((2, 4), 0.5)
+        out = model(inp)  # (n_neurons, num_layers)
+        non_sensory = out[2:, :]
+        self.assertGreaterEqual(float(non_sensory.min()), -1e-5)
+
+    def test_false_allows_negative_rates(self):
+        model = self._build(False)
+        inp = torch.full((2, 4), 0.5)
+        out = model(inp)
+        non_sensory = out[2:, :]
+        self.assertLess(float(non_sensory.min()), 0.0)
+
+    def test_false_matches_where_checkpointed(self):
+        # The checkpointed path (_forward_chunk) must honour output_rectify too.
+        model = self._build(False)
+        inp = torch.full((2, 4), 0.5, requires_grad=True)
+        out = model(inp, checkpoint_steps=2)
+        self.assertLess(float(out[2:, :].min()), 0.0)
 
 
 if __name__ == "__main__":
