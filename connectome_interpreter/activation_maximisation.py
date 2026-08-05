@@ -234,10 +234,21 @@ class _NetworkBase(nn.Module):
         # [0, 1] output range for all existing callers.
         self.output_clamp_max = output_clamp_max
 
-        # Hard rectification (>= threshold floor) applied to non-sensory
-        # activations after each layer. False lets rates go negative, e.g. when
-        # the activation function itself is signed; the default True preserves
-        # the historical non-negative output range for all existing callers.
+        # Hard threshold gate (>= threshold passes through, below -> 0) applied to
+        # the post-layer state. False lets rates go negative, e.g. when the
+        # activation function itself is signed; the default True preserves the
+        # historical behaviour for all existing callers.
+        #
+        # This gates the *post-layer* application only. The built-in
+        # activation_function applies the same gate internally as the relu of
+        # tanh(relu(slope * x + bias)), and that one is NOT under this flag, so
+        # with the built-in activation False still never yields negative rates --
+        # it only stops sub-threshold activity being re-zeroed after the tau
+        # integration, which is itself a large effect. Negative rates require a
+        # custom activation_function (which bypasses the internal gate entirely).
+        #
+        # Honoured by MultilayeredNetwork only; LinearNetwork applies neither this
+        # nor output_clamp_max, so both are silently inert there.
         self.output_rectify = output_rectify
 
         # slope_dict is dual-format: cell-type keys (node mode, legacy per-post
