@@ -544,6 +544,16 @@ class _NetworkBase(nn.Module):
         budget = float(incoming_weight_budget)
         if budget <= 0:
             raise ValueError("incoming_weight_budget must be positive.")
+        # The bound relies on sum(m)/(1 + sum(m)) < 1, which needs m >= 0. A
+        # negative gain can drive the denominator to 0 (sum(m) = -1) or make the
+        # row L1 many times the budget, so reject negative lower bounds outright.
+        if self.slope_lower_bound is not None and bool(
+            (self.slope_lower_bound < 0).any()
+        ):
+            raise ValueError(
+                "incoming_weight_budget requires non-negative slope lower bounds; "
+                "a negative gain breaks the per-row L1 bound."
+            )
 
         n = self.all_weights.shape[0]
         post_idx = self.all_weights._indices()[0]

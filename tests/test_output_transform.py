@@ -1,5 +1,9 @@
 """train_model(output_transform=...) hook: applied to the model output before
-the targets are gathered, and works with the sensor convolution."""
+the targets are gathered.
+
+This is the hook the L123 fits use to push the rate model through a forward GCaMP
+sensor convolution; the convolution itself lives in the analysis tree, so the
+cases here use plain shape-preserving stand-ins."""
 
 import copy
 
@@ -119,11 +123,8 @@ def test_non_callable_output_transform_rejected():
         )
 
 
-def test_sensor_transform_runs_in_train_model():
-    # sensor_kernel lives in the analysis tree, not the library, so this one is
-    # skipped wherever it is not importable (CI included).
-    sk = pytest.importorskip("sensor_kernel")
-    tr = sk.make_sensor_output_transform(tau_c_s=0.3, dt_ms=1.0)
+def test_output_transform_trains_over_multiple_epochs():
+    """A stateful, shape-preserving transform keeps the loss finite while training."""
     hist = train_model(
         _model_fixed(),
         _inputs(),
@@ -132,7 +133,7 @@ def test_sensor_transform_runs_in_train_model():
         train_fraction=1.0,
         param_reg_lambda=0.0,
         checkpoint_steps=0,
-        output_transform=tr,
+        output_transform=lambda o: torch.cumsum(o, dim=-1) * 0.5,
         seed=0,
     )[1]
     losses = hist["activation_loss"] if isinstance(hist, dict) else None

@@ -4195,6 +4195,20 @@ class TestIncomingWeightBudget(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self._model(budget=bad)
 
+    def test_negative_slope_lower_bound_raises(self):
+        """The bound needs m >= 0: a negative gain drives 1 + sum(m) toward 0."""
+        with self.assertRaises(ValueError) as ctx:
+            MultilayeredNetwork(
+                csr_matrix(self.dense),
+                sensory_indices=[0],
+                num_layers=2,
+                idx_to_group=self.idx_to_group,
+                slope_dict=self.slope_dict,
+                slope_bounds={("S", "A"): (-1.0, 5.0), ("A", "B"): (-1.0, 5.0)},
+                incoming_weight_budget=1.0,
+            )
+        self.assertIn("non-negative", str(ctx.exception))
+
     def test_forward_pass_is_finite_under_budget(self):
         model = self._model(budget=1.0)
         out = model(torch.full((1, 2), 0.5))
