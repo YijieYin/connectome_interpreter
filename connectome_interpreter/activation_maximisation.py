@@ -549,16 +549,6 @@ class _NetworkBase(nn.Module):
         budget = float(incoming_weight_budget)
         if budget <= 0:
             raise ValueError("incoming_weight_budget must be positive.")
-        # The bound relies on sum(|m|) == sum(m) == T, which needs m >= 0: with a
-        # negative gain the row L1 is R * sum(|m|) / max(1, T), whose numerator can
-        # grow without the denominator following. Reject negative bounds outright.
-        if self.slope_lower_bound is not None and bool(
-            (self.slope_lower_bound < 0).any()
-        ):
-            raise ValueError(
-                "incoming_weight_budget requires non-negative slope lower bounds; "
-                "a negative gain breaks the per-row L1 bound."
-            )
 
         n = self.all_weights.shape[0]
         post_idx = self.all_weights._indices()[0]
@@ -679,14 +669,19 @@ class _NetworkBase(nn.Module):
         else:
             # Per-postsynaptic-neuron L1 budget. For each post neuron j the
             # trainable incoming edge i -> j gets magnitude
-            #     R_j * m_ij / max(1, T_j),
-            # where m = effective_slope >= 0, T_j = sum_k m_kj over j's trainable
-            # incoming edges, and R_j = max(budget - frozen_row_l1_j, 0). Frozen
-            # edges keep their exact magnitude, so the row |w| sum comes to
-            # frozen_j + R_j * min(T_j, 1) <= budget: still a hard cap, but one
-            # the row reaches exactly once T_j >= 1 rather than approaching it
-            # asymptotically. Below T_j = 1 the row spends less than its budget,
-            # so the total incoming drive stays learnable.
+            #     R_j * |m_ij| / max(1, T_j),
+            # where T_j = sum_k |m_kj| over j's trainable incoming edges and
+            # R_j = max(budget - frozen_row_l1_j, 0). Frozen edges keep their
+            # exact magnitude, so the row |w| sum comes to
+            # frozen_j + R_j * min(T_j, 1) <= budget: a hard cap the row reaches
+            # exactly once T_j >= 1 rather than approaching it asymptotically.
+            # Below T_j = 1 the row spends less than its budget, so the total
+            # incoming drive stays learnable.
+            #
+            # The denominator aggregates |m|, matching the numerator, so the cap
+            # holds for any gain values including negative ones -- a signed sum
+            # would let opposite-sign gains cancel in the denominator while both
+            # still contribute their magnitude to the row L1.
             n = self.all_weights.shape[0]
             post = indices[0]
             trainable_mask = edge_param_idx >= 0
@@ -697,7 +692,7 @@ class _NetworkBase(nn.Module):
                 torch.zeros_like(values),
             )
             row_T = torch.zeros(n, dtype=values.dtype, device=values.device).index_add(
-                0, post, edge_m
+                0, post, edge_m.abs()
             )
             remaining = torch.clamp(
                 self.incoming_weight_budget - self.frozen_row_l1.to(values.dtype),

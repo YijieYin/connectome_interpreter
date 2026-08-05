@@ -4240,19 +4240,33 @@ class TestIncomingWeightBudget(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self._model(budget=bad)
 
-    def test_negative_slope_lower_bound_raises(self):
-        """The bound needs m >= 0: a negative gain drives 1 + sum(m) toward 0."""
-        with self.assertRaises(ValueError) as ctx:
-            MultilayeredNetwork(
-                csr_matrix(self.dense),
-                sensory_indices=[0],
-                num_layers=2,
-                idx_to_group=self.idx_to_group,
-                slope_dict=self.slope_dict,
-                slope_bounds={("S", "A"): (-1.0, 5.0), ("A", "B"): (-1.0, 5.0)},
-                incoming_weight_budget=1.0,
-            )
-        self.assertIn("non-negative", str(ctx.exception))
+    def test_cap_holds_with_opposite_sign_gains(self):
+        """The denominator aggregates |m|, so the cap survives mixed signs.
+
+        A signed denominator would let +K and -K cancel in T_j while both still
+        contributed |K| to the row L1, putting the row arbitrarily far over
+        budget as K grows.
+        """
+        dense = np.zeros((4, 4), dtype=np.float32)
+        dense[3, 1] = 0.4  # A -> B
+        dense[3, 2] = 0.2  # C -> B, independent gain
+        dense[3, 0] = 0.2  # S -> B, frozen
+        groups = {0: "S", 1: "A", 2: "C", 3: "B"}
+        model = MultilayeredNetwork(
+            csr_matrix(dense),
+            sensory_indices=[0],
+            num_layers=2,
+            idx_to_group=groups,
+            slope_dict={("A", "B"): 1.0, ("C", "B"): 1.0},
+            slope_bounds={("A", "B"): (-100.0, 100.0), ("C", "B"): (-100.0, 100.0)},
+            incoming_weight_budget=1.0,
+        ).to(self.device)
+        for k in (1.0, 10.0, 1e3):
+            with self.subTest(k=k):
+                with torch.no_grad():
+                    model.slope.copy_(torch.tensor([k, -k], device=model.slope.device))
+                row_l1 = self._row_l1(model)
+                self.assertLessEqual(float(row_l1[3]), 1.0 + 1e-5)
 
     def test_forward_pass_is_finite_under_budget(self):
         model = self._model(budget=1.0)
