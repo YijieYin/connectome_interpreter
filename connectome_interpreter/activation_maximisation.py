@@ -2,7 +2,6 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple, Union
 import contextlib
-import warnings
 
 import numpy as np
 import numpy.typing as npt
@@ -26,6 +25,12 @@ from .utils import (
     to_nparray,
     scipy_sparse_to_pytorch,
 )
+
+
+# Default box for a pair-mode gain. The gain is dimensionless (w_eff = m * w), so
+# a fixed box is meaningful across edges of any weight. 0 is a safe lower bound
+# because dL/dm = w * dL/dw_eff is nonzero there, so a zeroed edge can recover.
+DEFAULT_SLOPE_BOUNDS = (0.0, 50.0)
 
 
 @dataclass
@@ -127,8 +132,6 @@ class _NetworkBase(nn.Module):
         tau_log_scale: bool = False,
         sensory_input_mode: str = "add",
         device: Optional[torch.device] = None,
-        output_clamp_max: Optional[float] = 1.0,
-        output_rectify: bool = True,
         incoming_weight_budget: Optional[float] = None,
     ):
         super().__init__()
@@ -228,28 +231,6 @@ class _NetworkBase(nn.Module):
         # multiplicatively on tau; effective_tau exponentiates it back.
         self.tau_log_scale = tau_log_scale
         self.sensory_input_mode = sensory_input_mode
-        # Upper clamp applied to non-sensory activations after each layer in
-        # MultilayeredNetwork.forward. None disables it (unbounded rates, e.g. a
-        # rectified-square model); the default 1.0 preserves the historical
-        # [0, 1] output range for all existing callers.
-        self.output_clamp_max = output_clamp_max
-
-        # Hard threshold gate (>= threshold passes through, below -> 0) applied to
-        # the post-layer state. False lets rates go negative, e.g. when the
-        # activation function itself is signed; the default True preserves the
-        # historical behaviour for all existing callers.
-        #
-        # This gates the *post-layer* application only. The built-in
-        # activation_function applies the same gate internally as the relu of
-        # tanh(relu(slope * x + bias)), and that one is NOT under this flag, so
-        # with the built-in activation False still never yields negative rates --
-        # it only stops sub-threshold activity being re-zeroed after the tau
-        # integration, which is itself a large effect. Negative rates require a
-        # custom activation_function (which bypasses the internal gate entirely).
-        #
-        # Honoured by MultilayeredNetwork only; LinearNetwork applies neither this
-        # nor output_clamp_max, so both are silently inert there.
-        self.output_rectify = output_rectify
 
         # slope_dict is dual-format: cell-type keys (node mode, legacy per-post
         # slope applied after the matmul) or (pre, post) tuple keys (pair mode,
@@ -412,6 +393,7 @@ class _NetworkBase(nn.Module):
                 slope_update_scales,
                 idx_to_group,
                 device,
+                budget_is_set=incoming_weight_budget is not None,
             )
             self._setup_incoming_budget(incoming_weight_budget, device)
         else:
@@ -440,6 +422,7 @@ class _NetworkBase(nn.Module):
         slope_update_scales,
         idx_to_group,
         device,
+        budget_is_set=False,
     ):
         """Build the per-(pre, post) ``slope`` gain (pair mode).
 
@@ -447,6 +430,18 @@ class _NetworkBase(nn.Module):
         maps each edge of ``all_weights`` to its pair (or -1), and
         ``divnorm_slope_edge_indices`` does the same for the divisive-normalization
         edges so the same gain multiplies the weight wherever it appears.
+
+        The gain enters the forward pass as ``w_eff = m * w``, so ``m`` is
+        dimensionless and the default bounds ``(0, 50)`` box it directly. The hard
+        lower bound of ``0`` is safe here: ``dL/dm = w * dL/dw_eff`` stays nonzero
+        at ``m = 0``, so an edge driven to zero can still recover.
+
+        With ``budget_is_set`` the default update scale becomes the median ``|w|``
+        over the pair's edges instead of ``1``. ``rescale_slope_update_`` divides
+        the step by that scale, which equalizes step sizes in *weight* space -- a
+        gain on a 0.01 edge would otherwise move 50x slower in weight space than
+        one on a 0.5 edge at the same learning rate, so the small recurrent gains
+        could never grow to use the budget the cap allows.
         """
         if not slope_dict:
             self.slope = None
@@ -462,7 +457,7 @@ class _NetworkBase(nn.Module):
         init_values = []
         lower_values = []
         upper_values = []
-        update_scales = []
+        explicit_scales = []
         slope_bounds = slope_bounds or {}
         slope_update_scales = slope_update_scales or {}
         for pair, value in slope_dict.items():
@@ -472,12 +467,25 @@ class _NetworkBase(nn.Module):
                 )
             pairs.append((pair[0], pair[1]))
             init_values.append(float(value))
-            lower, upper = slope_bounds.get(pair, (0.0, float("inf")))
+            lower, upper = slope_bounds.get(pair, DEFAULT_SLOPE_BOUNDS)
+            if float(lower) < 0 or float(upper) < 0:
+                # The gain multiplies the connectome weight (w_eff = m * w), so
+                # an edge's sign is carried by the weight -- a negative gain
+                # would silently flip excitation/inhibition. The incoming-weight
+                # budget's projection additionally relies on m >= 0 for its
+                # row-L1 accounting (|m * w| = m * |w|).
+                raise ValueError(
+                    f"slope_bounds for pair {pair} must be non-negative."
+                )
             if float(lower) > float(upper):
                 lower = upper
             lower_values.append(float(lower))
             upper_values.append(float(upper))
-            update_scales.append(float(slope_update_scales.get(pair, 1.0)))
+            explicit_scales.append(
+                None
+                if pair not in slope_update_scales
+                else float(slope_update_scales[pair])
+            )
 
         pair_to_idx = {pair: i for i, pair in enumerate(pairs)}
 
@@ -514,6 +522,26 @@ class _NetworkBase(nn.Module):
             "slope_upper_bound",
             torch.tensor(upper_values, dtype=torch.float32, device=device),
         )
+
+        # Default update scale: 1 without a budget, else the median |w| over the
+        # pair's connectome edges so the step is equalized in weight space.
+        update_scales = []
+        edge_pair_idx = self.slope_edge_indices
+        edge_abs_w = self.all_weights._values().abs()
+        for i, explicit in enumerate(explicit_scales):
+            if explicit is not None:
+                update_scales.append(explicit)
+            elif not budget_is_set:
+                update_scales.append(1.0)
+            else:
+                # np.median, not torch.median: torch returns the lower of the two
+                # middle values on an even count, which is a surprising "median".
+                mine = edge_abs_w[edge_pair_idx == i]
+                update_scales.append(
+                    float(np.median(mine.detach().cpu().numpy()))
+                    if mine.numel() > 0
+                    else 1.0
+                )
         self.register_buffer(
             "slope_update_scale",
             torch.clamp(
@@ -525,21 +553,31 @@ class _NetworkBase(nn.Module):
     def _setup_incoming_budget(self, incoming_weight_budget, device):
         """Optional per-postsynaptic-neuron L1 budget on incoming ``|weights|``.
 
-        When set (pair mode only), :attr:`effective_weights` reparametrizes each
-        row so the sum of absolute incoming weights never exceeds
-        ``incoming_weight_budget``, reaching it exactly once the row's gains sum
-        to 1. Frozen edges keep their exact connectome magnitude and pre-consume
-        the budget; the trainable edges share the remainder. ``None`` disables it
-        and reproduces the plain per-edge behaviour (the default).
+        The budget does *not* enter the forward pass -- ``effective_weights`` is
+        always ``m * w`` -- it is enforced by :meth:`project_incoming_budget_`
+        after each optimizer step. Below the cap nothing is touched, so the model
+        is exactly gain x connectome until the constraint binds; above it, every
+        trainable gain in the offending row is scaled toward its lower bound by
+        one common factor, so which edge carries which share of the row is decided
+        by the gradient and never by the budget.
 
-        Note that this *replaces* ``slope_bounds`` as the capping mechanism rather
-        than complementing it: a box on the gain does not translate into a fixed
-        box on the effective weight, because the weight also depends on the rest
-        of the row. Callers using a budget should pass open bounds.
+        Frozen edges (pairs not declared in ``slope_dict``) keep their connectome
+        magnitude and pre-consume the budget. Sensory rows are exempt.
+
+        ``slope_bounds`` and the budget compose rather than replace each other:
+        the bounds box each individual gain and apply always, the budget caps each
+        row's total and applies only when exceeded. Since the projection scales
+        the gain's excess *above its lower bound*, its result is always still
+        inside the bounds.
+
+        ``None`` disables the budget (the default).
         """
         if incoming_weight_budget is None or self.slope_edge_indices is None:
             self.incoming_weight_budget = None
             self.frozen_row_l1 = None
+            self.budget_edge_post = None
+            self.budget_edge_pair = None
+            self.budget_edge_abs_w = None
             return
         if self.divisive_normalization is not None:
             raise NotImplementedError(
@@ -549,33 +587,87 @@ class _NetworkBase(nn.Module):
         budget = float(incoming_weight_budget)
         if budget <= 0:
             raise ValueError("incoming_weight_budget must be positive.")
+        # The projection's row-L1 accounting linearizes |m * w| as m * |w|,
+        # which only holds for m >= 0 -- guaranteed because pair-mode
+        # slope_bounds are validated non-negative at construction.
 
         n = self.all_weights.shape[0]
         post_idx = self.all_weights._indices()[0]
         values = self.all_weights._values()
-        frozen_mask = self.slope_edge_indices < 0
+        abs_w = values.abs()
+        edge_pair = self.slope_edge_indices
+        trainable_mask = edge_pair >= 0
 
-        frozen_row_l1 = torch.zeros(n, dtype=values.dtype, device=device)
-        if torch.any(frozen_mask):
-            frozen_row_l1 = frozen_row_l1.index_add(
-                0, post_idx[frozen_mask], values[frozen_mask].abs()
-            )
+        # Sensory rows are exempt: their state is written by the input, not by
+        # their incoming weights, so a cap on those weights is meaningless.
+        is_sensory = torch.zeros(n, dtype=torch.bool, device=device)
+        if self.sensory_indices.numel() > 0:
+            is_sensory[self.sensory_indices.to(device=device, dtype=torch.long)] = True
+        capped_edge = ~is_sensory[post_idx]
+
+        frozen_row_l1 = torch.zeros(n, dtype=values.dtype, device=device).index_add(
+            0, post_idx[~trainable_mask], abs_w[~trainable_mask]
+        )
         self.register_buffer("frozen_row_l1", frozen_row_l1)
+
+        # Per-edge tables the projection runs on: trainable edges landing on a
+        # non-sensory row. (A sensory *edge* landing on a capped row still counts
+        # toward that row's budget; only sensory rows are dropped.)
+        keep = trainable_mask & capped_edge
+        self.register_buffer("budget_edge_post", post_idx[keep].clone())
+        self.register_buffer("budget_edge_pair", edge_pair[keep].clone())
+        self.register_buffer("budget_edge_abs_w", abs_w[keep].clone())
         self.incoming_weight_budget = budget
 
-        # Warn about post-neurons whose frozen incoming |weights| already meet the
-        # budget: their trainable edges get squeezed to ~0 and the row can still
-        # exceed the budget (frozen edges are never rescaled).
+        # ---- construction-time feasibility (non-sensory rows only) ----
+        lower = self.slope_lower_bound.to(values.dtype)
+        # the clamped init, since that is what the forward pass actually uses
+        init = self.effective_slope.detach().to(values.dtype)
+        zeros = torch.zeros(n, dtype=values.dtype, device=device)
+        edge_post = self.budget_edge_post
+        edge_pair_kept = self.budget_edge_pair
+        edge_absw = self.budget_edge_abs_w
+        lower_l1 = zeros.index_add(0, edge_post, edge_absw * lower[edge_pair_kept])
+        init_l1 = zeros.index_add(0, edge_post, edge_absw * init[edge_pair_kept])
+        has_edge = torch.zeros(n, dtype=torch.bool, device=device)
+        has_edge[post_idx] = True
         has_trainable = torch.zeros(n, dtype=torch.bool, device=device)
-        if torch.any(~frozen_mask):
-            has_trainable[post_idx[~frozen_mask]] = True
-        bad = torch.where((frozen_row_l1 >= budget) & has_trainable)[0]
-        if bad.numel() > 0:
-            warnings.warn(
-                f"incoming_weight_budget={budget}: frozen incoming |weights| "
-                f"already >= budget for post-neuron indices {bad.tolist()}; their "
-                "trainable edges will be forced toward 0 and those rows may still "
-                "exceed the budget."
+        has_trainable[edge_post] = True
+        checkable = has_edge & ~is_sensory
+        tol = 1e-6 * max(1.0, budget)
+
+        # Checked before feasibility so a row with nothing to scale gets the more
+        # specific message (feasibility would also catch it whenever F_j > budget).
+        stuck = torch.where(checkable & ~has_trainable & (frozen_row_l1 >= budget))[0]
+        if stuck.numel() > 0:
+            raise ValueError(
+                f"incoming_weight_budget={budget}: post-node indices "
+                f"{stuck.tolist()[:20]} have no trainable incoming edges and their "
+                "frozen incoming |weights| already reach the budget, so the row can "
+                "never come under it. Raise the budget or make those edges trainable."
+            )
+
+        infeasible = torch.where(
+            checkable & (frozen_row_l1 + lower_l1 > budget + tol)
+        )[0]
+        if infeasible.numel() > 0:
+            raise ValueError(
+                f"incoming_weight_budget={budget} is infeasible for post-node "
+                f"indices {infeasible.tolist()[:20]}: frozen incoming |weights| plus "
+                "the trainable edges' lower-bound |weights| already exceed it, so no "
+                "gain assignment can satisfy the row. Raise the budget or lower "
+                "slope_bounds' lower ends."
+            )
+
+        over = torch.where(checkable & (frozen_row_l1 + init_l1 > budget + tol))[0]
+        if over.numel() > 0:
+            worst = (frozen_row_l1 + init_l1)[over].max().item()
+            raise ValueError(
+                f"incoming_weight_budget={budget}: the initial slopes already put "
+                f"post-node indices {over.tolist()[:20]} over budget (worst row L1 "
+                f"{worst:.4g}). The projection only runs during training, so the "
+                "model would start outside its own constraint. Lower the initial "
+                "gains or raise the budget."
             )
 
     def set_param_grads(
@@ -620,7 +712,11 @@ class _NetworkBase(nn.Module):
     def effective_slope(self):
         """Slope clamped to its bounds. Pair mode clamps to the per-pair
         [lower, upper]; node mode (no explicit bounds) applies a 1e-6 floor so a
-        trained slope stays strictly positive. None if no slope."""
+        trained slope stays strictly positive. None if no slope.
+
+        With ``project_parameter_bounds_`` running after every optimizer step this
+        clamp is inert during training; it stays as a safety net for models built
+        or reloaded by hand with out-of-box slopes."""
         if self.slope is None:
             return None
         lower = self.slope_lower_bound
@@ -644,6 +740,62 @@ class _NetworkBase(nn.Module):
         with torch.no_grad():
             self.slope.copy_(self.effective_slope)
 
+    def project_incoming_budget_(self) -> Optional[torch.Tensor]:
+        """Pull every non-sensory row back under ``incoming_weight_budget``.
+
+        For post node ``j``, with ``F_j`` its frozen incoming ``|w|`` sum::
+
+            c_j = clamp( (budget - F_j - sum_k |w_kj|*lower_kj)
+                         / sum_k |w_kj|*(m_kj - lower_kj),  0, 1 )
+
+        each pair takes the minimum ``c_j`` over the rows it touches, and
+        ``m <- lower + (m - lower) * c``. Scaling the excess above the floor
+        rather than ``m`` itself keeps the result inside ``slope_bounds``, and
+        one pass suffices: scaling a gain down never raises any row's sum, and
+        each pair is scaled by at least as much as its tightest row demanded.
+
+        Rows already under budget get ``c_j = 1`` and are left untouched.
+
+        Returns:
+            torch.Tensor or None: per-post-node ``c_j`` (1.0 where the projection
+            did not fire), or None when no budget is set.
+        """
+        if getattr(self, "incoming_weight_budget", None) is None:
+            return None
+        with torch.no_grad():
+            # Start from the bound-clamped gain so a single standalone call is
+            # correct too; in train_model project_parameter_bounds_ has already
+            # run, which makes this a no-op.
+            m = self.effective_slope
+            dtype = m.dtype
+            device = m.device
+            lower = self.slope_lower_bound.to(device=device, dtype=dtype)
+            post = self.budget_edge_post.to(device)
+            pair = self.budget_edge_pair.to(device)
+            abs_w = self.budget_edge_abs_w.to(device=device, dtype=dtype)
+
+            n = self.all_weights.shape[0]
+            zeros = torch.zeros(n, dtype=dtype, device=device)
+            lower_l1 = zeros.index_add(0, post, abs_w * lower[pair])
+            excess = zeros.index_add(0, post, abs_w * (m[pair] - lower[pair]))
+            room = (
+                self.incoming_weight_budget
+                - self.frozen_row_l1.to(device=device, dtype=dtype)
+                - lower_l1
+            )
+
+            c_row = torch.ones(n, dtype=dtype, device=device)
+            # excess <= 0 means the row is already at (or below) its floor, which
+            # feasibility guarantees is under budget -- nothing to scale.
+            active = excess > 0
+            c_row[active] = torch.clamp(room[active] / excess[active], min=0.0, max=1.0)
+
+            c_pair = torch.ones_like(m).scatter_reduce(
+                0, pair, c_row[post], reduce="amin", include_self=True
+            )
+            self.slope.copy_(lower + (m - lower) * c_pair)
+        return c_row
+
     @property
     def effective_weights(self):
         # Only pair-mode slope folds into the weights. Node-mode slope (None
@@ -654,53 +806,19 @@ class _NetworkBase(nn.Module):
 
         indices = self.all_weights._indices()
         values = self.all_weights._values()
-        budget = getattr(self, "incoming_weight_budget", None)
 
-        if budget is None:
-            # Default: per-edge multiplier (trainable edges scaled by their slope).
-            multipliers = torch.ones_like(values)
-            trainable_edge_mask = edge_param_idx >= 0
-            if torch.any(trainable_edge_mask):
-                multipliers = multipliers.clone()
-                multipliers[trainable_edge_mask] = self.effective_slope[
-                    edge_param_idx[trainable_edge_mask]
-                ].to(values.dtype)
-            new_values = values * multipliers
-        else:
-            # Per-postsynaptic-neuron L1 budget. For each post neuron j the
-            # trainable incoming edge i -> j gets magnitude
-            #     R_j * |m_ij| / max(1, T_j),
-            # where T_j = sum_k |m_kj| over j's trainable incoming edges and
-            # R_j = max(budget - frozen_row_l1_j, 0). Frozen edges keep their
-            # exact magnitude, so the row |w| sum comes to
-            # frozen_j + R_j * min(T_j, 1) <= budget: a hard cap the row reaches
-            # exactly once T_j >= 1 rather than approaching it asymptotically.
-            # Below T_j = 1 the row spends less than its budget, so the total
-            # incoming drive stays learnable.
-            #
-            # The denominator aggregates |m|, matching the numerator, so the cap
-            # holds for any gain values including negative ones -- a signed sum
-            # would let opposite-sign gains cancel in the denominator while both
-            # still contribute their magnitude to the row L1.
-            n = self.all_weights.shape[0]
-            post = indices[0]
-            trainable_mask = edge_param_idx >= 0
-            m_pair = self.effective_slope.to(values.dtype)
-            edge_m = torch.where(
-                trainable_mask,
-                m_pair[edge_param_idx.clamp(min=0)],
-                torch.zeros_like(values),
-            )
-            row_T = torch.zeros(n, dtype=values.dtype, device=values.device).index_add(
-                0, post, edge_m.abs()
-            )
-            remaining = torch.clamp(
-                self.incoming_weight_budget - self.frozen_row_l1.to(values.dtype),
-                min=0.0,
-            )
-            row_scale = remaining / torch.clamp(row_T, min=1.0)
-            trainable_new = torch.sign(values) * edge_m * row_scale[post]
-            new_values = torch.where(trainable_mask, trainable_new, values)
+        # w_eff = m * w on trainable pairs, w untouched on frozen edges -- always.
+        # incoming_weight_budget does not appear here: it is a constraint on the
+        # parameter, enforced by project_incoming_budget_ after each optimizer
+        # step, not a reparametrization of the forward pass.
+        multipliers = torch.ones_like(values)
+        trainable_edge_mask = edge_param_idx >= 0
+        if torch.any(trainable_edge_mask):
+            multipliers = multipliers.clone()
+            multipliers[trainable_edge_mask] = self.effective_slope[
+                edge_param_idx[trainable_edge_mask]
+            ].to(values.dtype)
+        new_values = values * multipliers
 
         return torch.sparse_coo_tensor(
             indices,
@@ -766,6 +884,15 @@ class _NetworkBase(nn.Module):
                     raise ValueError("initial_state length must match the node count.")
                 full_input = full_input.view(-1, 1).expand(-1, batch_size)
             elif full_input.dim() == 2:
+                if batch_size == n_nodes:
+                    # (batch, nodes) and (nodes, batch) are indistinguishable here,
+                    # and guessing wrong silently transposes the initial state.
+                    raise ValueError(
+                        "initial_state is ambiguous when the batch size equals the "
+                        f"node count ({n_nodes}): (batch, nodes) and (nodes, batch) "
+                        "cannot be told apart. Pass a 1-D (nodes,) initial_state, or "
+                        "change the batch size."
+                    )
                 if full_input.shape == (batch_size, n_nodes):
                     full_input = full_input.t()
                 elif full_input.shape != (n_nodes, batch_size):
@@ -910,8 +1037,34 @@ class LinearNetwork(_NetworkBase):
             0.0.
         bias_dict (dict, optional): Dict mapping group names to bias values. Defaults to
             None (uses default_bias).
-        slope_dict (dict, optional): Dict mapping group names to slope values. Uses
-            tanh_steepness if None.
+        slope_dict (dict, optional): Dual-format. With cell-type keys it is a
+            per-type slope applied after the matmul ("node mode"), using
+            tanh_steepness for any type left out. With ``(pre_group, post_group)``
+            tuple keys it is a per-connection gain ``m`` folded into the weights as
+            ``w_eff = m * w`` ("pair mode"); edges whose pair is not declared are
+            frozen at their connectome weight. Defaults to None.
+        slope_bounds (dict, optional): Pair mode only. Maps a pair to its
+            ``(lower, upper)`` gain box, defaulting to ``DEFAULT_SLOPE_BOUNDS``
+            ``(0, 50)``. Bounds must be non-negative: the edge's sign is carried
+            by the connectome weight, so a negative gain would silently flip
+            excitation/inhibition. The box applies to every pair always, and is
+            a *different* constraint from ``incoming_weight_budget``: the bounds cap each
+            connection's own gain, the budget caps each post node's row total and
+            binds only when exceeded. They compose -- the budget does not replace
+            the bounds.
+        slope_update_scales (dict, optional): Pair mode only. Divides that pair's
+            optimizer step when ``train_model(rescale_slope_updates=True)``.
+            Defaults to 1 per pair, or -- when ``incoming_weight_budget`` is set --
+            to the median ``|w|`` over the pair's edges, which equalizes the step
+            size in weight rather than gain space.
+        incoming_weight_budget (float, optional): Pair mode only. Caps each
+            non-sensory post node's sum of incoming ``|w_eff|``. It does not enter
+            the forward pass; ``train_model`` enforces it by projecting the gains
+            after each optimizer step (see
+            :meth:`_NetworkBase.project_incoming_budget_`). Frozen edges keep their
+            connectome magnitude and pre-consume the budget. Construction raises if
+            a row cannot satisfy the budget or already starts over it. Defaults to
+            None (no budget).
         divisive_normalization (Dict[str, List[str]], optional): A dictionary where keys
             are pre-synaptic neuron groups and values are lists of post-synaptic neuron
             groups. These *inhibitory* connections are implemented divisively instead of
@@ -1355,8 +1508,34 @@ class MultilayeredNetwork(_NetworkBase):
             0.0.
         bias_dict (dict, optional): Dict mapping group names to bias values. Defaults to
             None (uses default_bias).
-        slope_dict (dict, optional): Dict mapping group names to slope values. Uses
-            tanh_steepness if None.
+        slope_dict (dict, optional): Dual-format. With cell-type keys it is a
+            per-type slope applied after the matmul ("node mode"), using
+            tanh_steepness for any type left out. With ``(pre_group, post_group)``
+            tuple keys it is a per-connection gain ``m`` folded into the weights as
+            ``w_eff = m * w`` ("pair mode"); edges whose pair is not declared are
+            frozen at their connectome weight. Defaults to None.
+        slope_bounds (dict, optional): Pair mode only. Maps a pair to its
+            ``(lower, upper)`` gain box, defaulting to ``DEFAULT_SLOPE_BOUNDS``
+            ``(0, 50)``. Bounds must be non-negative: the edge's sign is carried
+            by the connectome weight, so a negative gain would silently flip
+            excitation/inhibition. The box applies to every pair always, and is
+            a *different* constraint from ``incoming_weight_budget``: the bounds cap each
+            connection's own gain, the budget caps each post node's row total and
+            binds only when exceeded. They compose -- the budget does not replace
+            the bounds.
+        slope_update_scales (dict, optional): Pair mode only. Divides that pair's
+            optimizer step when ``train_model(rescale_slope_updates=True)``.
+            Defaults to 1 per pair, or -- when ``incoming_weight_budget`` is set --
+            to the median ``|w|`` over the pair's edges, which equalizes the step
+            size in weight rather than gain space.
+        incoming_weight_budget (float, optional): Pair mode only. Caps each
+            non-sensory post node's sum of incoming ``|w_eff|``. It does not enter
+            the forward pass; ``train_model`` enforces it by projecting the gains
+            after each optimizer step (see
+            :meth:`_NetworkBase.project_incoming_budget_`). Frozen edges keep their
+            connectome magnitude and pre-consume the budget. Construction raises if
+            a row cannot satisfy the budget or already starts over it. Defaults to
+            None (no budget).
         divisive_normalization (Dict[str, List[str]], optional): A dictionary where keys
             are pre-synaptic neuron groups and values are lists of post-synaptic neuron
             groups. These *inhibitory* connections are implemented divisively instead of
@@ -1371,7 +1550,38 @@ class MultilayeredNetwork(_NetworkBase):
             Minimum 1, where the activation at the current time step is solely
             determined by the current input. Defaults to 10.
         device (torch.device, optional): Device for computation.
+        output_clamp_max (float, optional): Upper clamp applied to non-sensory
+            activations after each layer in :meth:`forward`. None disables it
+            (unbounded rates, e.g. a rectified-square model); the default 1.0
+            preserves the historical [0, 1] output range.
+        output_rectify (bool, optional): Hard threshold gate (>= threshold passes
+            through, below -> 0) applied to the post-layer state. False lets rates
+            go negative, e.g. when the activation function itself is signed; the
+            default True preserves the historical behaviour.
+
+            This gates the *post-layer* application only. The built-in
+            activation_function applies the same gate internally as the relu of
+            tanh(relu(slope * x + bias)), and that one is NOT under this flag, so
+            with the built-in activation False still never yields negative rates
+            -- it only stops sub-threshold activity being re-zeroed after the tau
+            integration, which is itself a large effect. Negative rates require a
+            custom activation_function (which bypasses the internal gate).
     """
+
+    def __init__(
+        self,
+        *args,
+        output_clamp_max: Optional[float] = 1.0,
+        output_rectify: bool = True,
+        **kwargs,
+    ):
+        # Both flags are read only by this class's forward pass, so they live here
+        # rather than on _NetworkBase, where LinearNetwork would accept them and
+        # then silently ignore them.
+        super().__init__(*args, **kwargs)
+        self.output_clamp_max = output_clamp_max
+        self.output_rectify = output_rectify
+
 
     def activation_function(
         self,
@@ -1838,7 +2048,6 @@ def train_model(
     train_divisive_strength: bool = True,
     train_tau: bool = True,
     rescale_slope_updates: bool = False,
-    project_parameter_bounds: bool = False,
     checkpoint_steps: int = 50,
     activation_loss_fn: Union[str, Callable] = "mse",
     initial_state: Optional[torch.Tensor] = None,
@@ -1880,9 +2089,6 @@ def train_model(
             mode the per-cell-type slope. Defaults to True.
         rescale_slope_updates (bool, optional): Whether to rescale each optimizer
             step for the (pair-mode) slope by model.slope_update_scale. Defaults to False.
-        project_parameter_bounds (bool, optional): Whether to project model parameter
-            bounds after each optimizer step if the model provides that hook. Defaults
-            to False.
         activation_loss_fn (str or callable, optional): Loss function for activations.
             Either "mae", "mse" (default), or a callable with signature fn(pred:
             torch.Tensor, target: torch.Tensor) -> torch.Tensor returning a scalar loss.
@@ -1917,6 +2123,18 @@ def train_model(
             forward-modelled measurement, not the raw latent, to the data. Must
             preserve the shape and be differentiable wrt ``outputs``. Defaults to
             None (outputs used as given).
+
+    Returns:
+        tuple: ``(model, history, train_inputs, val_inputs, train_targets,
+        val_targets, train_indices, val_indices)``.
+
+        After every optimizer step the model's parameter bounds and (when set) its
+        ``incoming_weight_budget`` are projected -- both unconditionally, including
+        on the last step, so the returned model always satisfies its constraints.
+        When a budget fired, ``history["budget_projections"]`` maps each post-node
+        index to ``{"steps": <how many steps it was pulled back>, "min_scale":
+        <smallest factor applied>}``. It is a summary dict rather than a per-epoch
+        list, so pop it before ``pd.DataFrame(history)``.
     """
     if output_transform is not None and not callable(output_transform):
         raise TypeError("output_transform must be callable or None.")
@@ -2068,6 +2286,12 @@ def train_model(
             "val_loss": [],
         }
 
+        # Per-post-node tally of how often the incoming-weight budget bound and
+        # how hard it pulled, summarized into history at the end of training.
+        n_nodes_total = model.all_weights.shape[0]
+        budget_fire_counts = torch.zeros(n_nodes_total, dtype=torch.long)
+        budget_min_scale = torch.ones(n_nodes_total, dtype=torch.float32)
+
         initial_params = [param.clone() for param in trainable_parameters]
 
         # train validation split
@@ -2192,7 +2416,11 @@ def train_model(
                 print(f"[epoch {epoch}] {reason}, skipping step")
                 optimizer.zero_grad()
                 continue
-            torch.nn.utils.clip_grad_norm_(grad_params, max_norm=1.0)
+            # Global gradient-norm clipping is disabled for now: the norm is taken
+            # across all parameters jointly, so a large gradient on any one of them
+            # shrinks the step for every other. Restore it (per parameter group, or
+            # globally) if exploding gradients show up.
+            # torch.nn.utils.clip_grad_norm_(grad_params, max_norm=1.0)
             slope_before = (
                 model.slope.detach().clone()
                 if rescale_slope_updates
@@ -2203,8 +2431,19 @@ def train_model(
             optimizer.step()
             if slope_before is not None:
                 model.rescale_slope_update_(slope_before)
-            if project_parameter_bounds and hasattr(model, "project_parameter_bounds_"):
+            # Parameter bounds and the incoming-weight budget are constraints on
+            # the parameter, not on the forward pass, so they are re-imposed after
+            # every step (including the last one).
+            if hasattr(model, "project_parameter_bounds_"):
                 model.project_parameter_bounds_()
+            if hasattr(model, "project_incoming_budget_"):
+                row_scale = model.project_incoming_budget_()
+                if row_scale is not None:
+                    fired = row_scale < 1.0 - 1e-9
+                    budget_fire_counts += fired.long().cpu()
+                    budget_min_scale = torch.minimum(
+                        budget_min_scale, row_scale.detach().float().cpu()
+                    )
 
             # validation loss
             if has_validation:
@@ -2270,6 +2509,21 @@ def train_model(
             history["activation_loss"].append(activation_loss.item())
             history["param_reg_loss"].append(param_reg_loss.item())
             history["val_loss"].append(val_activation_loss.item())
+
+    budget_projections = {
+        int(node): {
+            "steps": int(budget_fire_counts[node]),
+            "min_scale": float(budget_min_scale[node]),
+        }
+        for node in torch.nonzero(budget_fire_counts).flatten().tolist()
+    }
+    history["budget_projections"] = budget_projections
+    if budget_projections:
+        tightest = min(v["min_scale"] for v in budget_projections.values())
+        print(
+            f"incoming_weight_budget bound on {len(budget_projections)} post node(s); "
+            f"tightest single projection scaled the gains by {tightest:.4g}."
+        )
 
     # Free up memory
     torch.cuda.empty_cache()

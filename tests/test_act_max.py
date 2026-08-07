@@ -1,3 +1,4 @@
+import copy
 import unittest
 import warnings
 
@@ -1673,6 +1674,25 @@ class TestLinearNetwork(unittest.TestCase):
         model.project_parameter_bounds_()
         self.assertTrue(torch.allclose(model.slope.cpu(), torch.tensor([1.5])))
 
+    def test_negative_slope_bounds_are_rejected(self):
+        """The gain multiplies the connectome weight, whose sign carries the
+        edge's excitation/inhibition -- a negative gain would silently flip it,
+        so negative bounds are never legal (budget or not)."""
+        weights = csr_matrix(np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32))
+        idx_to_group = {0: "lum", 1: "A"}
+        for bad in ((-2.0, 2.0), (0.5, -1.0), (-3.0, -1.0)):
+            with self.subTest(bounds=bad):
+                with self.assertRaises(ValueError) as ctx:
+                    LinearNetwork(
+                        weights,
+                        sensory_indices=[0],
+                        num_layers=1,
+                        idx_to_group=idx_to_group,
+                        slope_dict={("lum", "A"): 1.0},
+                        slope_bounds={("lum", "A"): bad},
+                    )
+                self.assertIn("non-negative", str(ctx.exception))
+
     def test_pair_slope_update_rescale_uses_configured_scale(self):
         weights = csr_matrix(np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32))
         idx_to_group = {0: "lum", 1: "A"}
@@ -1727,6 +1747,40 @@ class TestLinearNetwork(unittest.TestCase):
 
         self.assertTrue(torch.allclose(output[0, 0, 0], torch.tensor(3.0)))
         self.assertTrue(torch.allclose(output[0, 1, 0], torch.tensor(1.0)))
+
+    def test_initial_state_square_batch_is_rejected(self):
+        """(batch, nodes) and (nodes, batch) are indistinguishable when equal."""
+        weights = csr_matrix(np.zeros((2, 2), dtype=np.float32))
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=1,
+            tanh_steepness=1.0,
+            tau=2.0,
+            sensory_input_mode="replace",
+        ).to(self.device)
+
+        inputs = torch.zeros((2, 1, 1), device=self.device)  # batch 2 == 2 nodes
+        with self.assertRaises(ValueError) as ctx:
+            model(inputs, initial_state=torch.zeros((2, 2), device=self.device))
+        self.assertIn("ambiguous", str(ctx.exception))
+
+        # a 1-D initial_state is unambiguous and still accepted
+        output = model(inputs, initial_state=torch.tensor([7.0, 2.0], device=self.device))
+        self.assertEqual(tuple(output.shape), (2, 2, 1))
+
+    def test_output_flags_are_multilayered_only(self):
+        """They are honoured only by MultilayeredNetwork, so only it accepts them."""
+        weights = csr_matrix(np.zeros((2, 2), dtype=np.float32))
+        for flag in ({"output_rectify": False}, {"output_clamp_max": None}):
+            with self.subTest(**flag):
+                with self.assertRaises(TypeError):
+                    LinearNetwork(weights, sensory_indices=[0], num_layers=1, **flag)
+                model = MultilayeredNetwork(
+                    weights, sensory_indices=[0], num_layers=1, **flag
+                )
+                key, value = next(iter(flag.items()))
+                self.assertEqual(getattr(model, key), value)
 
     def test_bias_transform_identity_allows_negative_biases(self):
         idx_to_group = {i: f"group_{i}" for i in range(3)}
@@ -1791,7 +1845,6 @@ class TestLinearNetwork(unittest.TestCase):
             train_biases=False,
             train_divisive_strength=False,
             train_tau=False,
-            project_parameter_bounds=True,
             checkpoint_steps=0,
         )
 
@@ -3913,10 +3966,133 @@ class TestTrainModelExtraParamsAndInputTransform(unittest.TestCase):
             checkpoint_steps=0,
             train_biases=True,
         )
-        # Without the guard, clip_grad_norm_ would turn the inf grad into NaN and
-        # optimizer.step() would write NaN into the bias.
+        # Without the guard, Adam's step on the inf grad would write NaN into
+        # the bias permanently.
         self.assertTrue(torch.isfinite(model.raw_biases).all())
         self.assertTrue(all(np.isfinite(history["activation_loss"])))
+
+
+class TestTrainModelOutputTransform(unittest.TestCase):
+    """train_model(output_transform=...): applied to the (batch, nodes, layers)
+    model output before the targets are gathered.
+
+    This is the hook the L123 fits use to push the rate model through a forward
+    GCaMP sensor convolution; the convolution itself lives in the analysis tree,
+    so the cases here use plain shape-preserving stand-ins."""
+
+    @classmethod
+    def setUpClass(cls):
+        torch.manual_seed(0)
+        w = np.random.RandomState(0).rand(6, 6)
+        w = w / w.sum(axis=1, keepdims=True)
+        groups = {i: f"n{i}" for i in range(6)}
+        # bias_dict + tau_dict register trainable parameters so train_model's
+        # optimizer has something to step (a bare network exposes none).
+        cls._shared = MultilayeredNetwork(
+            csr_matrix(w),
+            sensory_indices=[0, 1],
+            num_layers=4,
+            idx_to_group=groups,
+            bias_dict={f"n{i}": 0.0 for i in range(6)},
+            tau_dict={f"n{i}": 5.0 for i in range(6)},
+        )
+
+    def _model(self):
+        # identical model each call, so the epoch-0 forward is deterministic.
+        return copy.deepcopy(self._shared)
+
+    @staticmethod
+    def _targets():
+        # time-series targets on neuron 5 at every layer (uses the "layer" path).
+        return pd.DataFrame(
+            {
+                "batch": [0, 0, 0, 0],
+                "neuron_idx": [5, 5, 5, 5],
+                "layer": [0, 1, 2, 3],
+                "value": [0.2, 0.3, 0.4, 0.5],
+            }
+        )
+
+    @staticmethod
+    def _inputs():
+        return torch.zeros(1, 2, 4, dtype=torch.float32)
+
+    def _capture_first_pred(self, output_transform):
+        grabbed = {}
+
+        def loss_fn(pred, target):
+            grabbed.setdefault("pred", pred.detach().clone())
+            return ((pred - target) ** 2).mean()
+
+        train_model(
+            self._model(),
+            self._inputs(),
+            self._targets(),
+            num_epochs=1,
+            train_fraction=1.0,
+            param_reg_lambda=0.0,
+            checkpoint_steps=0,
+            activation_loss_fn=loss_fn,
+            output_transform=output_transform,
+            seed=0,
+        )
+        return grabbed["pred"]
+
+    def test_output_transform_applied_before_gather(self):
+        """A shape-preserving scale on the output shows up in the gathered pred."""
+        pred_none = self._capture_first_pred(None)
+        pred_scaled = self._capture_first_pred(lambda o: o * 3.0)
+        self.assertEqual(pred_none.shape, (4,))
+        self.assertEqual(pred_scaled.shape, (4,))
+        torch.testing.assert_close(pred_scaled, pred_none * 3.0, rtol=1e-5, atol=1e-6)
+
+    def test_output_transform_receives_3d_output(self):
+        seen = {}
+
+        def spy(o):
+            seen["shape"] = tuple(o.shape)
+            return o
+
+        train_model(
+            self._model(),
+            self._inputs(),
+            self._targets(),
+            num_epochs=1,
+            train_fraction=1.0,
+            param_reg_lambda=0.0,
+            checkpoint_steps=0,
+            output_transform=spy,
+            seed=0,
+        )
+        self.assertEqual(seen["shape"], (1, 6, 4))  # (batch, num_neurons, num_layers)
+
+    def test_non_callable_output_transform_rejected(self):
+        with self.assertRaises(TypeError):
+            train_model(
+                self._model(),
+                self._inputs(),
+                self._targets(),
+                num_epochs=1,
+                output_transform=123,
+                seed=0,
+            )
+
+    def test_output_transform_trains_over_multiple_epochs(self):
+        """A stateful, shape-preserving transform keeps the loss finite while
+        training."""
+        hist = train_model(
+            self._model(),
+            self._inputs(),
+            self._targets(),
+            num_epochs=2,
+            train_fraction=1.0,
+            param_reg_lambda=0.0,
+            checkpoint_steps=0,
+            output_transform=lambda o: torch.cumsum(o, dim=-1) * 0.5,
+            seed=0,
+        )[1]
+        losses = hist["activation_loss"]
+        self.assertTrue(np.all(np.isfinite(losses)))
 
 
 class TestOutputClampMax(unittest.TestCase):
@@ -4058,37 +4234,43 @@ class TestOutputRectify(unittest.TestCase):
 
 
 class TestIncomingWeightBudget(unittest.TestCase):
-    """incoming_weight_budget: per-postsynaptic-neuron L1 cap (pair mode only).
+    """incoming_weight_budget: a constraint on the gains, enforced by projection.
 
-    For a post neuron j, the trainable incoming edge i -> j gets magnitude
-    R_j * m_ij / max(1, T_j), with T_j the sum of j's trainable gains and
-    R_j = max(budget - frozen_j, 0). Frozen edges (pairs not declared in
-    slope_dict) keep their exact connectome magnitude and pre-consume the budget.
-    The row L1 is therefore frozen_j + R_j * min(T_j, 1): capped at the budget,
-    reached exactly once T_j >= 1, and below it while the gains are small.
+    The forward path is always ``w_eff = m * w`` -- the budget never appears in
+    it. After each optimizer step ``project_incoming_budget_`` pulls any
+    non-sensory row whose incoming ``|w_eff|`` sum exceeds the budget back to it,
+    by scaling every trainable gain in that row's excess above its lower bound by
+    one common factor ``c_j``. Rows under budget are untouched, so the model is
+    exactly gain x connectome until the constraint binds.
     """
 
     def setUp(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # rows are post, columns are pre
+        # rows are post, columns are pre. Node 0 is sensory.
         dense = np.zeros((4, 4), dtype=np.float32)
-        dense[1, 0] = 0.4  # S -> A, trainable via pair ("S", "A")
-        dense[2, 0] = 0.6  # S -> A, trainable via pair ("S", "A")
-        dense[3, 1] = 0.5  # A -> B, trainable via pair ("A", "B")
-        dense[3, 2] = -0.3  # A -> B, trainable and negative: sign must survive
+        dense[1, 0] = 0.4  # S -> A, pair ("S", "A")
+        dense[2, 0] = 0.6  # S -> C, pair ("S", "C")
+        dense[3, 1] = 0.4  # A -> B, pair ("A", "B")
+        dense[3, 2] = -0.3  # C -> B, pair ("C", "B"), negative: sign must survive
         dense[3, 0] = 0.2  # S -> B, no pair declared -> frozen
         self.dense = dense
-        self.idx_to_group = {0: "S", 1: "A", 2: "A", 3: "B"}
-        self.slope_dict = {("S", "A"): 1.0, ("A", "B"): 2.0}
+        self.idx_to_group = {0: "S", 1: "A", 2: "C", 3: "B"}
+        self.slope_dict = {
+            ("S", "A"): 1.0,
+            ("S", "C"): 1.0,
+            ("A", "B"): 1.0,
+            ("C", "B"): 1.0,
+        }
 
-    def _model(self, budget=1.0, slope_dict=None):
+    def _model(self, budget=1.0, dense=None, groups=None, **kwargs):
+        kwargs.setdefault("slope_dict", self.slope_dict)
         return MultilayeredNetwork(
-            csr_matrix(self.dense),
+            csr_matrix(self.dense if dense is None else dense),
             sensory_indices=[0],
             num_layers=2,
-            idx_to_group=self.idx_to_group,
-            slope_dict=self.slope_dict if slope_dict is None else slope_dict,
+            idx_to_group=self.idx_to_group if groups is None else groups,
             incoming_weight_budget=budget,
+            **kwargs,
         ).to(self.device)
 
     @staticmethod
@@ -4098,120 +4280,242 @@ class TestIncomingWeightBudget(unittest.TestCase):
     def _row_l1(self, model):
         return self._dense_effective(model).abs().sum(dim=1)
 
-    def test_row_l1_never_exceeds_budget(self):
-        row_l1 = self._row_l1(self._model(budget=1.0))
-        self.assertTrue(
-            bool((row_l1 <= 1.0 + 1e-6).all()), f"row L1 {row_l1.tolist()} over 1.0"
+    @staticmethod
+    def _set_slope(model, **by_pair):
+        with torch.no_grad():
+            for pair, value in by_pair.items():
+                pre, post = pair.split("__")
+                model.slope[model.slope_pairs.index((pre, post))] = value
+
+    @staticmethod
+    def _slope_of(model, pre, post):
+        return float(model.slope[model.slope_pairs.index((pre, post))])
+
+    # ---- forward path: w_eff = m * w, always (section B) ----
+
+    def test_forward_path_is_gain_times_connectome(self):
+        """The budget does not reparametrize the forward pass at all."""
+        model = self._model(budget=1.0)
+        self._set_slope(model, A__B=2.0, C__B=0.5)
+        w = self._dense_effective(model)
+        self.assertAlmostEqual(float(w[3, 1]), 0.4 * 2.0, places=6)
+        self.assertAlmostEqual(float(w[3, 2]), -0.3 * 0.5, places=6)
+        self.assertAlmostEqual(float(w[1, 0]), 0.4 * 1.0, places=6)
+
+    def test_effective_weights_identical_with_and_without_budget(self):
+        capped = self._model(budget=1.0)
+        uncapped = self._model(budget=None)
+        for model in (capped, uncapped):
+            self._set_slope(model, A__B=1.5, C__B=0.5, S__A=2.0, S__C=0.25)
+        np.testing.assert_allclose(
+            self._dense_effective(capped).numpy(),
+            self._dense_effective(uncapped).numpy(),
+            atol=1e-6,
         )
 
-    def test_matches_closed_form(self):
-        w = self._dense_effective(self._model(budget=1.0))
-        # rows 1 and 2: no frozen mass, one trainable edge with m = 1.0, so
-        # R = 1.0, T = 1.0 and the magnitude is 1.0 * 1.0 / max(1, 1.0) = 1.0
-        self.assertAlmostEqual(float(w[1, 0]), 1.0, places=5)
-        self.assertAlmostEqual(float(w[2, 0]), 1.0, places=5)
-        # row 3: frozen 0.2 -> R = 0.8, two trainable edges with m = 2.0 -> T = 4,
-        # so each magnitude is 2.0 * 0.8 / max(1, 4) = 0.4
-        self.assertAlmostEqual(float(w[3, 1]), 0.4, places=5)
-        self.assertAlmostEqual(float(w[3, 2]), -0.4, places=5)
-        self.assertAlmostEqual(float(w[3, 0]), 0.2, places=5)
-
-    def test_budget_is_reached_exactly_once_gains_sum_to_one(self):
-        """T_j >= 1 in every row here, so each row sits exactly at the budget."""
-        row_l1 = self._row_l1(self._model(budget=1.0))
-        np.testing.assert_allclose(row_l1.numpy()[1:], [1.0, 1.0, 1.0], atol=1e-6)
-
-    def test_small_gains_spend_less_than_the_budget(self):
-        """Below T_j = 1 the row uses only part of its budget, so the total
-        incoming drive stays learnable rather than being pinned at the cap."""
-        model = self._model(budget=1.0)
-        with torch.no_grad():
-            model.slope.copy_(torch.full_like(model.slope, 0.1))
-        row_l1 = self._row_l1(model)
-        # row 1: T = 0.1, R = 1.0 -> 0.1.  row 3: frozen 0.2 + 0.8 * 0.2 = 0.36
-        self.assertAlmostEqual(float(row_l1[1]), 0.1, places=5)
-        self.assertAlmostEqual(float(row_l1[3]), 0.36, places=5)
-
-    def test_connectome_init_reproduces_the_connectome(self):
-        """m_ij = t_ij / R_j makes effective_weights reproduce the connectome.
-
-        This is the initialization the cell-type fits use, and it is why the
-        connectome magnitudes are not lost under the reparametrization: they
-        enter through the init rather than through the forward multiplication.
-        """
-        dense = np.zeros((4, 4), dtype=np.float32)
-        dense[3, 1] = 0.4  # A -> B, trainable
-        dense[3, 2] = -0.2  # C -> B, trainable and inhibitory
-        dense[3, 0] = 0.2  # S -> B, frozen
-        groups = {0: "S", 1: "A", 2: "C", 3: "B"}
-        budget = 1.0
-        remaining = budget - 0.2  # R_j, frozen mass pre-consumed
-        init = {("A", "B"): 0.4 / remaining, ("C", "B"): 0.2 / remaining}
-        model = MultilayeredNetwork(
-            csr_matrix(dense),
-            sensory_indices=[0],
-            num_layers=2,
-            idx_to_group=groups,
-            slope_dict=init,
-            incoming_weight_budget=budget,
-        ).to(self.device)
-        w = self._dense_effective(model)
-        self.assertAlmostEqual(float(w[3, 1]), 0.4, places=5)
-        self.assertAlmostEqual(float(w[3, 2]), -0.2, places=5)
-        self.assertAlmostEqual(float(w[3, 0]), 0.2, places=5)
-
     def test_frozen_edges_keep_connectome_magnitude(self):
-        for budget in (0.5, 1.0, 4.0):
-            with self.subTest(budget=budget):
-                w = self._dense_effective(self._model(budget=budget))
-                self.assertAlmostEqual(float(w[3, 0]), 0.2, places=5)
-
-    def test_signs_are_preserved(self):
-        w = self._dense_effective(self._model())
-        self.assertLess(float(w[3, 2]), 0.0)
-        self.assertGreater(float(w[3, 1]), 0.0)
-
-    def test_budget_holds_for_large_slopes(self):
-        """T/max(1, T) <= 1 for any T, so no slope value can breach the budget."""
         model = self._model(budget=1.0)
-        with torch.no_grad():
-            model.slope.copy_(torch.full_like(model.slope, 1e3))
-        row_l1 = self._row_l1(model)
+        self._set_slope(model, A__B=5.0)
+        model.project_incoming_budget_()
+        self.assertAlmostEqual(float(self._dense_effective(model)[3, 0]), 0.2, places=6)
+
+    def test_signs_are_preserved_by_the_projection(self):
+        model = self._model(budget=1.0)
+        self._set_slope(model, A__B=5.0)
+        model.project_incoming_budget_()
+        w = self._dense_effective(model)
+        self.assertGreater(float(w[3, 1]), 0.0)
+        self.assertLess(float(w[3, 2]), 0.0)
+
+    def test_default_slope_bounds_are_zero_to_fifty(self):
+        model = self._model(budget=1.0)
+        np.testing.assert_allclose(
+            model.slope_lower_bound.cpu().numpy(), np.zeros(4), atol=0
+        )
+        np.testing.assert_allclose(
+            model.slope_upper_bound.cpu().numpy(), np.full(4, 50.0), atol=0
+        )
+
+    # ---- the projection (section C) ----
+
+    def test_projection_is_a_noop_below_the_cap(self):
+        """Row 3 sits at 0.2 + 0.4 + 0.3 = 0.9, under a budget of 1.0."""
+        model = self._model(budget=1.0)
+        before = model.slope.detach().clone()
+        scale = model.project_incoming_budget_()
+        self.assertTrue(torch.allclose(model.slope, before))
+        np.testing.assert_allclose(scale.cpu().numpy(), np.ones(4), atol=1e-6)
+        np.testing.assert_allclose(self._row_l1(model).numpy()[1:], [0.4, 0.6, 0.9], atol=1e-6)
+
+    def test_projection_lands_the_row_exactly_on_the_budget(self):
+        model = self._model(budget=1.0)
+        self._set_slope(model, A__B=2.0)  # row 3 -> 0.2 + 0.8 + 0.3 = 1.3
+        self.assertAlmostEqual(float(self._row_l1(model)[3]), 1.3, places=6)
+        scale = model.project_incoming_budget_()
+        self.assertAlmostEqual(float(self._row_l1(model)[3]), 1.0, places=5)
+        # c_3 = (1.0 - 0.2) / (0.4*2 + 0.3*1) = 0.8 / 1.1
+        self.assertAlmostEqual(float(scale[3]), 0.8 / 1.1, places=5)
+
+    def test_projection_is_ratio_neutral(self):
+        """Reallocation between edges is the gradient's job, not the budget's."""
+        model = self._model(budget=1.0)
+        self._set_slope(model, A__B=3.0, C__B=1.5)
+        ratio_before = self._slope_of(model, "A", "B") / self._slope_of(model, "C", "B")
+        model.project_incoming_budget_()
+        ratio_after = self._slope_of(model, "A", "B") / self._slope_of(model, "C", "B")
+        self.assertAlmostEqual(ratio_before, ratio_after, places=5)
+
+    def test_projection_leaves_rows_under_budget_alone(self):
+        """Row 1 is far under budget, so its gain must not follow row 3 down."""
+        model = self._model(budget=1.0)
+        self._set_slope(model, A__B=5.0, S__A=2.0)
+        model.project_incoming_budget_()
+        self.assertAlmostEqual(self._slope_of(model, "S", "A"), 2.0, places=6)
+        self.assertLess(self._slope_of(model, "A", "B"), 5.0)
+
+    def test_projection_respects_nonzero_lower_bounds(self):
+        dense = np.zeros((3, 3), dtype=np.float32)
+        dense[1, 0] = 0.5  # S -> A, pair ("S", "A")
+        dense[2, 1] = 0.4  # A -> B, pair ("A", "B")
+        dense[2, 0] = 0.2  # S -> B, frozen
+        groups = {0: "S", 1: "A", 2: "B"}
+        model = self._model(
+            budget=1.0,
+            dense=dense,
+            groups=groups,
+            slope_dict={("S", "A"): 1.0, ("A", "B"): 1.0},
+            slope_bounds={("A", "B"): (0.5, 10.0)},
+        )
+        self._set_slope(model, A__B=5.0)  # row 2 -> 0.2 + 2.0 = 2.2
+        model.project_incoming_budget_()
+        # c = (1.0 - 0.2 - 0.4*0.5) / (0.4*(5.0 - 0.5)) = 0.6 / 1.8
+        # m  = 0.5 + (5.0 - 0.5) * 1/3 = 2.0
+        self.assertAlmostEqual(self._slope_of(model, "A", "B"), 2.0, places=5)
+        self.assertAlmostEqual(float(self._row_l1(model)[2]), 1.0, places=5)
+
+    def test_projection_keeps_slopes_inside_their_bounds(self):
+        dense = np.zeros((3, 3), dtype=np.float32)
+        dense[1, 0] = 0.5
+        dense[2, 1] = 0.4
+        dense[2, 0] = 0.2
+        groups = {0: "S", 1: "A", 2: "B"}
+        model = self._model(
+            budget=1.0,
+            dense=dense,
+            groups=groups,
+            slope_dict={("S", "A"): 1.0, ("A", "B"): 1.0},
+            slope_bounds={("A", "B"): (0.5, 10.0)},
+        )
+        for value in (0.5, 2.0, 5.0, 10.0):
+            with self.subTest(slope=value):
+                self._set_slope(model, A__B=value)
+                model.project_incoming_budget_()
+                slope = self._slope_of(model, "A", "B")
+                self.assertGreaterEqual(slope, 0.5 - 1e-6)
+                self.assertLessEqual(slope, 10.0 + 1e-6)
+
+    def test_pair_takes_the_minimum_scale_over_its_rows(self):
+        """One pair, two post nodes: the tighter row decides the whole pair."""
+        dense = np.zeros((4, 4), dtype=np.float32)
+        dense[1, 0] = 0.5  # S -> P, pair ("S", "P")
+        dense[2, 1] = 0.2  # P -> Q (node 2), pair ("P", "Q")
+        dense[3, 1] = 0.8  # P -> Q (node 3), same pair
+        groups = {0: "S", 1: "P", 2: "Q", 3: "Q"}
+        model = self._model(
+            budget=1.0,
+            dense=dense,
+            groups=groups,
+            slope_dict={("S", "P"): 1.0, ("P", "Q"): 1.0},
+        )
+        self._set_slope(model, P__Q=2.0)  # row 2 -> 0.4 (fine), row 3 -> 1.6 (over)
+        scale = model.project_incoming_budget_()
+        self.assertAlmostEqual(float(scale[2]), 1.0, places=6)
+        self.assertAlmostEqual(float(scale[3]), 1.0 / 1.6, places=5)
+        # the pair takes row 3's factor, so row 2 ends well under its own budget
+        self.assertAlmostEqual(self._slope_of(model, "P", "Q"), 1.25, places=5)
+        self.assertAlmostEqual(float(self._row_l1(model)[3]), 1.0, places=5)
+        self.assertAlmostEqual(float(self._row_l1(model)[2]), 0.25, places=5)
+
+    def test_one_pass_brings_every_row_under_budget(self):
+        model = self._model(budget=1.0)
+        self._set_slope(model, S__A=40.0, S__C=40.0, A__B=40.0, C__B=40.0)
+        model.project_incoming_budget_()
+        row_l1 = self._row_l1(model)[1:]
         self.assertTrue(
             bool((row_l1 <= 1.0 + 1e-5).all()), f"row L1 {row_l1.tolist()} over 1.0"
         )
+
+    def test_projection_is_idempotent(self):
+        model = self._model(budget=1.0)
+        self._set_slope(model, A__B=7.0, C__B=3.0)
+        model.project_incoming_budget_()
+        once = model.slope.detach().clone()
+        scale = model.project_incoming_budget_()
+        self.assertTrue(torch.allclose(model.slope, once, atol=1e-6))
+        np.testing.assert_allclose(scale.cpu().numpy(), np.ones(4), atol=1e-5)
+
+    def test_projection_returns_none_without_a_budget(self):
+        self.assertIsNone(self._model(budget=None).project_incoming_budget_())
+
+    def test_projection_clamps_an_out_of_box_slope_first(self):
+        """Standalone it must be correct even if the raw slope drifted outside."""
+        model = self._model(budget=1.0)
+        self._set_slope(model, A__B=-4.0, C__B=80.0)  # both outside (0, 50)
+        model.project_incoming_budget_()
+        self.assertGreaterEqual(self._slope_of(model, "A", "B"), 0.0)
+        self.assertLessEqual(self._slope_of(model, "C", "B"), 50.0)
+        self.assertLessEqual(float(self._row_l1(model)[3]), 1.0 + 1e-5)
+
+    def test_sensory_rows_are_exempt(self):
+        """A sensory node's state is written by the input, so its row is exempt."""
+        dense = self.dense.copy()
+        dense[0, 1] = 3.0  # A -> S, lands on the sensory row; pair ("A", "S")
+        slope_dict = dict(self.slope_dict)
+        slope_dict[("A", "S")] = 1.0
+        model = self._model(budget=1.0, dense=dense, slope_dict=slope_dict)
+        self.assertGreater(float(self._row_l1(model)[0]), 1.0)
+        scale = model.project_incoming_budget_()
+        self.assertAlmostEqual(float(scale[0]), 1.0, places=6)
+        self.assertAlmostEqual(self._slope_of(model, "A", "S"), 1.0, places=6)
+
+    def test_self_edges_count_toward_the_row(self):
+        dense = np.zeros((3, 3), dtype=np.float32)
+        dense[1, 0] = 0.5  # S -> A
+        dense[1, 1] = 0.6  # A -> A, a self edge on the same row
+        groups = {0: "S", 1: "A", 2: "A"}
+        model = self._model(
+            budget=1.0,
+            dense=dense,
+            groups=groups,
+            slope_dict={("S", "A"): 0.5, ("A", "A"): 0.5},
+        )
+        self._set_slope(model, A__A=1.0, S__A=1.0)  # row 1 -> 0.5 + 0.6 = 1.1, over
+        model.project_incoming_budget_()
+        self.assertAlmostEqual(float(self._row_l1(model)[1]), 1.0, places=5)
+        self.assertAlmostEqual(self._slope_of(model, "A", "A"), 1.0 / 1.1, places=5)
 
     def test_frozen_row_l1_buffer(self):
         frozen = self._model().frozen_row_l1.detach().cpu().numpy()
         # only post 3 has a frozen incoming edge (S -> B, 0.2)
         np.testing.assert_allclose(frozen, [0.0, 0.0, 0.0, 0.2], atol=1e-6)
 
-    def test_none_budget_reproduces_per_edge_scaling(self):
-        model = self._model(budget=None)
-        self.assertIsNone(model.incoming_weight_budget)
-        w = self._dense_effective(model)
-        # plain pair mode: trainable edges scaled by their slope, frozen untouched
-        self.assertAlmostEqual(float(w[1, 0]), 0.4 * 1.0, places=5)
-        self.assertAlmostEqual(float(w[3, 1]), 0.5 * 2.0, places=5)
-        self.assertAlmostEqual(float(w[3, 2]), -0.3 * 2.0, places=5)
-        self.assertAlmostEqual(float(w[3, 0]), 0.2, places=5)
+    def test_forward_pass_is_finite_under_budget(self):
+        model = self._model(budget=1.0)
+        out = model(torch.full((1, 2), 0.5))
+        self.assertTrue(bool(torch.isfinite(out).all()))
 
-    def test_warns_when_frozen_mass_already_exhausts_budget(self):
-        # post 3 carries 0.2 of frozen incoming mass, so a budget below that
-        # squeezes its trainable edges to 0 and the row still exceeds the budget.
-        with self.assertWarns(UserWarning) as ctx:
-            model = self._model(budget=0.15)
-        self.assertIn("3", str(ctx.warning))
-        self.assertGreater(float(self._row_l1(model)[3]), 0.15)
+    # ---- construction-time errors (section E) ----
 
-    def test_no_warning_when_frozen_mass_fits(self):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            self._model(budget=1.0)
-        budget_warnings = [
-            w for w in caught if "incoming_weight_budget" in str(w.message)
-        ]
-        self.assertEqual(budget_warnings, [])
+    def test_node_mode_raises_value_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._model(budget=1.0, slope_dict={"A": 1.5})  # cell-type keys
+        self.assertIn("pair-mode", str(ctx.exception))
+
+    def test_non_positive_budget_raises(self):
+        for bad in (0.0, -1.0):
+            with self.subTest(budget=bad):
+                with self.assertRaises(ValueError):
+                    self._model(budget=bad)
 
     def test_divisive_normalization_raises_not_implemented(self):
         dense = np.zeros((4, 4), dtype=np.float32)
@@ -4229,49 +4533,179 @@ class TestIncomingWeightBudget(unittest.TestCase):
                 incoming_weight_budget=1.0,
             )
 
-    def test_node_mode_raises_value_error(self):
+    def test_infeasible_row_raises(self):
+        """F_j plus the trainable edges' lower-bound |w| already over budget."""
         with self.assertRaises(ValueError) as ctx:
-            self._model(budget=1.0, slope_dict={"A": 1.5})  # cell-type keys
-        self.assertIn("pair-mode", str(ctx.exception))
+            self._model(
+                budget=0.5,
+                slope_bounds={("A", "B"): (1.0, 10.0), ("C", "B"): (1.0, 10.0)},
+            )
+        # row 3: 0.2 frozen + 0.4*1 + 0.3*1 = 0.9 > 0.5, unreachable at any gain
+        self.assertIn("infeasible", str(ctx.exception))
+        self.assertIn("3", str(ctx.exception))
 
-    def test_non_positive_budget_raises(self):
-        for bad in (0.0, -1.0):
-            with self.subTest(budget=bad):
-                with self.assertRaises(ValueError):
-                    self._model(budget=bad)
+    def test_infeasible_reduces_to_frozen_mass_over_budget_at_zero_lower_bounds(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._model(budget=0.15)  # row 3's frozen 0.2 alone exceeds it
+        self.assertIn("infeasible", str(ctx.exception))
 
-    def test_cap_holds_with_opposite_sign_gains(self):
-        """The denominator aggregates |m|, so the cap survives mixed signs.
+    def test_row_with_no_trainable_edges_at_or_over_budget_raises(self):
+        dense = np.zeros((3, 3), dtype=np.float32)
+        dense[1, 0] = 0.5  # S -> A, trainable
+        dense[2, 0] = 1.0  # S -> B, frozen and exactly at the budget
+        groups = {0: "S", 1: "A", 2: "B"}
+        with self.assertRaises(ValueError) as ctx:
+            self._model(
+                budget=1.0,
+                dense=dense,
+                groups=groups,
+                slope_dict={("S", "A"): 1.0},
+            )
+        self.assertIn("no trainable incoming edges", str(ctx.exception))
 
-        A signed denominator would let +K and -K cancel in T_j while both still
-        contributed |K| to the row L1, putting the row arbitrarily far over
-        budget as K grows.
-        """
+    def test_row_with_no_trainable_edges_under_budget_is_fine(self):
+        dense = np.zeros((3, 3), dtype=np.float32)
+        dense[1, 0] = 0.5
+        dense[2, 0] = 0.9  # frozen, under budget: nothing to enforce, no error
+        groups = {0: "S", 1: "A", 2: "B"}
+        model = self._model(
+            budget=1.0, dense=dense, groups=groups, slope_dict={("S", "A"): 1.0}
+        )
+        self.assertAlmostEqual(float(self._row_l1(model)[2]), 0.9, places=6)
+
+    def test_initial_slopes_over_budget_raise(self):
+        """Feasible but starting over the cap: the projection only runs in training."""
+        with self.assertRaises(ValueError) as ctx:
+            self._model(budget=1.0, slope_dict={**self.slope_dict, ("A", "B"): 2.0})
+        self.assertIn("initial slopes", str(ctx.exception))
+
+    def test_row_exactly_at_budget_constructs(self):
+        model = self._model(budget=0.9)  # row 3 is exactly 0.9 at m = 1
+        self.assertAlmostEqual(float(self._row_l1(model)[3]), 0.9, places=6)
+
+    def test_sensory_rows_are_exempt_from_construction_errors(self):
+        dense = self.dense.copy()
+        dense[0, 1] = 9.0  # a huge edge onto the sensory row
+        slope_dict = dict(self.slope_dict)
+        slope_dict[("A", "S")] = 1.0
+        model = self._model(budget=1.0, dense=dense, slope_dict=slope_dict)
+        self.assertGreater(float(self._row_l1(model)[0]), 1.0)
+
+    # ---- weight-aware update scales (section G) ----
+
+    def test_update_scale_defaults_to_median_abs_weight_under_a_budget(self):
+        model = self._model(budget=1.0)
+        scales = {
+            pair: float(model.slope_update_scale[i])
+            for i, pair in enumerate(model.slope_pairs)
+        }
+        self.assertAlmostEqual(scales[("S", "A")], 0.4, places=6)
+        self.assertAlmostEqual(scales[("S", "C")], 0.6, places=6)
+        self.assertAlmostEqual(scales[("A", "B")], 0.4, places=6)
+        self.assertAlmostEqual(scales[("C", "B")], 0.3, places=6)
+
+    def test_update_scale_defaults_to_one_without_a_budget(self):
+        model = self._model(budget=None)
+        np.testing.assert_allclose(
+            model.slope_update_scale.cpu().numpy(), np.ones(4), atol=1e-6
+        )
+
+    def test_explicit_update_scale_overrides_the_median_default(self):
+        model = self._model(budget=1.0, slope_update_scales={("A", "B"): 0.05})
+        scales = {
+            pair: float(model.slope_update_scale[i])
+            for i, pair in enumerate(model.slope_pairs)
+        }
+        self.assertAlmostEqual(scales[("A", "B")], 0.05, places=6)
+        self.assertAlmostEqual(scales[("C", "B")], 0.3, places=6)
+
+    def test_update_scale_median_over_several_edges_of_one_pair(self):
         dense = np.zeros((4, 4), dtype=np.float32)
-        dense[3, 1] = 0.4  # A -> B
-        dense[3, 2] = 0.2  # C -> B, independent gain
-        dense[3, 0] = 0.2  # S -> B, frozen
-        groups = {0: "S", 1: "A", 2: "C", 3: "B"}
-        model = MultilayeredNetwork(
-            csr_matrix(dense),
+        dense[2, 1] = 0.1  # P -> Q (node 2)
+        dense[3, 1] = 0.3  # P -> Q (node 3), same pair
+        dense[1, 0] = 0.5  # S -> P
+        groups = {0: "S", 1: "P", 2: "Q", 3: "Q"}
+        model = self._model(
+            budget=1.0,
+            dense=dense,
+            groups=groups,
+            slope_dict={("S", "P"): 1.0, ("P", "Q"): 1.0},
+        )
+        idx = model.slope_pairs.index(("P", "Q"))
+        self.assertAlmostEqual(float(model.slope_update_scale[idx]), 0.2, places=6)
+
+    # ---- train_model integration (section H) ----
+
+    def test_train_model_keeps_the_row_under_budget_and_reports(self):
+        weights = np.zeros((3, 3), dtype=np.float32)
+        weights[1, 0] = 0.5  # S -> A, trainable
+        weights[2, 1] = 0.4  # A -> B, trainable
+        weights[2, 0] = 0.2  # S -> B, frozen
+        model = LinearNetwork(
+            csr_matrix(weights),
             sensory_indices=[0],
-            num_layers=2,
-            idx_to_group=groups,
-            slope_dict={("A", "B"): 1.0, ("C", "B"): 1.0},
-            slope_bounds={("A", "B"): (-100.0, 100.0), ("C", "B"): (-100.0, 100.0)},
+            num_layers=3,
+            threshold=0.0,
+            tanh_steepness=1.0,
+            tau=1.0,
+            idx_to_group={0: "S", 1: "A", 2: "B"},
+            bias_transform="identity",
+            sensory_input_mode="replace",
+            slope_dict={("S", "A"): 1.0, ("A", "B"): 1.0},
             incoming_weight_budget=1.0,
         ).to(self.device)
-        for k in (1.0, 10.0, 1e3):
-            with self.subTest(k=k):
-                with torch.no_grad():
-                    model.slope.copy_(torch.tensor([k, -k], device=model.slope.device))
-                row_l1 = self._row_l1(model)
-                self.assertLessEqual(float(row_l1[3]), 1.0 + 1e-5)
+        inputs = torch.ones((1, 1, 3), device=self.device)
+        # an unreachable target, to push the gains up against the cap
+        targets = pd.DataFrame(
+            [
+                {"batch": 0, "neuron_idx": 2, "layer": layer, "value": 50.0}
+                for layer in range(3)
+            ]
+        )
+        _, history, *_ = train_model(
+            model,
+            inputs,
+            targets,
+            num_epochs=40,
+            learning_rate=0.5,
+            param_reg_lambda=0.0,
+            wandb=False,
+            train_fraction=1.0,
+            train_slopes=True,
+            train_biases=False,
+            train_divisive_strength=False,
+            train_tau=False,
+            checkpoint_steps=0,
+        )
+        row_l1 = model.effective_weights.to_dense().detach().cpu().abs().sum(dim=1)
+        self.assertLessEqual(float(row_l1[2]), 1.0 + 1e-5)
+        projections = history["budget_projections"]
+        self.assertIn(2, projections)
+        self.assertGreater(projections[2]["steps"], 0)
+        self.assertLess(projections[2]["min_scale"], 1.0)
+        # the sensory row and the uncapped row 1 never fired
+        self.assertNotIn(0, projections)
 
-    def test_forward_pass_is_finite_under_budget(self):
+    def test_train_model_reports_nothing_when_the_budget_never_binds(self):
         model = self._model(budget=1.0)
-        out = model(torch.full((1, 2), 0.5))
-        self.assertTrue(bool(torch.isfinite(out).all()))
+        inputs = torch.zeros((1, 1, 2), device=self.device)
+        targets = pd.DataFrame([{"batch": 0, "neuron_idx": 3, "layer": 0, "value": 0.0}])
+        _, history, *_ = train_model(
+            model,
+            inputs,
+            targets,
+            num_epochs=3,
+            learning_rate=1e-4,
+            param_reg_lambda=0.0,
+            wandb=False,
+            train_fraction=1.0,
+            train_slopes=True,
+            train_biases=False,
+            train_divisive_strength=False,
+            train_tau=False,
+            checkpoint_steps=0,
+        )
+        self.assertEqual(history["budget_projections"], {})
 
 
 class TestTauLogScale(unittest.TestCase):
