@@ -1032,7 +1032,7 @@ def add_first_n_matrices(matrices, n):
 
 
 def connectivity_summary(
-    stepsn: Union[spmatrix, np.ndarray],
+    stepsn: Union[spmatrix, np.ndarray, pd.DataFrame],
     inidx: arrayable,
     outidx: arrayable,
     inidx_map: dict | None = None,
@@ -1054,8 +1054,10 @@ def connectivity_summary(
     single cells of the same type, to an average post-synaptic cell.
 
     Args:
-        stepsn (scipy.sparse matrix or numpy.ndarray): Matrix representing the synaptic
-            strengths between neurons, can be dense or sparse. Pres are in the rows.
+        stepsn (scipy.sparse matrix, numpy.ndarray or pandas.DataFrame): Matrix
+            representing the synaptic strengths between neurons, can be dense or sparse.
+            Pres are in the rows. Alternatively, an edgelist with columns 'pre_id',
+            'post_id' and 'weight'.
         inidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array of indices
             representing the input (presynaptic) neurons, used to subset stepsn. nan
             values are removed.
@@ -1113,7 +1115,13 @@ def connectivity_summary(
     outidx = np.array([int(x) for x in outidx])
 
     if inidx_map is None:
-        inidx_map = {idx: idx for idx in range(stepsn.shape[0])}
+        # for an edgelist, the neuron ids are the ones appearing in it
+        ids = (
+            np.union1d(stepsn.pre_id, stepsn.post_id)
+            if isinstance(stepsn, pd.DataFrame)
+            else range(stepsn.shape[0])
+        )
+        inidx_map = {int(idx): int(idx) for idx in ids}
     if outidx_map is None:
         outidx_map = inidx_map
 
@@ -1129,7 +1137,12 @@ def connectivity_summary(
     # Ensure sparse and slice
     # ---------------------------------------------------------------------#
 
-    if issparse(stepsn):
+    if isinstance(stepsn, pd.DataFrame):
+        edgelist = stepsn.loc[
+            stepsn.pre_id.isin(inidx) & stepsn.post_id.isin(outidx),
+            ["pre_id", "post_id", "weight"],
+        ].copy()
+    elif issparse(stepsn):
         submat = stepsn.tocsc()[inidx, :][:, outidx].tocoo()
         # map sub-indices back to original ids
         # submat.row is the local indices of inidx
@@ -1324,8 +1337,10 @@ def result_summary(
     (absent members contribute 0). This matches `connectivity_summary()`.
 
     Args:
-        stepsn (scipy.sparse matrix or numpy.ndarray): Matrix representing the
-            synaptic strengths between neurons, can be dense or sparse.
+        stepsn (scipy.sparse matrix, numpy.ndarray or pandas.DataFrame): Matrix
+            representing the synaptic strengths between neurons, can be dense or
+            sparse. Alternatively, an edgelist with columns 'pre_id', 'post_id'
+            and 'weight'.
         inidx (int, float, list, set, numpy.ndarray, or pandas.Series): Array
             of indices representing the input (presynaptic) neurons, used to
             subset stepsn. nan values are removed.
@@ -1376,7 +1391,13 @@ def result_summary(
     )
 
     if inidx_map is None:
-        inidx_map = {idx: idx for idx in range(stepsn.shape[0])}
+        # for an edgelist, the neuron ids are the ones appearing in it
+        ids = (
+            np.union1d(stepsn.pre_id, stepsn.post_id)
+            if isinstance(stepsn, pd.DataFrame)
+            else range(stepsn.shape[0])
+        )
+        inidx_map = {int(idx): int(idx) for idx in ids}
     if outidx_map is None:
         outidx_map = inidx_map
 
@@ -1388,7 +1409,18 @@ def result_summary(
     inidx = np.array([int(x) for x in inidx])
     outidx = np.array([int(x) for x in outidx])
 
-    if issparse(stepsn):
+    if isinstance(stepsn, pd.DataFrame):
+        matrix = (
+            # subset before pivoting, so the dense matrix is only as wide as needed
+            stepsn[stepsn.pre_id.isin(inidx) & stepsn.post_id.isin(outidx)]
+            .pivot_table(
+                index="pre_id", columns="post_id", values="weight", aggfunc="sum"
+            )
+            .reindex(index=inidx, columns=outidx)
+            .fillna(0)
+            .values
+        )
+    elif issparse(stepsn):
         # if stepsn is coo, turn into csc
         if stepsn.format == "coo":
             stepsn = stepsn.tocsc()

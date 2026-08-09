@@ -4077,3 +4077,64 @@ class TestResultSummaryConnectivityEquivalence(unittest.TestCase):
             check_dtype=False,
             atol=1e-6,
         )
+
+
+def make_edgelist(dense_array):
+    """The same connectivity as `dense_array`, as a 'pre_id'/'post_id'/'weight'
+    edgelist (zero weights omitted)."""
+    pre, post = np.nonzero(dense_array)
+    return pd.DataFrame(
+        {"pre_id": pre, "post_id": post, "weight": dense_array[pre, post]}
+    )
+
+
+class TestEdgelistInput(unittest.TestCase):
+    """An edgelist should be accepted in place of a matrix, and give the same
+    answer as the equivalent matrix."""
+
+    def _assert_matches_matrix(self, func, inidx, outidx, **kwargs):
+        kw = dict(display_output=False, display_threshold=0.0, **kwargs)
+        from_matrix = func(make_stepsn(WEIGHTS), inidx, outidx, **kw)
+        from_edgelist = func(make_edgelist(WEIGHTS), inidx, outidx, **kw)
+        pd.testing.assert_frame_equal(
+            from_matrix.sort_index().sort_index(axis=1),
+            from_edgelist.sort_index().sort_index(axis=1),
+            check_like=True,
+            check_names=False,
+            check_dtype=False,
+            atol=1e-6,
+        )
+
+    def test_matches_matrix_full_grid(self):
+        for func in (connectivity_summary, result_summary):
+            for cm in ("mean", "median", "sum"):
+                for outprop in (False, True):
+                    with self.subTest(
+                        func=func.__name__, combining_method=cm, outprop=outprop
+                    ):
+                        self._assert_matches_matrix(
+                            func,
+                            INIDX,
+                            OUTIDX,
+                            inidx_map=INIDX_MAP,
+                            outidx_map=OUTIDX_MAP,
+                            combining_method=cm,
+                            outprop=outprop,
+                        )
+
+    def test_matches_matrix_on_subset(self):
+        for func in (connectivity_summary, result_summary):
+            with self.subTest(func=func.__name__):
+                self._assert_matches_matrix(
+                    func,
+                    INIDX,
+                    np.array([0, 2, 3]),
+                    inidx_map=INIDX_MAP,
+                    outidx_map=OUTIDX_MAP,
+                )
+
+    def test_matches_matrix_without_maps(self):
+        """Without maps, an edgelist groups by the ids appearing in it."""
+        for func in (connectivity_summary, result_summary):
+            with self.subTest(func=func.__name__):
+                self._assert_matches_matrix(func, INIDX, OUTIDX)
