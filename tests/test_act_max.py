@@ -4770,6 +4770,68 @@ class TestTauLogScale(unittest.TestCase):
         )
 
 
+class TestTauMax(unittest.TestCase):
+    """tau_max upper-bounds effective_tau so fitted taus cannot drift
+    arbitrarily slow (an unidentified slow mode otherwise absorbs drift)."""
+
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.weights = csr_matrix(np.array([[0.0, 0.0], [0.5, 0.0]], dtype=np.float32))
+        self.idx_to_group = {0: "A", 1: "B"}
+
+    def _model(self, model_class=MultilayeredNetwork, **kwargs):
+        return model_class(
+            self.weights,
+            sensory_indices=[0],
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+            **kwargs,
+        ).to(self.device)
+
+    def test_effective_tau_clamped_at_tau_max_log_scale(self):
+        model = self._model(
+            tau_dict={"A": 4.0, "B": 16.0}, tau_log_scale=True, tau_max=8.0
+        )
+        np.testing.assert_allclose(
+            model.effective_tau.detach().cpu().numpy(), [4.0, 8.0], rtol=1e-5
+        )
+
+    def test_effective_tau_clamped_at_tau_max_linear_scale(self):
+        model = self._model(tau_dict={"A": 4.0, "B": 16.0}, tau_max=8.0)
+        np.testing.assert_allclose(
+            model.effective_tau.detach().cpu().numpy(), [4.0, 8.0], rtol=1e-6
+        )
+
+    def test_no_tau_max_leaves_tau_unbounded(self):
+        model = self._model(tau_dict={"A": 4.0, "B": 21101.0})
+        np.testing.assert_allclose(
+            model.effective_tau.detach().cpu().numpy(), [4.0, 21101.0], rtol=1e-6
+        )
+
+    def test_drift_above_bound_stays_clamped(self):
+        model = self._model(
+            tau_dict={"A": 4.0, "B": 4.0}, tau_log_scale=True, tau_max=8.0
+        )
+        with torch.no_grad():
+            model.tau_param.add_(float(np.log(10.0)))  # 4 -> 40, both over
+        np.testing.assert_allclose(
+            model.effective_tau.detach().cpu().numpy(), [8.0, 8.0], rtol=1e-5
+        )
+
+    def test_tau_max_applies_to_linear_network(self):
+        model = self._model(
+            model_class=LinearNetwork, tau_dict={"A": 4.0, "B": 16.0}, tau_max=8.0
+        )
+        np.testing.assert_allclose(
+            model.effective_tau.detach().cpu().numpy(), [4.0, 8.0], rtol=1e-6
+        )
+
+    def test_tau_max_at_or_below_one_raises(self):
+        for bad in (1.0, 0.5, -3.0):
+            with self.assertRaises(ValueError):
+                self._model(tau_dict={"A": 4.0, "B": 16.0}, tau_max=bad)
+
+
 class TestRescaleSlopeUpdatesInTrainModel(unittest.TestCase):
     """train_model(rescale_slope_updates=True) routes the optimizer step through
     rescale_slope_update_, dividing it by the per-pair slope_update_scale."""

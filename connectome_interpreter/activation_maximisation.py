@@ -127,9 +127,11 @@ class _NetworkBase(nn.Module):
         divisive_normalization: Optional[Dict[str, List[str]]] = None,
         divisive_strength: Union[float, int, dict] = 1,
         activation_function: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+        activation_gain_fn: Optional[Callable] = None,
         tau: float = 10,
         tau_dict: Optional[dict] = None,
         tau_log_scale: bool = False,
+        tau_max: Optional[float] = None,
         sensory_input_mode: str = "add",
         device: Optional[torch.device] = None,
         incoming_weight_budget: Optional[float] = None,
@@ -222,6 +224,7 @@ class _NetworkBase(nn.Module):
         self.idx_to_group = idx_to_group
         self.activations = []
         self.custom_activation_function = activation_function
+        self.custom_activation_gain_fn = activation_gain_fn
         self.default_bias = default_bias
         self.bias_transform = bias_transform
         self.divisive_normalization = divisive_normalization
@@ -230,6 +233,12 @@ class _NetworkBase(nn.Module):
         # When True, tau_param stores log(tau) so optimisation steps act
         # multiplicatively on tau; effective_tau exponentiates it back.
         self.tau_log_scale = tau_log_scale
+        if tau_max is not None and tau_max <= 1.0:
+            raise ValueError(
+                "tau_max must be > 1 (effective_tau is clamped to >= 1), "
+                f"got {tau_max}."
+            )
+        self.tau_max = tau_max
         self.sensory_input_mode = sensory_input_mode
 
         # slope_dict is dual-format: cell-type keys (node mode, legacy per-post
@@ -857,10 +866,97 @@ class _NetworkBase(nn.Module):
     def effective_tau(self):
         if self.tau_param is None:
             return self.tau
+        tau_max = getattr(self, "tau_max", None)
         if getattr(self, "tau_log_scale", False):
             # tau_param holds log(tau); exponentiate back to ms
-            return torch.clamp(torch.exp(self.tau_param), min=1.0)
-        return torch.clamp(self.tau_param, min=1.0)  # tau < 1 is physically meaningless
+            return torch.clamp(torch.exp(self.tau_param), min=1.0, max=tau_max)
+        # tau < 1 is physically meaningless
+        return torch.clamp(self.tau_param, min=1.0, max=tau_max)
+
+    def node_parameter(self, name: str, default: Optional[float] = None):
+        """Expand a per-group parameter to one value per node.
+
+        Parameters are stored per cell-type group and mapped to nodes via
+        ``self.indices``; the forward pass reads them through
+        ``effective_slope`` / ``biases`` / ``effective_tau``. This returns the
+        same per-node view those paths use, so downstream analysis (e.g. the
+        stability tools in ``connectome_interpreter.response_fitting``) cannot
+        disagree with the forward pass.
+
+        Args:
+            name (str): one of ``"slope"``, ``"bias"``, ``"tau"``.
+            default (float, optional): fill value used when the parameter is
+                not set on the model. None (the default) uses the model's own
+                default (``tanh_steepness`` / ``default_bias`` / ``tau``).
+
+        Returns:
+            torch.Tensor: shape ``(n_nodes,)`` on the model's device. For
+            ``"slope"`` in pair mode this is all ones: the per-(pre, post) gain
+            is folded into ``effective_weights``, so the post-matmul per-node
+            slope factor is unity.
+        """
+        n_nodes = self.all_weights.shape[0]
+        device = self.all_weights.device
+
+        def _fill(value):
+            return torch.full(
+                (n_nodes,), float(value), dtype=torch.float32, device=device
+            )
+
+        if name == "slope":
+            if self.slope_is_pairwise:
+                return torch.ones(n_nodes, dtype=torch.float32, device=device)
+            if self.slope is None or self.indices is None:
+                return _fill(self.tanh_steepness if default is None else default)
+            return self.effective_slope[self.indices]
+        if name == "bias":
+            if self.raw_biases is None or self.indices is None:
+                return _fill(self.default_bias if default is None else default)
+            return self.biases[self.indices]
+        if name == "tau":
+            if self.tau_param is None or self.indices is None:
+                return _fill(self.tau if default is None else default)
+            return self.effective_tau[self.indices]
+        raise ValueError(f"Unknown parameter name: {name!r}")
+
+    def activation_gain(self, state: Optional[torch.Tensor] = None):
+        """Per-node local gain of the installed activation at ``state``.
+
+        The local gain is the derivative of a node's transfer (its rate before
+        the tau integration) with respect to its recurrent input
+        ``x = effective_weights @ state`` — the quantity Jacobian-based
+        analysis (e.g. ``response_fitting.stability_penalty``) needs.
+
+        Dispatch: a custom ``activation_gain_fn`` (constructor arg) wins; a
+        custom ``activation_function`` *without* a matching gain raises,
+        because a penalty computed against the wrong derivative is silently
+        wrong; the built-in activation falls through to the class's analytic
+        gain.
+
+        Args:
+            state (torch.Tensor, optional): full-network state ``(n_nodes,)``
+                at the operating point. Required whenever the gain is
+                state-dependent (custom gains, the built-in
+                ``MultilayeredNetwork`` activation); ignored by
+                state-independent gains (``LinearNetwork``).
+
+        Returns:
+            torch.Tensor: per-node gain, shape ``(n_nodes,)``.
+        """
+        if self.custom_activation_gain_fn is not None:
+            return self.custom_activation_gain_fn(self, state)
+        if self.custom_activation_function is not None:
+            raise ValueError(
+                "This model has a custom activation_function but no "
+                "activation_gain_fn, so its local gain is unknown. Pass "
+                "activation_gain_fn=... at construction (the derivative of "
+                "the custom activation) to enable Jacobian-based analysis "
+                "such as the stability penalty."
+            )
+        return self._builtin_activation_gain(state)
+
+    def _builtin_activation_gain(self, state):
+        raise NotImplementedError  # per-subclass analytic gain
 
     def _apply_sensory_input(self, state: torch.Tensor, input_at_layer: torch.Tensor):
         # Each call retains one (num_neurons, batch) clone in the autograd graph.
@@ -1105,11 +1201,32 @@ class LinearNetwork(_NetworkBase):
             strengths. Defaults to 1.
         activation_function (Callable, optional): Custom activation function. If None,
             uses default implementation.
+        activation_gain_fn (Callable, optional): Companion to a custom
+            ``activation_function``: ``fn(model, state) -> per-node gain``, the
+            derivative of the custom transfer with respect to each node's
+            recurrent input at ``state``. Read by ``activation_gain`` for
+            Jacobian-based analysis (e.g. the stability penalty in
+            ``response_fitting``); without it such analysis raises rather than
+            silently using a wrong derivative. Defaults to None.
         tau (float, optional): Time constant. Higher tau results in slower changes.
             Minimum 1, where the activation at the current time step is solely
             determined by the current input. Defaults to 10.
+        tau_max (float, optional): Upper bound on the effective time constant,
+            in the same units as ``tau``. When set, ``effective_tau`` clamps to
+            ``[1, tau_max]``, so fitted taus cannot drift arbitrarily slow
+            (poorly identified slow modes otherwise absorb baseline drift).
+            Defaults to None (unbounded).
         device (torch.device, optional): Device for computation.
     """
+
+    def _builtin_activation_gain(self, state=None):
+        # Linear transfer: rate = slope * x + bias, so the local gain is the
+        # slope itself, independent of the operating point (state is ignored).
+        if self.divisive_normalization is not None:
+            raise NotImplementedError(
+                "activation_gain does not support divisive_normalization."
+            )
+        return self.node_parameter("slope")
 
     def activation_function(
         self,
@@ -1576,9 +1693,21 @@ class MultilayeredNetwork(_NetworkBase):
             strengths. Defaults to 1.
         activation_function (Callable, optional): Custom activation function. If None,
             uses default implementation.
+        activation_gain_fn (Callable, optional): Companion to a custom
+            ``activation_function``: ``fn(model, state) -> per-node gain``, the
+            derivative of the custom transfer with respect to each node's
+            recurrent input at ``state``. Read by ``activation_gain`` for
+            Jacobian-based analysis (e.g. the stability penalty in
+            ``response_fitting``); without it such analysis raises rather than
+            silently using a wrong derivative. Defaults to None.
         tau (float, optional): Time constant. Higher tau results in slower changes.
             Minimum 1, where the activation at the current time step is solely
             determined by the current input. Defaults to 10.
+        tau_max (float, optional): Upper bound on the effective time constant,
+            in the same units as ``tau``. When set, ``effective_tau`` clamps to
+            ``[1, tau_max]``, so fitted taus cannot drift arbitrarily slow
+            (poorly identified slow modes otherwise absorb baseline drift).
+            Defaults to None (unbounded).
         device (torch.device, optional): Device for computation.
         output_clamp_max (float, optional): Upper clamp applied to non-sensory
             activations after each layer in :meth:`forward`. None disables it
@@ -1612,6 +1741,34 @@ class MultilayeredNetwork(_NetworkBase):
         self.output_clamp_max = output_clamp_max
         self.output_rectify = output_rectify
 
+    def _builtin_activation_gain(self, state):
+        """Analytic local gain of the built-in tanh(thresholded-relu) transfer.
+
+        With ``u = slope * x + bias``, the transfer is ``tanh(u)`` for
+        ``u >= threshold`` and ``0`` below, so the gain is
+        ``(1 - tanh(u)**2) * slope * 1[u >= threshold]`` (the jump at the
+        threshold itself is ignored). ``output_clamp_max`` / ``output_rectify``
+        post-processing is likewise ignored — a saturated unit is treated at
+        its pre-clamp gain, a conservative over-estimate of instability.
+        """
+        if self.divisive_normalization is not None:
+            raise NotImplementedError(
+                "activation_gain does not support divisive_normalization."
+            )
+        if state is None:
+            raise ValueError(
+                "The built-in MultilayeredNetwork activation gain is "
+                "state-dependent; pass the operating-point state."
+            )
+        weights = self.effective_weights
+        state = torch.as_tensor(
+            state, dtype=torch.float32, device=weights.device
+        ).reshape(-1, 1)
+        slopes = self.node_parameter("slope")
+        biases = self.node_parameter("bias")
+        u = slopes * torch.sparse.mm(weights, state).squeeze(1) + biases
+        gate = (u >= self.threshold).to(u.dtype)
+        return (1.0 - torch.tanh(u) ** 2) * slopes * gate
 
     def activation_function(
         self,
@@ -2151,7 +2308,7 @@ def train_model(
             every forward pass (train and validation), before the targets are
             gathered. Used to append a fixed observation model to the dynamics --
             e.g. a causal sensor/indicator convolution along the time axis (see
-            ``sensor_kernel.make_sensor_output_transform``) so the fit compares a
+            ``response_fitting.ExponentialSensor``) so the fit compares a
             forward-modelled measurement, not the raw latent, to the data. Must
             preserve the shape and be differentiable wrt ``outputs``. Note this
             retains a second copy of the full output in the autograd graph: at 139k
