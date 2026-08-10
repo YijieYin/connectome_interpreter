@@ -24,8 +24,10 @@ CPU = torch.device("cpu")
 # ---------------------------------------------------------------------------
 
 
-def softplus_activation(self, x, x_previous=None):
-    """Example custom activation: leaky-integrated softplus transfer."""
+def tanh_relu_activation(self, x, x_previous=None):
+    """The default tanh(thresholded-relu) transfer, re-implemented as a custom
+    activation so the custom-dispatch path can be tested against the built-in
+    reference (same math, same leaky-tau integration)."""
     if self.slope_is_pairwise:
         slopes = 1.0
     elif self.slope is None:
@@ -41,7 +43,9 @@ def softplus_activation(self, x, x_previous=None):
             self.biases[self.indices].view(-1, 1).expand(-1, x.shape[1]).to(x.device)
         )
     z = slopes * x + biases
-    a = torch.nn.functional.softplus(z)
+    z = torch.relu(z - self.threshold) + self.threshold * (z >= self.threshold).to(
+        z.dtype
+    )
     if self.tau_param is not None:
         taus = (
             self.effective_tau[self.indices]
@@ -51,17 +55,19 @@ def softplus_activation(self, x, x_previous=None):
         )
     else:
         taus = self.tau
-    return 1 / taus * a + (taus - 1) / taus * x_previous
+    return 1 / taus * torch.tanh(z) + (taus - 1) / taus * x_previous
 
 
-def softplus_gain(self, state):
-    """Matching local gain: d/dz softplus(z) = sigmoid(z) (pair slopes are ones)."""
+def tanh_relu_gain(self, state):
+    """Matching local gain: ``(1 - tanh(u)^2) * 1[u >= threshold]`` (pair-mode
+    slopes are ones, folded into the effective weights)."""
     weights = self.effective_weights
     state = torch.as_tensor(state, dtype=torch.float32, device=weights.device).reshape(
         -1, 1
     )
-    z = torch.sparse.mm(weights, state).squeeze(1) + self.node_parameter("bias")
-    return torch.sigmoid(z)
+    u = torch.sparse.mm(weights, state).squeeze(1) + self.node_parameter("bias")
+    gate = (u >= self.threshold).to(u.dtype)
+    return (1.0 - torch.tanh(u) ** 2) * gate
 
 
 def _linear_net(weights, **kwargs):
@@ -191,19 +197,42 @@ class TestActivationGain:
         np.testing.assert_allclose(gain.detach().numpy(), [5.0] * 3)
 
     def test_custom_activation_without_gain_raises(self):
-        model = _mln_pairwise(activation_function=softplus_activation)
+        model = _mln_pairwise(activation_function=tanh_relu_activation)
         with pytest.raises(ValueError, match="activation_gain_fn"):
             model.activation_gain(torch.zeros(3))
 
     def test_custom_gain_dispatched(self):
         model = _mln_pairwise(
-            activation_function=softplus_activation, activation_gain_fn=softplus_gain
+            activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
         )
         state = torch.tensor([0.5, 0.1, 0.2])
-        expected = softplus_gain(model, state)
+        expected = tanh_relu_gain(model, state)
         np.testing.assert_allclose(
             model.activation_gain(state).detach().numpy(), expected.detach().numpy()
         )
+        # the pair re-implements the default activation, so the dispatched
+        # gain must agree with the built-in analytic Jacobian
+        builtin = _mln_pairwise().activation_gain(state)
+        np.testing.assert_allclose(
+            model.activation_gain(state).detach().numpy(),
+            builtin.detach().numpy(),
+            rtol=1e-6,
+        )
+
+    def test_custom_pair_matches_builtin_forward(self):
+        inputs = rf.trace_to_input_tensor(
+            np.linspace(0.1, 0.5, 6).astype(np.float32), device=CPU
+        )
+        custom = _mln_pairwise(
+            activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
+        )
+        default = _mln_pairwise()
+        with torch.no_grad():
+            np.testing.assert_allclose(
+                np.asarray(custom(inputs, checkpoint_steps=0)),
+                np.asarray(default(inputs, checkpoint_steps=0)),
+                atol=1e-6,
+            )
 
     def test_builtin_multilayered_gain_matches_analytic(self):
         model = _mln_node_mode()
@@ -285,7 +314,7 @@ class TestDynamics:
 
     def test_fixed_point_converges_and_is_a_fixed_point(self):
         model = _mln_pairwise(
-            activation_function=softplus_activation, activation_gain_fn=softplus_gain
+            activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
         )
         state, info = rf.network_fixed_point(model, [0.3], return_info=True, tol=1e-8)
         assert info["converged"]
@@ -294,7 +323,7 @@ class TestDynamics:
 
     def test_fixed_point_warm_start_converges_quickly(self):
         model = _mln_pairwise(
-            activation_function=softplus_activation, activation_gain_fn=softplus_gain
+            activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
         )
         state = rf.network_fixed_point(model, [0.3], tol=1e-10)
         _, info = rf.network_fixed_point(
@@ -334,15 +363,16 @@ class TestStability:
 
     def test_nonlinear_penalty_uses_state_dependent_gain(self):
         model = _mln_pairwise(
-            activation_function=softplus_activation, activation_gain_fn=softplus_gain
+            activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
         )
-        # gain = sigmoid(z): a high-activity operating point is less stable
+        # gain = 1 - tanh(u)^2: saturation lowers the local gain, so a
+        # high-activity operating point is more stable than a low one
         low = rf.spectral_radius(model, torch.zeros(3))
         high = rf.spectral_radius(model, torch.tensor([5.0, 5.0, 5.0]))
-        assert high > low
+        assert high < low
 
     def test_penalty_raises_without_gain(self):
-        model = _mln_pairwise(activation_function=softplus_activation)
+        model = _mln_pairwise(activation_function=tanh_relu_activation)
         with pytest.raises(ValueError, match="activation_gain_fn"):
             rf.stability_penalty(model, torch.zeros(3))
 
@@ -657,7 +687,7 @@ class TestMakeAffineReadoutLoss:
             rf.make_affine_readout_loss(model, targets, layer_ids=[1, 7])
 
     def test_stability_optin_without_gain_raises_at_build(self):
-        model = _mln_pairwise(activation_function=softplus_activation)
+        model = _mln_pairwise(activation_function=tanh_relu_activation)
         _, targets, _ = _toy_targets()
         with pytest.raises(ValueError, match="stability_weight=0"):
             rf.make_affine_readout_loss(
@@ -667,7 +697,7 @@ class TestMakeAffineReadoutLoss:
     def test_stability_weight_zero_skips_gain_requirement(self):
         # same gain-less model: with the default weight 0 the factory builds
         # and the loss runs -- backward compatible
-        model = _mln_pairwise(activation_function=softplus_activation)
+        model = _mln_pairwise(activation_function=tanh_relu_activation)
         _, targets, _ = _toy_targets()
         loss_fn = rf.make_affine_readout_loss(model, targets, layer_ids=[1, 2])
         target = _flat_target_vector(targets)
@@ -675,7 +705,7 @@ class TestMakeAffineReadoutLoss:
 
     def test_stability_term_added_and_warm_started(self):
         model = _mln_pairwise(
-            activation_function=softplus_activation, activation_gain_fn=softplus_gain
+            activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
         )
         _, targets, _ = _toy_targets()
         calls = []
@@ -831,12 +861,12 @@ class TestWindowsAndMetrics:
             dt_ms=1.0,
         )
         row = frame.iloc[0]
-        assert row["direction"] == "ON"
+        assert row["direction"] == "up"
         assert row["target_peak"] == pytest.approx(1.0)
         assert row["model_peak"] == pytest.approx(0.5)
         assert row["peak_latency_error_ms"] == pytest.approx(1.0)
 
-    def test_transition_metrics_off_direction(self):
+    def test_transition_metrics_down_direction(self):
         window = 5
         target = np.zeros((1, window), dtype=np.float32)
         target[0, 2] = -1.0  # transient dip below the (zero) plateau
@@ -849,12 +879,12 @@ class TestWindowsAndMetrics:
             model_static={"A": {rf.level_key(0.2): 0.0}},
         )
         row = frame.iloc[0]
-        assert row["direction"] == "OFF"
+        assert row["direction"] == "down"
         assert row["target_peak"] == pytest.approx(1.0)
 
     def test_transition_metrics_no_step_window_direction_none(self):
         # pre == post (e.g. the scored stimulus-onset window at t=0) must not
-        # be labelled ON or OFF, so direction-filtered summaries skip it
+        # be labelled up or down, so direction-filtered summaries skip it
         window = np.zeros((1, 4), dtype=np.float32)
         frame = rf.transition_metrics(
             pred_windows={"A": window},
@@ -865,20 +895,6 @@ class TestWindowsAndMetrics:
             model_static={"A": {rf.level_key(0.2): 0.0}},
         )
         assert frame.iloc[0]["direction"] == "none"
-
-    def test_signed_peaks_and_latencies(self):
-        trace = np.zeros(20)
-        trace[4] = -2.0  # baseline is trace[1] = 0; peak keeps its sign
-        peaks, latencies = rf.signed_peaks_and_latencies(trace, [2], 5)
-        assert peaks[0] == pytest.approx(-2.0)
-        assert latencies[0] == 2
-        with pytest.raises(ValueError, match="baseline"):
-            rf.signed_peaks_and_latencies(trace, [0], 5)
-
-    def test_on_off_asymmetry(self):
-        peaks = np.array([2.0, -1.0])
-        is_on = np.array([True, False])
-        assert rf.on_off_asymmetry(peaks, is_on) == pytest.approx((2 - 1) / (2 + 1))
 
     def test_r2(self):
         y = np.array([1.0, 2.0, 3.0])
@@ -894,7 +910,7 @@ class TestWindowsAndMetrics:
 class TestPersistence:
     def test_save_load_rebuild_round_trip(self, tmp_path):
         model = _mln_pairwise(
-            activation_function=softplus_activation, activation_gain_fn=softplus_gain
+            activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
         )
         inputs = rf.trace_to_input_tensor(
             np.linspace(0.1, 0.5, 6).astype(np.float32), device=CPU
@@ -907,8 +923,8 @@ class TestPersistence:
         assert "brightness" in fit
         rebuilt = rf.rebuild_network(
             fit,
-            activation_function=softplus_activation,
-            activation_gain_fn=softplus_gain,
+            activation_function=tanh_relu_activation,
+            activation_gain_fn=tanh_relu_gain,
             device=CPU,
         )
         with torch.no_grad():
@@ -967,7 +983,7 @@ class TestPersistence:
 class TestTables:
     def test_simulate_trace_columns(self):
         model = _mln_pairwise(
-            activation_function=softplus_activation, activation_gain_fn=softplus_gain
+            activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
         )
         inputs = rf.trace_to_input_tensor(
             np.full(6, 0.3, dtype=np.float32), device=CPU
@@ -1039,8 +1055,8 @@ class TestTrainModelIntegration:
     def test_end_to_end_fit_with_loss_factory_and_sensor(self):
         torch.manual_seed(0)
         model = _mln_pairwise(
-            activation_function=softplus_activation,
-            activation_gain_fn=softplus_gain,
+            activation_function=tanh_relu_activation,
+            activation_gain_fn=tanh_relu_gain,
             num_layers=30,
         )
         brightness = np.full(30, 0.3, dtype=np.float32)

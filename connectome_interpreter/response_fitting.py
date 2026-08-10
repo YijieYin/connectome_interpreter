@@ -74,8 +74,6 @@ __all__ = [
     "plateau_means_by_luminance",
     "static_metrics_from_trace",
     "transition_metrics",
-    "signed_peaks_and_latencies",
-    "on_off_asymmetry",
     "r2",
     # persistence & tables
     "save_fit",
@@ -1308,9 +1306,9 @@ def transition_metrics(
             windows.
         target_windows (Mapping): matching target windows.
         pre_luminance, post_luminance (array-like): stimulus level before/after
-            each transition (defines ON/OFF direction; a window with
-            ``pre == post`` — e.g. the stimulus-onset window at t=0 — gets
-            direction ``"none"``).
+            each transition (defines the step direction ``"up"``/``"down"``; a
+            window with ``pre == post`` — e.g. the stimulus-onset window at
+            t=0 — gets direction ``"none"``).
         target_static (Mapping): ``{layer: {level: target plateau}}``.
         model_static (Mapping): ``{layer: {level: model plateau}}`` (e.g. from
             :func:`plateau_means_by_luminance`).
@@ -1325,7 +1323,7 @@ def transition_metrics(
     for transition_number, (pre, post) in enumerate(
         zip(np.asarray(pre_luminance), np.asarray(post_luminance)), start=1
     ):
-        direction = "ON" if post > pre else ("OFF" if post < pre else "none")
+        direction = "up" if post > pre else ("down" if post < pre else "none")
         for layer in layers:
             target = np.asarray(target_windows[layer][transition_number - 1])
             pred = np.asarray(pred_windows[layer][transition_number - 1])
@@ -1357,41 +1355,6 @@ def transition_metrics(
                 }
             )
     return pd.DataFrame(rows)
-
-
-def signed_peaks_and_latencies(trace, transition_idx, window_steps: int):
-    """Signed peak deviation from the pre-transition baseline, per window.
-
-    The baseline is the trace value one sample before each transition; the peak
-    is the largest-magnitude deviation within the window, kept signed.
-
-    Returns:
-        tuple[np.ndarray, np.ndarray]: ``(peaks, latencies)`` in samples.
-    """
-    trace = np.asarray(trace, dtype=np.float64)
-    n_steps = int(window_steps)
-    peaks, latencies = [], []
-    for start in np.asarray(transition_idx, dtype=np.int64):
-        start = int(start)
-        if start < 1 or start + n_steps > trace.size:
-            raise ValueError(
-                "Each transition needs one pre-transition baseline sample and a "
-                "full window inside the trace."
-            )
-        deviation = trace[start : start + n_steps] - trace[start - 1]
-        peak_idx = int(np.argmax(np.abs(deviation)))
-        peaks.append(float(deviation[peak_idx]))
-        latencies.append(peak_idx)
-    return np.asarray(peaks), np.asarray(latencies, dtype=int)
-
-
-def on_off_asymmetry(peaks, is_on) -> float:
-    """ON/OFF asymmetry index ``(mean|ON| - mean|OFF|) / (mean|ON| + mean|OFF|)``."""
-    peaks = np.asarray(peaks, dtype=np.float64)
-    is_on = np.asarray(is_on, dtype=bool)
-    on_mean = float(np.mean(np.abs(peaks[is_on])))
-    off_mean = float(np.mean(np.abs(peaks[~is_on])))
-    return (on_mean - off_mean) / (on_mean + off_mean)
 
 
 def r2(y, y_pred) -> float:
