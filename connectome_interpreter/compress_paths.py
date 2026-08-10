@@ -53,6 +53,7 @@ def compress_paths(
     high_cpu_ram: bool = True,
     output_dtype: np.dtype = np.float32,
     density_threshold: float = 0.2,  # Save as dense if density exceeds this
+    quiet: bool = False,
 ):
     """
     Computes A^0 to A^n by chunking the computation to save memory.
@@ -86,6 +87,8 @@ def compress_paths(
             to np.float32.
         density_threshold (float): If the density of the matrix exceeds this threshold,
             the matrix is saved as dense. Defaults to 0.2.
+        quiet (bool, optional): If True, suppresses print statements and progress bars.
+            Defaults to False.
 
     Returns:
         List[scipy.sparse.csr_matrix or numpy.ndarray]:
@@ -117,7 +120,7 @@ def compress_paths(
             os.makedirs(temp_dir)
 
     # Process each chunk
-    for chunk_idx in tqdm(range(num_chunks)):
+    for chunk_idx in tqdm(range(num_chunks), disable=quiet):
         # Define the range for this chunk
         start_col = chunk_idx * chunkSize
         end_col = min((chunk_idx + 1) * chunkSize, matrix_size)
@@ -226,10 +229,11 @@ def compress_paths(
             torch.cuda.empty_cache()
 
     # Combine chunks and save results
-    print("Combining data from all chunks")
+    if not quiet:
+        print("Combining data from all chunks")
     results = []
 
-    for power in tqdm(range(step_number)):
+    for power in tqdm(range(step_number), disable=quiet):
         # Get all data for current power
         if high_cpu_ram:
             # Combine data from memory
@@ -268,15 +272,17 @@ def compress_paths(
         # Calculate density from the data directly
         nnz = len(all_data)
         density = nnz / (matrix_size**2)
-        print(
-            f"Matrix {power} has {nnz} non-zero elements ({density*100:.6f}% of full matrix)"
-        )
+        if not quiet:
+            print(
+                f"Matrix {power} has {nnz} non-zero elements ({density*100:.6f}% of full matrix)"
+            )
 
         # Choose the appropriate format based on density
         if density > density_threshold:
-            print(
-                f"Creating matrix {power} in dense format (density: {density*100:.6f}%)"
-            )
+            if not quiet:
+                print(
+                    f"Creating matrix {power} in dense format (density: {density*100:.6f}%)"
+                )
             # Create dense matrix directly instead of converting from sparse
             dense_result = np.zeros((matrix_size, matrix_size), dtype=output_dtype)
             dense_result[all_rows, all_cols] = all_data
