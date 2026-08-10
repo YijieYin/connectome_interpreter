@@ -1,10 +1,9 @@
 """Tests for connectome_interpreter.response_fitting.
 
-Folds in the former repo-root test_sensor_kernel.py (now ExponentialSensor),
-test_linear_network_tools.py (now the dynamics/stability sections) and
-test_rate_model_fit.py (now the rate-fit data / luminance-network sections),
-plus coverage for the model-carried activation gain, the affine-readout loss
-factory, the window/metric helpers and the save/load/rebuild round-trip.
+Covers the dynamics and stability helpers, the model-carried activation
+gain, the ExponentialSensor observation model, the affine-readout loss
+factory, the window/metric helpers, the save/load/rebuild round-trip and
+the cell-type rate-fit data pipeline.
 """
 
 import dataclasses
@@ -224,7 +223,7 @@ class TestActivationGain:
 
 
 # ---------------------------------------------------------------------------
-# Dynamics (folded from test_linear_network_tools.py, plus fixed point)
+# Dynamics
 # ---------------------------------------------------------------------------
 
 
@@ -383,7 +382,7 @@ class TestStability:
 
 
 # ---------------------------------------------------------------------------
-# ExponentialSensor (folded from test_sensor_kernel.py)
+# ExponentialSensor
 # ---------------------------------------------------------------------------
 
 
@@ -1018,7 +1017,7 @@ class TestTrainModelIntegration:
 
 
 # ---------------------------------------------------------------------------
-# Cell-type rate-model fit data (former tests/test_rate_model_fit.py)
+# Cell-type rate-model fit data & luminance network builder
 # ---------------------------------------------------------------------------
 
 
@@ -1094,8 +1093,7 @@ class TestRateFitData:
             rf.RateModelConfig(
                 extra_cell_types=("L4",), extra_luminance_gain_cell_types=("T1",)
             )
-        # targets are configurable now (the L1/L2/L3 hard requirement was a
-        # notebook-era guardrail, not a library constraint)
+        # target cell types are configurable; L1/L2/L3 is only the default
         assert rf.RateModelConfig(
             target_cell_types=("L1", "L2"), extra_cell_types=("L4",)
         ).target_cell_types == ("L1", "L2")
