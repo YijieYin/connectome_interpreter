@@ -27,6 +27,12 @@ from .utils import (
 )
 
 
+# Default box for a pair-mode gain. The gain is dimensionless (w_eff = m * w), so
+# a fixed box is meaningful across edges of any weight. 0 is a safe lower bound
+# because dL/dm = w * dL/dw_eff is nonzero there, so a zeroed edge can recover.
+DEFAULT_SLOPE_BOUNDS = (0.0, 50.0)
+
+
 @dataclass
 class TargetActivation:
     """
@@ -114,13 +120,19 @@ class _NetworkBase(nn.Module):
         idx_to_group: Optional[dict] = None,
         default_bias: float = 0.0,
         bias_dict: Optional[dict] = None,
+        bias_transform: str = "abs",
         slope_dict: Optional[dict] = None,
+        slope_bounds: Optional[dict] = None,
+        slope_update_scales: Optional[dict] = None,
         divisive_normalization: Optional[Dict[str, List[str]]] = None,
         divisive_strength: Union[float, int, dict] = 1,
         activation_function: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         tau: float = 10,
         tau_dict: Optional[dict] = None,
+        tau_log_scale: bool = False,
+        sensory_input_mode: str = "add",
         device: Optional[torch.device] = None,
+        incoming_weight_budget: Optional[float] = None,
     ):
         super().__init__()
 
@@ -142,6 +154,12 @@ class _NetworkBase(nn.Module):
             raise TypeError(
                 "all_weights must be a scipy sparse matrix, numpy array, or torch tensor."
             )
+        all_weights = all_weights.coalesce()
+
+        if bias_transform not in {"abs", "identity"}:
+            raise ValueError("bias_transform must be 'abs' or 'identity'.")
+        if sensory_input_mode not in {"add", "replace"}:
+            raise ValueError("sensory_input_mode must be 'add' or 'replace'.")
 
         # change the synaptic weight to 0 for the divisive normalization pairs
         if divisive_normalization is not None:
@@ -178,7 +196,7 @@ class _NetworkBase(nn.Module):
                     keep.append(False)
 
             keep = np.array(keep)
-            self.divnorm_indices = all_weights._indices()[:, ~keep]
+            self.divnorm_indices = all_weights._indices()[:, ~keep].to(device)
             self.divnorm_weights = all_weights._values()[~keep].to(device)
             # sanity check: all values should be negative
             # which index of divnorm_weights is positive?
@@ -187,16 +205,16 @@ class _NetworkBase(nn.Module):
             if len(posidx) > 0:
                 raise ValueError(
                     "Divisive normalization weights should be negative, "
-                    f"but found positive weights at indices: {self.divnorm_indices[posidx,:]}."
+                    f"but found positive weights at indices: {self.divnorm_indices[:, posidx].T}."
                 )
 
             all_weights = torch.sparse_coo_tensor(
                 all_weights._indices()[:, keep],
                 all_weights._values()[keep],
                 size=all_weights.shape,
-            )
+            ).coalesce()
 
-        self.all_weights = all_weights.to(device)
+        self.all_weights = all_weights.to(device).coalesce()
         self.sensory_indices = torch.tensor(sensory_indices, device=device)
         self.num_layers = num_layers
         self.threshold = threshold
@@ -205,52 +223,94 @@ class _NetworkBase(nn.Module):
         self.activations = []
         self.custom_activation_function = activation_function
         self.default_bias = default_bias
+        self.bias_transform = bias_transform
         self.divisive_normalization = divisive_normalization
         self.tau = tau
         self.tau_dict = tau_dict
+        # When True, tau_param stores log(tau) so optimisation steps act
+        # multiplicatively on tau; effective_tau exponentiates it back.
+        self.tau_log_scale = tau_log_scale
+        self.sensory_input_mode = sensory_input_mode
+
+        # slope_dict is dual-format: cell-type keys (node mode, legacy per-post
+        # slope applied after the matmul) or (pre, post) tuple keys (pair mode,
+        # per-connection gain folded into the weights). Detect which.
+        self._slope_dict_is_pairwise = bool(slope_dict) and any(
+            isinstance(k, tuple) for k in slope_dict
+        )
+        if self._slope_dict_is_pairwise and idx_to_group is None:
+            raise ValueError(
+                "idx_to_group must be provided when slope_dict has (pre, post) keys."
+            )
 
         # Setup trainable parameters if idx_to_group is provided
         if idx_to_group is not None:
             self._setup_trainable_parameters(
-                idx_to_group, bias_dict, slope_dict, divisive_strength, tau_dict, device
+                idx_to_group,
+                bias_dict,
+                slope_dict,
+                slope_bounds,
+                slope_update_scales,
+                divisive_strength,
+                tau_dict,
+                device,
+                incoming_weight_budget,
             )
         else:
             # For backward compatibility - no trainable parameters
             self.slope = None
+            self.slope_pairs = ()
+            self.slope_edge_indices = None
+            self.slope_lower_bound = None
+            self.slope_upper_bound = None
+            self.slope_update_scale = None
+            self.divnorm_slope_edge_indices = None
             self.raw_biases = None
             self.indices = None
             self.divisive_strength = None
             self.tau_param = None
             self.tau_indices = None
+            self.incoming_weight_budget = None
+            self.frozen_row_l1 = None
 
     def _setup_trainable_parameters(
         self,
         idx_to_group: dict,
         bias_dict,
         slope_dict,
+        slope_bounds,
+        slope_update_scales,
         divisive_strength,
         tau_dict,
         device,
+        incoming_weight_budget=None,
     ):
-        """Setup trainable slope and bias parameters grouped by neuron type."""
+        """Setup trainable slope and bias parameters grouped by neuron type.
+
+        ``slope_dict`` is dual-format. With cell-type keys it builds a per-type
+        ``self.slope`` applied after the matmul (legacy "node mode"). With
+        ``(pre, post)`` tuple keys it builds a per-pair ``self.slope`` folded into
+        ``effective_weights`` ("pair mode") via :meth:`_setup_slope_parameters`.
+        """
         all_types = sorted(set(idx_to_group.values()))
         num_types = len(all_types)
         type2idx = {t: i for i, t in enumerate(all_types)}
 
-        # Setup slope values----
-        if slope_dict is None:
-            slope_init = torch.full(
-                (num_types,), self.tanh_steepness, dtype=torch.float32
-            )
-        else:  # dict
-            slope_init = torch.zeros(num_types, dtype=torch.float32)
-            for group_name, slope_val in slope_dict.items():
-                if group_name in type2idx:
-                    slope_init[type2idx[group_name]] = slope_val
-            # Fill missing values with default
-            for i, group_name in enumerate(all_types):
-                if group_name not in slope_dict:
-                    slope_init[type2idx[group_name]] = self.tanh_steepness
+        # Setup slope values (node mode only; pair mode handled below) ----
+        if not self._slope_dict_is_pairwise:
+            if slope_dict is None:
+                slope_init = torch.full(
+                    (num_types,), self.tanh_steepness, dtype=torch.float32
+                )
+            else:  # dict
+                slope_init = torch.zeros(num_types, dtype=torch.float32)
+                for group_name, slope_val in slope_dict.items():
+                    if group_name in type2idx:
+                        slope_init[type2idx[group_name]] = slope_val
+                # Fill missing values with default
+                for i, group_name in enumerate(all_types):
+                    if group_name not in slope_dict:
+                        slope_init[type2idx[group_name]] = self.tanh_steepness
 
         # Setup bias values----
         if bias_dict is None:
@@ -313,18 +373,329 @@ class _NetworkBase(nn.Module):
                 if group_name in type2idx:
                     tau_init[type2idx[group_name]] = tau_val
 
+        if getattr(self, "tau_log_scale", False):
+            # store log(tau); effective_tau exponentiates so updates are in log space
+            tau_init = torch.log(tau_init.clamp(min=1e-6))
+
         self.tau_param = nn.Parameter(tau_init.to(device), requires_grad=False)
 
-        self.slope = nn.Parameter(slope_init.to(device), requires_grad=False)
-        self.raw_biases = nn.Parameter(bias_init.to(device), requires_grad=False)
-        # note indices only apply to slope and biases, not divisive normalization
+        # note indices only apply to (node-mode) slope and biases, not divnorm
         self.indices = torch.tensor(
             [type2idx[idx_to_group[i]] for i in range(self.all_weights.shape[0])],
             device=device,
         )
 
+        if self._slope_dict_is_pairwise:
+            # pair mode: per-(pre, post) gain folded into the weights
+            self._setup_slope_parameters(
+                slope_dict,
+                slope_bounds,
+                slope_update_scales,
+                idx_to_group,
+                device,
+                budget_is_set=incoming_weight_budget is not None,
+            )
+            self._setup_incoming_budget(incoming_weight_budget, device)
+        else:
+            # node mode (legacy): per-type slope applied after the matmul
+            self.slope = nn.Parameter(slope_init.to(device), requires_grad=False)
+            self.slope_pairs = ()
+            self.slope_edge_indices = None
+            self.slope_lower_bound = None
+            self.slope_upper_bound = None
+            self.slope_update_scale = None
+            self.divnorm_slope_edge_indices = None
+            if incoming_weight_budget is not None:
+                raise ValueError(
+                    "incoming_weight_budget requires pair-mode slopes "
+                    "(slope_dict with (pre, post) tuple keys)."
+                )
+            self.incoming_weight_budget = None
+            self.frozen_row_l1 = None
+
+        self.raw_biases = nn.Parameter(bias_init.to(device), requires_grad=False)
+
+    def _setup_slope_parameters(
+        self,
+        slope_dict,
+        slope_bounds,
+        slope_update_scales,
+        idx_to_group,
+        device,
+        budget_is_set=False,
+    ):
+        """Build the per-(pre, post) ``slope`` gain (pair mode).
+
+        ``self.slope`` is a vector over the declared pairs; ``slope_edge_indices``
+        maps each edge of ``all_weights`` to its pair (or -1), and
+        ``divnorm_slope_edge_indices`` does the same for the divisive-normalization
+        edges so the same gain multiplies the weight wherever it appears.
+
+        The gain enters the forward pass as ``w_eff = m * w``, so ``m`` is
+        dimensionless and the default bounds ``(0, 50)`` box it directly. The hard
+        lower bound of ``0`` is safe here: ``dL/dm = w * dL/dw_eff`` stays nonzero
+        at ``m = 0``, so an edge driven to zero can still recover.
+
+        With ``budget_is_set`` the default update scale becomes the median ``|w|``
+        over the pair's edges instead of ``1``. ``rescale_slope_update_`` divides
+        the step by that scale, which equalizes step sizes in *weight* space -- a
+        gain on a 0.01 edge would otherwise move 50x slower in weight space than
+        one on a 0.5 edge at the same learning rate, so the small recurrent gains
+        could never grow to use the budget the cap allows.
+        """
+        if not slope_dict:
+            self.slope = None
+            self.slope_pairs = ()
+            self.slope_edge_indices = None
+            self.slope_lower_bound = None
+            self.slope_upper_bound = None
+            self.slope_update_scale = None
+            self.divnorm_slope_edge_indices = None
+            return
+
+        pairs = []
+        init_values = []
+        lower_values = []
+        upper_values = []
+        explicit_scales = []
+        slope_bounds = slope_bounds or {}
+        slope_update_scales = slope_update_scales or {}
+        for pair, value in slope_dict.items():
+            if not isinstance(pair, tuple) or len(pair) != 2:
+                raise ValueError(
+                    "Pair-mode slope_dict keys must be (pre_group, post_group) tuples."
+                )
+            pairs.append((pair[0], pair[1]))
+            init_values.append(float(value))
+            lower, upper = slope_bounds.get(pair, DEFAULT_SLOPE_BOUNDS)
+            if float(lower) < 0 or float(upper) < 0:
+                # The gain multiplies the connectome weight (w_eff = m * w), so
+                # an edge's sign is carried by the weight -- a negative gain
+                # would silently flip excitation/inhibition. The incoming-weight
+                # budget's projection additionally relies on m >= 0 for its
+                # row-L1 accounting (|m * w| = m * |w|).
+                raise ValueError(
+                    f"slope_bounds for pair {pair} must be non-negative."
+                )
+            if float(lower) > float(upper):
+                lower = upper
+            lower_values.append(float(lower))
+            upper_values.append(float(upper))
+            explicit_scales.append(
+                None
+                if pair not in slope_update_scales
+                else float(slope_update_scales[pair])
+            )
+
+        pair_to_idx = {pair: i for i, pair in enumerate(pairs)}
+
+        # Edge -> pair lookup, vectorised because it runs over every edge of the
+        # connectome (tens of millions for a whole-brain dataset), not just the
+        # declared pairs. Each node gets an integer code for its group, offset by
+        # 1 so that groups appearing in no declared pair -- and nodes missing from
+        # idx_to_group -- land on code 0; a small (num_groups + 1)^2 table then
+        # maps all edges in one indexing operation.
+        group_code: dict = {}
+        for pre_group, post_group in pairs:
+            for group in (pre_group, post_group):
+                if group not in group_code:
+                    group_code[group] = len(group_code) + 1
+
+        node_code = torch.tensor(
+            [
+                group_code.get(idx_to_group.get(i), 0)
+                for i in range(self.all_weights.shape[0])
+            ],
+            dtype=torch.long,
+            device=device,
+        )
+        pair_table = torch.full(
+            (len(group_code) + 1, len(group_code) + 1),
+            -1,
+            dtype=torch.long,
+            device=device,
+        )
+        for (pre_group, post_group), pair_idx in pair_to_idx.items():
+            pair_table[group_code[pre_group], group_code[post_group]] = pair_idx
+
+        def _edge_pair_map(indices):
+            post_idxs, pre_idxs = indices
+            return pair_table[node_code[pre_idxs], node_code[post_idxs]]
+
+        self.slope_pairs = tuple(pairs)
+        self.slope_edge_indices = _edge_pair_map(self.all_weights._indices())
+        # same gain applies to the divnorm edges (pulled out of all_weights)
+        self.divnorm_slope_edge_indices = (
+            _edge_pair_map(self.divnorm_indices)
+            if getattr(self, "divnorm_indices", None) is not None
+            else None
+        )
+        self.slope = nn.Parameter(
+            torch.tensor(init_values, dtype=torch.float32, device=device),
+            requires_grad=False,
+        )
+        self.register_buffer(
+            "slope_lower_bound",
+            torch.tensor(lower_values, dtype=torch.float32, device=device),
+        )
+        self.register_buffer(
+            "slope_upper_bound",
+            torch.tensor(upper_values, dtype=torch.float32, device=device),
+        )
+
+        # Default update scale: 1 without a budget, else the median |w| over the
+        # pair's connectome edges so the step is equalized in weight space.
+        update_scales = []
+        edge_pair_idx = self.slope_edge_indices
+        edge_abs_w = self.all_weights._values().abs()
+        for i, explicit in enumerate(explicit_scales):
+            if explicit is not None:
+                update_scales.append(explicit)
+            elif not budget_is_set:
+                update_scales.append(1.0)
+            else:
+                # np.median, not torch.median: torch returns the lower of the two
+                # middle values on an even count, which is a surprising "median".
+                mine = edge_abs_w[edge_pair_idx == i]
+                update_scales.append(
+                    float(np.median(mine.detach().cpu().numpy()))
+                    if mine.numel() > 0
+                    else 1.0
+                )
+        self.register_buffer(
+            "slope_update_scale",
+            torch.clamp(
+                torch.tensor(update_scales, dtype=torch.float32, device=device),
+                min=1e-12,
+            ),
+        )
+
+    def _setup_incoming_budget(self, incoming_weight_budget, device):
+        """Optional per-postsynaptic-neuron L1 budget on incoming ``|weights|``.
+
+        The budget does *not* enter the forward pass -- ``effective_weights`` is
+        always ``m * w`` -- it is enforced by :meth:`project_incoming_budget_`
+        after each optimizer step. Below the cap nothing is touched, so the model
+        is exactly gain x connectome until the constraint binds; above it, every
+        trainable gain in the offending row is scaled toward its lower bound by
+        one common factor, so which edge carries which share of the row is decided
+        by the gradient and never by the budget.
+
+        Frozen edges (pairs not declared in ``slope_dict``) keep their connectome
+        magnitude and pre-consume the budget. Sensory rows are exempt.
+
+        ``slope_bounds`` and the budget compose rather than replace each other:
+        the bounds box each individual gain and apply always, the budget caps each
+        row's total and applies only when exceeded. Since the projection scales
+        the gain's excess *above its lower bound*, its result is always still
+        inside the bounds.
+
+        ``None`` disables the budget (the default).
+        """
+        if incoming_weight_budget is None or self.slope_edge_indices is None:
+            self.incoming_weight_budget = None
+            self.frozen_row_l1 = None
+            self.budget_edge_post = None
+            self.budget_edge_pair = None
+            self.budget_edge_abs_w = None
+            return
+        if self.divisive_normalization is not None:
+            raise NotImplementedError(
+                "incoming_weight_budget is not supported together with "
+                "divisive_normalization."
+            )
+        budget = float(incoming_weight_budget)
+        if budget <= 0:
+            raise ValueError("incoming_weight_budget must be positive.")
+        # The projection's row-L1 accounting linearizes |m * w| as m * |w|,
+        # which only holds for m >= 0 -- guaranteed because pair-mode
+        # slope_bounds are validated non-negative at construction.
+
+        n = self.all_weights.shape[0]
+        post_idx = self.all_weights._indices()[0]
+        values = self.all_weights._values()
+        abs_w = values.abs()
+        edge_pair = self.slope_edge_indices
+        trainable_mask = edge_pair >= 0
+
+        # Sensory rows are exempt: their state is written by the input, not by
+        # their incoming weights, so a cap on those weights is meaningless.
+        is_sensory = torch.zeros(n, dtype=torch.bool, device=device)
+        if self.sensory_indices.numel() > 0:
+            is_sensory[self.sensory_indices.to(device=device, dtype=torch.long)] = True
+        capped_edge = ~is_sensory[post_idx]
+
+        frozen_row_l1 = torch.zeros(n, dtype=values.dtype, device=device).index_add(
+            0, post_idx[~trainable_mask], abs_w[~trainable_mask]
+        )
+        self.register_buffer("frozen_row_l1", frozen_row_l1)
+
+        # Per-edge tables the projection runs on: trainable edges landing on a
+        # non-sensory row. (A sensory *edge* landing on a capped row still counts
+        # toward that row's budget; only sensory rows are dropped.)
+        keep = trainable_mask & capped_edge
+        self.register_buffer("budget_edge_post", post_idx[keep].clone())
+        self.register_buffer("budget_edge_pair", edge_pair[keep].clone())
+        self.register_buffer("budget_edge_abs_w", abs_w[keep].clone())
+        self.incoming_weight_budget = budget
+
+        # ---- construction-time feasibility (non-sensory rows only) ----
+        lower = self.slope_lower_bound.to(values.dtype)
+        # the clamped init, since that is what the forward pass actually uses
+        init = self.effective_slope.detach().to(values.dtype)
+        zeros = torch.zeros(n, dtype=values.dtype, device=device)
+        edge_post = self.budget_edge_post
+        edge_pair_kept = self.budget_edge_pair
+        edge_absw = self.budget_edge_abs_w
+        lower_l1 = zeros.index_add(0, edge_post, edge_absw * lower[edge_pair_kept])
+        init_l1 = zeros.index_add(0, edge_post, edge_absw * init[edge_pair_kept])
+        has_edge = torch.zeros(n, dtype=torch.bool, device=device)
+        has_edge[post_idx] = True
+        has_trainable = torch.zeros(n, dtype=torch.bool, device=device)
+        has_trainable[edge_post] = True
+        checkable = has_edge & ~is_sensory
+        tol = 1e-6 * max(1.0, budget)
+
+        # Checked before feasibility so a row with nothing to scale gets the more
+        # specific message (feasibility would also catch it whenever F_j > budget).
+        stuck = torch.where(checkable & ~has_trainable & (frozen_row_l1 >= budget))[0]
+        if stuck.numel() > 0:
+            raise ValueError(
+                f"incoming_weight_budget={budget}: post-node indices "
+                f"{stuck.tolist()[:20]} have no trainable incoming edges and their "
+                "frozen incoming |weights| already reach the budget, so the row can "
+                "never come under it. Raise the budget or make those edges trainable."
+            )
+
+        infeasible = torch.where(
+            checkable & (frozen_row_l1 + lower_l1 > budget + tol)
+        )[0]
+        if infeasible.numel() > 0:
+            raise ValueError(
+                f"incoming_weight_budget={budget} is infeasible for post-node "
+                f"indices {infeasible.tolist()[:20]}: frozen incoming |weights| plus "
+                "the trainable edges' lower-bound |weights| already exceed it, so no "
+                "gain assignment can satisfy the row. Raise the budget or lower "
+                "slope_bounds' lower ends."
+            )
+
+        over = torch.where(checkable & (frozen_row_l1 + init_l1 > budget + tol))[0]
+        if over.numel() > 0:
+            worst = (frozen_row_l1 + init_l1)[over].max().item()
+            raise ValueError(
+                f"incoming_weight_budget={budget}: the initial slopes already put "
+                f"post-node indices {over.tolist()[:20]} over budget (worst row L1 "
+                f"{worst:.4g}). The projection only runs during training, so the "
+                "model would start outside its own constraint. Lower the initial "
+                "gains or raise the budget."
+            )
+
     def set_param_grads(
-        self, slopes=False, raw_biases=False, divisive_strength=False, tau=False
+        self,
+        slopes=False,
+        raw_biases=False,
+        divisive_strength=False,
+        tau=False,
     ):
         """Set requires_grad for specific parameters."""
         if self.slope is not None:
@@ -348,13 +719,229 @@ class _NetworkBase(nn.Module):
         """
         if self.raw_biases is None:
             return None
+        if self.bias_transform == "identity":
+            return self.raw_biases
         return torch.abs(self.raw_biases)
+
+    @property
+    def slope_is_pairwise(self):
+        """True when ``slope`` is a per-(pre, post) gain folded into the weights."""
+        return getattr(self, "slope_edge_indices", None) is not None
+
+    @property
+    def effective_slope(self):
+        """Slope clamped to its bounds. Pair mode clamps to the per-pair
+        [lower, upper]; node mode (no explicit bounds) applies a 1e-6 floor so a
+        trained slope stays strictly positive. None if no slope.
+
+        With ``project_parameter_bounds_`` running after every optimizer step this
+        clamp is inert during training; it stays as a safety net for models built
+        or reloaded by hand with out-of-box slopes."""
+        if self.slope is None:
+            return None
+        lower = self.slope_lower_bound
+        upper = self.slope_upper_bound
+        if lower is None or upper is None:
+            return torch.clamp(self.slope, min=1e-6)
+        return torch.minimum(torch.maximum(self.slope, lower), upper)
+
+    def rescale_slope_update_(self, before_step: torch.Tensor) -> None:
+        # only meaningful in pair mode (node mode has no update scale)
+        if self.slope is None or self.slope_update_scale is None:
+            return
+        with torch.no_grad():
+            step = self.slope - before_step
+            self.slope.copy_(before_step + step / self.slope_update_scale)
+
+    def project_parameter_bounds_(self) -> None:
+        # only pair-mode slope has bounds to project onto
+        if not self.slope_is_pairwise:
+            return
+        with torch.no_grad():
+            self.slope.copy_(self.effective_slope)
+
+    def project_incoming_budget_(self) -> Optional[torch.Tensor]:
+        """Pull every non-sensory row back under ``incoming_weight_budget``.
+
+        For post node ``j``, with ``F_j`` its frozen incoming ``|w|`` sum::
+
+            c_j = clamp( (budget - F_j - sum_k |w_kj|*lower_kj)
+                         / sum_k |w_kj|*(m_kj - lower_kj),  0, 1 )
+
+        each pair takes the minimum ``c_j`` over the rows it touches, and
+        ``m <- lower + (m - lower) * c``. Scaling the excess above the floor
+        rather than ``m`` itself keeps the result inside ``slope_bounds``, and
+        one pass suffices: scaling a gain down never raises any row's sum, and
+        each pair is scaled by at least as much as its tightest row demanded.
+
+        Rows already under budget get ``c_j = 1`` and are left untouched.
+
+        Returns:
+            torch.Tensor or None: per-post-node ``c_j`` (1.0 where the projection
+            did not fire), or None when no budget is set.
+        """
+        if getattr(self, "incoming_weight_budget", None) is None:
+            return None
+        with torch.no_grad():
+            # Start from the bound-clamped gain so a single standalone call is
+            # correct too; in train_model project_parameter_bounds_ has already
+            # run, which makes this a no-op.
+            m = self.effective_slope
+            dtype = m.dtype
+            device = m.device
+            lower = self.slope_lower_bound.to(device=device, dtype=dtype)
+            post = self.budget_edge_post.to(device)
+            pair = self.budget_edge_pair.to(device)
+            abs_w = self.budget_edge_abs_w.to(device=device, dtype=dtype)
+
+            n = self.all_weights.shape[0]
+            zeros = torch.zeros(n, dtype=dtype, device=device)
+            lower_l1 = zeros.index_add(0, post, abs_w * lower[pair])
+            excess = zeros.index_add(0, post, abs_w * (m[pair] - lower[pair]))
+            room = (
+                self.incoming_weight_budget
+                - self.frozen_row_l1.to(device=device, dtype=dtype)
+                - lower_l1
+            )
+
+            c_row = torch.ones(n, dtype=dtype, device=device)
+            # excess <= 0 means the row is already at (or below) its floor, which
+            # feasibility guarantees is under budget -- nothing to scale.
+            active = excess > 0
+            c_row[active] = torch.clamp(room[active] / excess[active], min=0.0, max=1.0)
+
+            c_pair = torch.ones_like(m).scatter_reduce(
+                0, pair, c_row[post], reduce="amin", include_self=True
+            )
+            self.slope.copy_(lower + (m - lower) * c_pair)
+        return c_row
+
+    @property
+    def effective_weights(self):
+        # Only pair-mode slope folds into the weights. Node-mode slope (None
+        # slope_edge_indices) is applied after the matmul in activation_function.
+        edge_param_idx = getattr(self, "slope_edge_indices", None)
+        if self.slope is None or edge_param_idx is None:
+            return self.all_weights
+
+        indices = self.all_weights._indices()
+        values = self.all_weights._values()
+
+        # w_eff = m * w on trainable pairs, w untouched on frozen edges -- always.
+        # incoming_weight_budget does not appear here: it is a constraint on the
+        # parameter, enforced by project_incoming_budget_ after each optimizer
+        # step, not a reparametrization of the forward pass.
+        multipliers = torch.ones_like(values)
+        trainable_edge_mask = edge_param_idx >= 0
+        if torch.any(trainable_edge_mask):
+            multipliers = multipliers.clone()
+            multipliers[trainable_edge_mask] = self.effective_slope[
+                edge_param_idx[trainable_edge_mask]
+            ].to(values.dtype)
+        new_values = values * multipliers
+
+        # all_weights is coalesced at construction and only its values change
+        # here, so the result is coalesced by construction. Declaring that is
+        # worth ~0.7s per forward call on a whole-brain connectome, which an
+        # actual .coalesce() would spend re-sorting indices that are already
+        # sorted. (Requires torch >= 2.1 for the is_coalesced argument.)
+        return torch.sparse_coo_tensor(
+            indices,
+            new_values,
+            size=self.all_weights.shape,
+            device=values.device,
+            is_coalesced=True,
+        )
 
     @property
     def effective_tau(self):
         if self.tau_param is None:
             return self.tau
+        if getattr(self, "tau_log_scale", False):
+            # tau_param holds log(tau); exponentiate back to ms
+            return torch.clamp(torch.exp(self.tau_param), min=1.0)
         return torch.clamp(self.tau_param, min=1.0)  # tau < 1 is physically meaningless
+
+    def _apply_sensory_input(self, state: torch.Tensor, input_at_layer: torch.Tensor):
+        # Each call retains one (num_neurons, batch) clone in the autograd graph.
+        # "add" makes one call per layer, as the un-refactored code always did;
+        # "replace" makes two, roughly doubling this cost -- ~4.5 MB per layer at
+        # 139k neurons and batch 8, so ~3 GB extra over a 750-layer rollout.
+        state = state.clone()
+        if self.sensory_input_mode == "add":
+            state[self.sensory_indices, :] = (
+                state[self.sensory_indices, :] + input_at_layer
+            )
+        elif self.sensory_input_mode == "replace":
+            state[self.sensory_indices, :] = input_at_layer
+        else:
+            raise ValueError(f"Unknown sensory_input_mode: {self.sensory_input_mode}")
+        return state
+
+    def _should_apply_sensory_after_layer(self, layer: int) -> bool:
+        return self.sensory_input_mode == "replace" or layer != self.num_layers - 1
+
+    def _sensory_input_after_layer(
+        self, inputs: torch.Tensor, layer: int
+    ) -> torch.Tensor:
+        input_layer = layer if self.sensory_input_mode == "replace" else layer + 1
+        return inputs[:, :, input_layer].t()
+
+    def _initial_full_input(
+        self,
+        inputs: torch.Tensor,
+        initial_state: Optional[torch.Tensor],
+        requires_grad: bool,
+    ) -> torch.Tensor:
+        n_nodes = self.all_weights.size(1)
+        batch_size = inputs.size(0)
+        if initial_state is None:
+            full_input = torch.zeros(
+                n_nodes,
+                batch_size,
+                device=inputs.device,
+                dtype=inputs.dtype,
+                requires_grad=requires_grad,
+            )
+        else:
+            full_input = torch.as_tensor(
+                initial_state,
+                dtype=inputs.dtype,
+                device=inputs.device,
+            )
+            if full_input.dim() == 1:
+                if full_input.numel() != n_nodes:
+                    raise ValueError("initial_state length must match the node count.")
+                full_input = full_input.view(-1, 1).expand(-1, batch_size)
+            elif full_input.dim() == 2:
+                if batch_size == n_nodes:
+                    # (batch, nodes) and (nodes, batch) are indistinguishable here,
+                    # and guessing wrong silently transposes the initial state.
+                    raise ValueError(
+                        "initial_state is ambiguous when the batch size equals the "
+                        f"node count ({n_nodes}): (batch, nodes) and (nodes, batch) "
+                        "cannot be told apart. Pass a 1-D (nodes,) initial_state, or "
+                        "change the batch size."
+                    )
+                if full_input.shape == (batch_size, n_nodes):
+                    full_input = full_input.t()
+                elif full_input.shape != (n_nodes, batch_size):
+                    raise ValueError(
+                        "initial_state must have shape (nodes,), (batch, nodes), "
+                        "or (nodes, batch)."
+                    )
+            else:
+                raise ValueError(
+                    "initial_state must have shape (nodes,), (batch, nodes), "
+                    "or (nodes, batch)."
+                )
+            full_input = full_input.clone()
+
+        return full_input.scatter(
+            0,
+            self.sensory_indices.view(-1, 1).expand(-1, batch_size),
+            inputs[:, :, 0].t(),
+        )
 
     def divnorm(
         self, slopes: Union[float, torch.Tensor], x_previous: torch.Tensor
@@ -377,11 +964,28 @@ class _NetworkBase(nn.Module):
         if isinstance(slopes, float):
             slopes = torch.full(x_previous.shape, slopes, device=x_previous.device)
 
-        post_idxs, pre_idxs = self.divnorm_indices  # (K,), (K,)
-        strengths = self.divisive_strength[self.edge_pre_param_idx]  # (K,)
+        # The divnorm buffers are plain tensors, so coerce them to the device the
+        # model is actually running on (handles a model moved via .to() after init).
+        device = x_previous.device
+        post_idxs, pre_idxs = self.divnorm_indices.to(device)  # (K,), (K,)
+        strengths = self.divisive_strength[self.edge_pre_param_idx.to(device)]  # (K,)
+
+        # the pair slope multiplies the weight wherever it appears, incl. divnorm
+        divnorm_weights = self.divnorm_weights.to(device)
+        edge_idx = getattr(self, "divnorm_slope_edge_indices", None)
+        if self.slope is not None and edge_idx is not None:
+            edge_idx = edge_idx.to(device)
+            mult = torch.ones_like(divnorm_weights)
+            mask = edge_idx >= 0
+            if torch.any(mask):
+                mult = mult.clone()
+                mult[mask] = self.effective_slope[edge_idx[mask]].to(
+                    divnorm_weights.dtype
+                )
+            divnorm_weights = divnorm_weights * mult
 
         per_edge = (
-            self.divnorm_weights.unsqueeze(1)  # (K, 1)
+            divnorm_weights.unsqueeze(1)  # (K, 1)
             * x_previous[pre_idxs]  # (K, batch)
             * strengths.unsqueeze(1)  # (K, 1)
         )
@@ -463,8 +1067,34 @@ class LinearNetwork(_NetworkBase):
             0.0.
         bias_dict (dict, optional): Dict mapping group names to bias values. Defaults to
             None (uses default_bias).
-        slope_dict (dict, optional): Dict mapping group names to slope values. Uses
-            tanh_steepness if None.
+        slope_dict (dict, optional): Dual-format. With cell-type keys it is a
+            per-type slope applied after the matmul ("node mode"), using
+            tanh_steepness for any type left out. With ``(pre_group, post_group)``
+            tuple keys it is a per-connection gain ``m`` folded into the weights as
+            ``w_eff = m * w`` ("pair mode"); edges whose pair is not declared are
+            frozen at their connectome weight. Defaults to None.
+        slope_bounds (dict, optional): Pair mode only. Maps a pair to its
+            ``(lower, upper)`` gain box, defaulting to ``DEFAULT_SLOPE_BOUNDS``
+            ``(0, 50)``. Bounds must be non-negative: the edge's sign is carried
+            by the connectome weight, so a negative gain would silently flip
+            excitation/inhibition. The box applies to every pair always, and is
+            a *different* constraint from ``incoming_weight_budget``: the bounds cap each
+            connection's own gain, the budget caps each post node's row total and
+            binds only when exceeded. They compose -- the budget does not replace
+            the bounds.
+        slope_update_scales (dict, optional): Pair mode only. Divides that pair's
+            optimizer step when ``train_model(rescale_slope_updates=True)``.
+            Defaults to 1 per pair, or -- when ``incoming_weight_budget`` is set --
+            to the median ``|w|`` over the pair's edges, which equalizes the step
+            size in weight rather than gain space.
+        incoming_weight_budget (float, optional): Pair mode only. Caps each
+            non-sensory post node's sum of incoming ``|w_eff|``. It does not enter
+            the forward pass; ``train_model`` enforces it by projecting the gains
+            after each optimizer step (see
+            :meth:`_NetworkBase.project_incoming_budget_`). Frozen edges keep their
+            connectome magnitude and pre-consume the budget. Construction raises if
+            a row cannot satisfy the budget or already starts over it. Defaults to
+            None (no budget).
         divisive_normalization (Dict[str, List[str]], optional): A dictionary where keys
             are pre-synaptic neuron groups and values are lists of post-synaptic neuron
             groups. These *inhibitory* connections are implemented divisively instead of
@@ -498,7 +1128,7 @@ class LinearNetwork(_NetworkBase):
             x (torch.Tensor): The input tensor to the activation function.
             x_previous (Optional[torch.Tensor]): The previous activations of the neurons.
             slopes_full (Optional[torch.Tensor]): Pre-expanded slopes, shape
-                (num_neurons, 1). If None, computed from self.slope[self.indices].
+                (num_neurons, 1). If None, computed from self.effective_slope[self.indices].
             biases_full (Optional[torch.Tensor]): Pre-expanded biases, shape
                 (num_neurons, 1). If None, computed from self.biases[self.indices].
             taus_full: Pre-expanded taus, shape (num_neurons, 1), or scalar.
@@ -511,13 +1141,19 @@ class LinearNetwork(_NetworkBase):
             return self.custom_activation_function(self, x, x_previous)
 
         # --- slopes ---
-        if slopes_full is not None:
+        if self.slope_is_pairwise:
+            # pair-mode gain is folded into effective_weights; no post-matmul slope
+            slopes = 1.0
+        elif slopes_full is not None:
             slopes = slopes_full.expand(-1, x.shape[1])
         elif self.slope is None:
             slopes = self.tanh_steepness
         else:
             slopes = (
-                self.slope[self.indices].view(-1, 1).expand(-1, x.shape[1]).to(x.device)
+                self.effective_slope[self.indices]
+                .view(-1, 1)
+                .expand(-1, x.shape[1])
+                .to(x.device)
             )
 
         slopes = self.divnorm(slopes, x_previous)
@@ -563,7 +1199,15 @@ class LinearNetwork(_NetworkBase):
         return x
 
     def _forward_chunk(
-        self, x, start_layer, end_layer, inputs, slopes_full, biases_full, taus_full
+        self,
+        x,
+        start_layer,
+        end_layer,
+        inputs,
+        slopes_full,
+        biases_full,
+        taus_full,
+        weights,
     ):
         """Run a chunk of timesteps. For use with gradient checkpointing.
 
@@ -577,7 +1221,7 @@ class LinearNetwork(_NetworkBase):
         chunk_acts = []
         for alayer in range(start_layer, end_layer):
             x_previous = x
-            x = torch.sparse.mm(self.all_weights, x)
+            x = torch.sparse.mm(weights, x)
             x = self.activation_function(
                 x,
                 x_previous=x_previous,
@@ -585,10 +1229,10 @@ class LinearNetwork(_NetworkBase):
                 biases_full=biases_full,
                 taus_full=taus_full,
             )
-            if alayer != self.num_layers - 1:
-                x = x.clone()
-                x[self.sensory_indices, :] = (
-                    x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
+            if self._should_apply_sensory_after_layer(alayer):
+                x = self._apply_sensory_input(
+                    x,
+                    self._sensory_input_after_layer(inputs, alayer),
                 )
             chunk_acts.append(x)  # <-- no .t()
         return (x, *chunk_acts)
@@ -604,6 +1248,7 @@ class LinearNetwork(_NetworkBase):
         ] = None,
         checkpoint_steps: int = 0,
         return_layer_list: bool = False,
+        initial_state: Optional[torch.Tensor] = None,
     ):
         """
         Args:
@@ -658,8 +1303,16 @@ class LinearNetwork(_NetworkBase):
                             if grp in act_dict
                         }
 
-        if self.slope is not None:
-            slopes_full = self.slope[self.indices].view(-1, 1)
+        if self.slope_is_pairwise:
+            # pair-mode gain is in effective_weights; activation uses unit slope
+            slopes_full = None
+            biases_full = (
+                self.biases[self.indices].view(-1, 1)
+                if self.biases is not None
+                else None
+            )
+        elif self.slope is not None:
+            slopes_full = self.effective_slope[self.indices].view(-1, 1)
             biases_full = self.biases[self.indices].view(-1, 1)
         else:
             slopes_full = None
@@ -669,6 +1322,7 @@ class LinearNetwork(_NetworkBase):
             taus_full = self.effective_tau[self.indices].view(-1, 1)
         else:
             taus_full = None
+        weights = self.effective_weights
 
         req_grad = inputs.requires_grad
         _needs_grad = req_grad or any(
@@ -677,22 +1331,10 @@ class LinearNetwork(_NetworkBase):
 
         use_ckpt = checkpoint_steps > 0 and _needs_grad and manipulate is None
 
-        full_input = torch.zeros(
-            self.all_weights.size(1),
-            inputs.size(0),
-            device=inputs.device,
-            requires_grad=req_grad,
-        )
-
-        # replace sensory neurons activations with inputs
-        full_input = full_input.scatter(
-            0,
-            self.sensory_indices.view(-1, 1).expand(-1, inputs.size(0)),
-            inputs[:, :, 0].t(),
-        )
+        full_input = self._initial_full_input(inputs, initial_state, req_grad)
 
         # ---- Layer 0 ----
-        x = torch.sparse.mm(self.all_weights, full_input)
+        x = torch.sparse.mm(weights, full_input)
         x = self.activation_function(
             x,
             x_previous=full_input,
@@ -701,10 +1343,10 @@ class LinearNetwork(_NetworkBase):
             taus_full=taus_full,
         )
 
-        if self.num_layers > 1:
-            x = x.clone()
-            x[self.sensory_indices, :] = (
-                x[self.sensory_indices, :] + inputs[:, :, 1].t()
+        if self._should_apply_sensory_after_layer(0):
+            x = self._apply_sensory_input(
+                x,
+                self._sensory_input_after_layer(inputs, 0),
             )
 
         if manipulate is not None:
@@ -730,6 +1372,7 @@ class LinearNetwork(_NetworkBase):
                         slopes_full,
                         biases_full,
                         taus_full,
+                        weights,
                         use_reentrant=False,
                     )
                     x = result[0]
@@ -737,7 +1380,7 @@ class LinearNetwork(_NetworkBase):
             else:
                 for alayer in range(1, self.num_layers):
                     x_previous = x.clone()
-                    x = torch.sparse.mm(self.all_weights, x)
+                    x = torch.sparse.mm(weights, x)
                     x = self.activation_function(
                         x,
                         x_previous=x_previous,
@@ -745,10 +1388,10 @@ class LinearNetwork(_NetworkBase):
                         biases_full=biases_full,
                         taus_full=taus_full,
                     )
-                    if alayer != self.num_layers - 1:
-                        x = x.clone()
-                        x[self.sensory_indices, :] = (
-                            x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
+                    if self._should_apply_sensory_after_layer(alayer):
+                        x = self._apply_sensory_input(
+                            x,
+                            self._sensory_input_after_layer(inputs, alayer),
                         )
                     if manipulate is not None:
                         x = x.clone()
@@ -778,6 +1421,7 @@ class LinearNetwork(_NetworkBase):
                     slopes_full,
                     biases_full,
                     taus_full,
+                    weights,
                     use_reentrant=False,
                 )
                 x = result[0]
@@ -788,7 +1432,7 @@ class LinearNetwork(_NetworkBase):
             acts = [x.t().cpu()]
             for alayer in range(1, self.num_layers):
                 x_previous = x.clone()
-                x = torch.sparse.mm(self.all_weights, x)
+                x = torch.sparse.mm(weights, x)
                 x = self.activation_function(
                     x,
                     x_previous=x_previous,
@@ -796,10 +1440,10 @@ class LinearNetwork(_NetworkBase):
                     biases_full=biases_full,
                     taus_full=taus_full,
                 )
-                if alayer != self.num_layers - 1:
-                    x = x.clone()
-                    x[self.sensory_indices, :] = (
-                        x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
+                if self._should_apply_sensory_after_layer(alayer):
+                    x = self._apply_sensory_input(
+                        x,
+                        self._sensory_input_after_layer(inputs, alayer),
                     )
                 if manipulate is not None:
                     x = x.clone()
@@ -894,8 +1538,34 @@ class MultilayeredNetwork(_NetworkBase):
             0.0.
         bias_dict (dict, optional): Dict mapping group names to bias values. Defaults to
             None (uses default_bias).
-        slope_dict (dict, optional): Dict mapping group names to slope values. Uses
-            tanh_steepness if None.
+        slope_dict (dict, optional): Dual-format. With cell-type keys it is a
+            per-type slope applied after the matmul ("node mode"), using
+            tanh_steepness for any type left out. With ``(pre_group, post_group)``
+            tuple keys it is a per-connection gain ``m`` folded into the weights as
+            ``w_eff = m * w`` ("pair mode"); edges whose pair is not declared are
+            frozen at their connectome weight. Defaults to None.
+        slope_bounds (dict, optional): Pair mode only. Maps a pair to its
+            ``(lower, upper)`` gain box, defaulting to ``DEFAULT_SLOPE_BOUNDS``
+            ``(0, 50)``. Bounds must be non-negative: the edge's sign is carried
+            by the connectome weight, so a negative gain would silently flip
+            excitation/inhibition. The box applies to every pair always, and is
+            a *different* constraint from ``incoming_weight_budget``: the bounds cap each
+            connection's own gain, the budget caps each post node's row total and
+            binds only when exceeded. They compose -- the budget does not replace
+            the bounds.
+        slope_update_scales (dict, optional): Pair mode only. Divides that pair's
+            optimizer step when ``train_model(rescale_slope_updates=True)``.
+            Defaults to 1 per pair, or -- when ``incoming_weight_budget`` is set --
+            to the median ``|w|`` over the pair's edges, which equalizes the step
+            size in weight rather than gain space.
+        incoming_weight_budget (float, optional): Pair mode only. Caps each
+            non-sensory post node's sum of incoming ``|w_eff|``. It does not enter
+            the forward pass; ``train_model`` enforces it by projecting the gains
+            after each optimizer step (see
+            :meth:`_NetworkBase.project_incoming_budget_`). Frozen edges keep their
+            connectome magnitude and pre-consume the budget. Construction raises if
+            a row cannot satisfy the budget or already starts over it. Defaults to
+            None (no budget).
         divisive_normalization (Dict[str, List[str]], optional): A dictionary where keys
             are pre-synaptic neuron groups and values are lists of post-synaptic neuron
             groups. These *inhibitory* connections are implemented divisively instead of
@@ -910,7 +1580,38 @@ class MultilayeredNetwork(_NetworkBase):
             Minimum 1, where the activation at the current time step is solely
             determined by the current input. Defaults to 10.
         device (torch.device, optional): Device for computation.
+        output_clamp_max (float, optional): Upper clamp applied to non-sensory
+            activations after each layer in :meth:`forward`. None disables it
+            (unbounded rates, e.g. a rectified-square model); the default 1.0
+            preserves the historical [0, 1] output range.
+        output_rectify (bool, optional): Hard threshold gate (>= threshold passes
+            through, below -> 0) applied to the post-layer state. False lets rates
+            go negative, e.g. when the activation function itself is signed; the
+            default True preserves the historical behaviour.
+
+            This gates the *post-layer* application only. The built-in
+            activation_function applies the same gate internally as the relu of
+            tanh(relu(slope * x + bias)), and that one is NOT under this flag, so
+            with the built-in activation False still never yields negative rates
+            -- it only stops sub-threshold activity being re-zeroed after the tau
+            integration, which is itself a large effect. Negative rates require a
+            custom activation_function (which bypasses the internal gate).
     """
+
+    def __init__(
+        self,
+        *args,
+        output_clamp_max: Optional[float] = 1.0,
+        output_rectify: bool = True,
+        **kwargs,
+    ):
+        # Both flags are read only by this class's forward pass, so they live here
+        # rather than on _NetworkBase, where LinearNetwork would accept them and
+        # then silently ignore them.
+        super().__init__(*args, **kwargs)
+        self.output_clamp_max = output_clamp_max
+        self.output_rectify = output_rectify
+
 
     def activation_function(
         self,
@@ -929,7 +1630,7 @@ class MultilayeredNetwork(_NetworkBase):
             x (torch.Tensor): The input tensor to the activation function.
             x_previous (Optional[torch.Tensor]): The previous activations of the neurons.
             slopes_full (Optional[torch.Tensor]): Pre-expanded slopes, shape
-                (num_neurons, 1). If None, computed from self.slope[self.indices].
+                (num_neurons, 1). If None, computed from self.effective_slope[self.indices].
             biases_full (Optional[torch.Tensor]): Pre-expanded biases, shape
                 (num_neurons, 1). If None, computed from self.biases[self.indices].
             taus_full: Pre-expanded taus, shape (num_neurons, 1), or scalar.
@@ -942,13 +1643,19 @@ class MultilayeredNetwork(_NetworkBase):
             return self.custom_activation_function(self, x, x_previous)
 
         # --- slopes ---
-        if slopes_full is not None:
+        if self.slope_is_pairwise:
+            # pair-mode gain is folded into effective_weights; no post-matmul slope
+            slopes = 1.0
+        elif slopes_full is not None:
             slopes = slopes_full.expand(-1, x.shape[1])
         elif self.slope is None:
             slopes = self.tanh_steepness
         else:
             slopes = (
-                self.slope[self.indices].view(-1, 1).expand(-1, x.shape[1]).to(x.device)
+                self.effective_slope[self.indices]
+                .view(-1, 1)
+                .expand(-1, x.shape[1])
+                .to(x.device)
             )
 
         slopes = self.divnorm(slopes, x_previous)
@@ -997,13 +1704,21 @@ class MultilayeredNetwork(_NetworkBase):
         return x
 
     def _forward_chunk(
-        self, x, start_layer, end_layer, inputs, slopes_full, biases_full, taus_full
+        self,
+        x,
+        start_layer,
+        end_layer,
+        inputs,
+        slopes_full,
+        biases_full,
+        taus_full,
+        weights,
     ):
         """Returns flat tuple (x_final, *per_layer_xs), each (neurons, batch)."""
         chunk_acts = []
         for alayer in range(start_layer, end_layer):
             x_previous = x
-            x = torch.sparse.mm(self.all_weights, x)
+            x = torch.sparse.mm(weights, x)
             x = self.activation_function(
                 x,
                 x_previous=x_previous,
@@ -1011,18 +1726,28 @@ class MultilayeredNetwork(_NetworkBase):
                 biases_full=biases_full,
                 taus_full=taus_full,
             )
-            if alayer != self.num_layers - 1:
-                x = x.clone()
-                x[self.sensory_indices, :] = (
-                    x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
+            if self._should_apply_sensory_after_layer(alayer):
+                x = self._apply_sensory_input(
+                    x,
+                    self._sensory_input_after_layer(inputs, alayer),
                 )
                 # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
                 # this propagates NaN honesty
-                x = torch.relu(x - self.threshold) + self.threshold * (
-                    x >= self.threshold
-                ).to(x.dtype)
-                x = torch.clamp(x, max=1.0)
-            chunk_acts.append(x)  # <-- no .t()
+                if self.output_rectify:
+                    x = torch.relu(x - self.threshold) + self.threshold * (
+                        x >= self.threshold
+                    ).to(x.dtype)
+                x = (
+                    x
+                    if self.output_clamp_max is None
+                    else torch.clamp(x, max=self.output_clamp_max)
+                )
+                if self.sensory_input_mode == "replace":
+                    x = self._apply_sensory_input(
+                        x,
+                        self._sensory_input_after_layer(inputs, alayer),
+                    )
+            chunk_acts.append(x)
         return (x, *chunk_acts)
 
     def forward(
@@ -1036,6 +1761,7 @@ class MultilayeredNetwork(_NetworkBase):
         ] = None,
         checkpoint_steps: int = 0,
         return_layer_list: bool = False,
+        initial_state: Optional[torch.Tensor] = None,
     ):
         """
         Args:
@@ -1086,8 +1812,16 @@ class MultilayeredNetwork(_NetworkBase):
                             if grp in act_dict
                         }
 
-        if self.slope is not None:
-            slopes_full = self.slope[self.indices].view(-1, 1)
+        if self.slope_is_pairwise:
+            # pair-mode gain is in effective_weights; activation uses unit slope
+            slopes_full = None
+            biases_full = (
+                self.biases[self.indices].view(-1, 1)
+                if self.biases is not None
+                else None
+            )
+        elif self.slope is not None:
+            slopes_full = self.effective_slope[self.indices].view(-1, 1)
             biases_full = self.biases[self.indices].view(-1, 1)
         else:
             slopes_full = None
@@ -1097,6 +1831,7 @@ class MultilayeredNetwork(_NetworkBase):
             taus_full = self.effective_tau[self.indices].view(-1, 1)
         else:
             taus_full = None
+        weights = self.effective_weights
 
         req_grad = inputs.requires_grad
         _needs_grad = req_grad or any(
@@ -1105,20 +1840,10 @@ class MultilayeredNetwork(_NetworkBase):
 
         use_ckpt = checkpoint_steps > 0 and _needs_grad and manipulate is None
 
-        full_input = torch.zeros(
-            self.all_weights.size(1),
-            inputs.size(0),
-            device=inputs.device,
-            requires_grad=req_grad,
-        )
-        full_input = full_input.scatter(
-            0,
-            self.sensory_indices.view(-1, 1).expand(-1, inputs.size(0)),
-            inputs[:, :, 0].t(),
-        )
+        full_input = self._initial_full_input(inputs, initial_state, req_grad)
 
         # ---- Layer 0 ----
-        x = torch.sparse.mm(self.all_weights, full_input)
+        x = torch.sparse.mm(weights, full_input)
         x = self.activation_function(
             x,
             x_previous=full_input,
@@ -1127,17 +1852,27 @@ class MultilayeredNetwork(_NetworkBase):
             taus_full=taus_full,
         )
 
-        if self.num_layers > 1:
-            x = x.clone()
-            x[self.sensory_indices, :] = (
-                x[self.sensory_indices, :] + inputs[:, :, 1].t()
+        if self._should_apply_sensory_after_layer(0):
+            x = self._apply_sensory_input(
+                x,
+                self._sensory_input_after_layer(inputs, 0),
             )
             # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
             # this propagates NaN honesty
-            x = torch.relu(x - self.threshold) + self.threshold * (
-                x >= self.threshold
-            ).to(x.dtype)
-            x = torch.clamp(x, max=1.0)
+            if self.output_rectify:
+                x = torch.relu(x - self.threshold) + self.threshold * (
+                    x >= self.threshold
+                ).to(x.dtype)
+            x = (
+                x
+                if self.output_clamp_max is None
+                else torch.clamp(x, max=self.output_clamp_max)
+            )
+            if self.sensory_input_mode == "replace":
+                x = self._apply_sensory_input(
+                    x,
+                    self._sensory_input_after_layer(inputs, 0),
+                )
 
         if manipulate is not None:
             x = x.clone()
@@ -1148,7 +1883,7 @@ class MultilayeredNetwork(_NetworkBase):
 
         # ---- Remaining layers ----
         if return_layer_list:
-            per_layer_acts = [x]  # <-- no .t()
+            per_layer_acts = [x]
 
             if use_ckpt:
                 for chunk_start in range(1, self.num_layers, checkpoint_steps):
@@ -1162,6 +1897,7 @@ class MultilayeredNetwork(_NetworkBase):
                         slopes_full,
                         biases_full,
                         taus_full,
+                        weights,
                         use_reentrant=False,
                     )
                     x = result[0]
@@ -1169,7 +1905,7 @@ class MultilayeredNetwork(_NetworkBase):
             else:
                 for alayer in range(1, self.num_layers):
                     x_previous = x.clone()
-                    x = torch.sparse.mm(self.all_weights, x)
+                    x = torch.sparse.mm(weights, x)
                     x = self.activation_function(
                         x,
                         x_previous=x_previous,
@@ -1177,17 +1913,27 @@ class MultilayeredNetwork(_NetworkBase):
                         biases_full=biases_full,
                         taus_full=taus_full,
                     )
-                    if alayer != self.num_layers - 1:
-                        x = x.clone()
-                        x[self.sensory_indices, :] = (
-                            x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
+                    if self._should_apply_sensory_after_layer(alayer):
+                        x = self._apply_sensory_input(
+                            x,
+                            self._sensory_input_after_layer(inputs, alayer),
                         )
                         # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
                         # this propagates NaN honesty
-                        x = torch.relu(x - self.threshold) + self.threshold * (
-                            x >= self.threshold
-                        ).to(x.dtype)
-                        x = torch.clamp(x, max=1.0)
+                        if self.output_rectify:
+                            x = torch.relu(x - self.threshold) + self.threshold * (
+                                x >= self.threshold
+                            ).to(x.dtype)
+                        x = (
+                            x
+                            if self.output_clamp_max is None
+                            else torch.clamp(x, max=self.output_clamp_max)
+                        )
+                        if self.sensory_input_mode == "replace":
+                            x = self._apply_sensory_input(
+                                x,
+                                self._sensory_input_after_layer(inputs, alayer),
+                            )
                     if manipulate is not None:
                         x = x.clone()
                         for b, _ in manipulate.items():
@@ -1196,7 +1942,7 @@ class MultilayeredNetwork(_NetworkBase):
                                     alayer
                                 ].items():
                                     x[neuron_idx, b] = target_act
-                    per_layer_acts.append(x)  # <-- no .t()
+                    per_layer_acts.append(x)
 
             del inputs, x
             torch.cuda.empty_cache()
@@ -1216,6 +1962,7 @@ class MultilayeredNetwork(_NetworkBase):
                     slopes_full,
                     biases_full,
                     taus_full,
+                    weights,
                     use_reentrant=False,
                 )
                 x = result[0]
@@ -1226,7 +1973,7 @@ class MultilayeredNetwork(_NetworkBase):
             acts = [x.t().cpu()]
             for alayer in range(1, self.num_layers):
                 x_previous = x.clone()
-                x = torch.sparse.mm(self.all_weights, x)
+                x = torch.sparse.mm(weights, x)
                 x = self.activation_function(
                     x,
                     x_previous=x_previous,
@@ -1234,17 +1981,27 @@ class MultilayeredNetwork(_NetworkBase):
                     biases_full=biases_full,
                     taus_full=taus_full,
                 )
-                if alayer != self.num_layers - 1:
-                    x = x.clone()
-                    x[self.sensory_indices, :] = (
-                        x[self.sensory_indices, :] + inputs[:, :, alayer + 1].t()
+                if self._should_apply_sensory_after_layer(alayer):
+                    x = self._apply_sensory_input(
+                        x,
+                        self._sensory_input_after_layer(inputs, alayer),
                     )
                     # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
                     # this propagates NaN honesty
-                    x = torch.relu(x - self.threshold) + self.threshold * (
-                        x >= self.threshold
-                    ).to(x.dtype)
-                    x = torch.clamp(x, max=1.0)
+                    if self.output_rectify:
+                        x = torch.relu(x - self.threshold) + self.threshold * (
+                            x >= self.threshold
+                        ).to(x.dtype)
+                    x = (
+                        x
+                        if self.output_clamp_max is None
+                        else torch.clamp(x, max=self.output_clamp_max)
+                    )
+                    if self.sensory_input_mode == "replace":
+                        x = self._apply_sensory_input(
+                            x,
+                            self._sensory_input_after_layer(inputs, alayer),
+                        )
                 if manipulate is not None:
                     x = x.clone()
                     for b, _ in manipulate.items():
@@ -1278,7 +2035,11 @@ def training_mode(
     # If biases are about to be trained and any sit on the |x|=0 kink,
     # nudge them off so abs() gradients can flow. Without this, raw_biases
     # initialised at default_bias=0 stay stuck forever.
-    if train_biases and model.raw_biases is not None:
+    if (
+        train_biases
+        and model.raw_biases is not None
+        and getattr(model, "bias_transform", "abs") == "abs"
+    ):
         with torch.no_grad():
             zero_mask = model.raw_biases == 0
             if zero_mask.any():
@@ -1294,7 +2055,10 @@ def training_mode(
         yield model
     finally:
         model.set_param_grads(
-            slopes=False, raw_biases=False, divisive_strength=False, tau=False
+            slopes=False,
+            raw_biases=False,
+            divisive_strength=False,
+            tau=False,
         )
 
 
@@ -1313,8 +2077,14 @@ def train_model(
     train_biases: bool = True,
     train_divisive_strength: bool = True,
     train_tau: bool = True,
+    rescale_slope_updates: bool = False,
     checkpoint_steps: int = 50,
     activation_loss_fn: Union[str, Callable] = "mse",
+    initial_state: Optional[torch.Tensor] = None,
+    target_node_groups: Optional[dict] = None,
+    extra_parameters: Optional[List[torch.nn.Parameter]] = None,
+    input_transform: Optional[Callable] = None,
+    output_transform: Optional[Callable] = None,
 ):
     """
     Train the model to approximate the targets, while keeping the model parameter change
@@ -1338,32 +2108,91 @@ def train_model(
         wandb_project_name (str, optional): Project name for wandb.
         train_fraction (float, optional): Fraction of data to use for training.
         seed (int, optional): Random seed for reproducibility.
-        train_slopes (bool, optional): Whether to train slopes. Defaults to True.
         train_biases (bool, optional): Whether to train biases. Defaults to True.
             Note: biases use abs(raw_biases) internally to keep them positive. When
             enabled, any raw_biases sitting exactly at 0 are nudged to 1e-6 to break the
             abs() kink where gradients vanish.
         train_divisive_strength (bool, optional): Whether to train divisive strength. Defaults to True.
         train_tau (bool, optional): Whether to train tau. Defaults to True.
+        train_slopes (bool, optional): Whether to train the slope gain. In pair mode
+            (tuple-keyed slope_dict) this is the per-(pre, post) edge gain; in node
+            mode the per-cell-type slope. Defaults to True.
+        rescale_slope_updates (bool, optional): Whether to rescale each optimizer
+            step for the (pair-mode) slope by model.slope_update_scale. Defaults to False.
         activation_loss_fn (str or callable, optional): Loss function for activations.
             Either "mae", "mse" (default), or a callable with signature fn(pred:
             torch.Tensor, target: torch.Tensor) -> torch.Tensor returning a scalar loss.
+        initial_state (torch.Tensor, optional): Initial full-network state for each
+            batch. Shape can be (nodes,), (batch, nodes), or (nodes, batch). Sensory
+            nodes are still overwritten by the first input sample.
+        target_node_groups (dict, optional): Fit group (e.g. cell-type) averages
+            instead of individual nodes. Maps ``group_id -> sequence of member node
+            indices``. When provided, the ``targets`` DataFrame's ``neuron_idx``
+            column holds ``group_id`` values, and each group's prediction is the mean
+            activation over its member nodes (``outputs[:, members, :].mean(dim=1)``)
+            before the loss is computed. Works for both ``LinearNetwork`` and
+            ``MultilayeredNetwork``. Cost scales with the number of groups passed
+            here, not with the number of groups in the connectome: the reduction is
+            one indexing kernel per group per forward pass. Defaults to None
+            (per-node targets, legacy behavior).
+        extra_parameters (list of torch.nn.Parameter, optional): Additional
+            trainable parameters that live outside ``model`` (e.g. a luminance
+            log-offset epsilon used by ``input_transform``). They are added to the
+            optimizer, included in the L1 parameter-change regularization (anchored
+            to their value at call time), and gradient-clipped alongside the model
+            parameters. Defaults to None.
+        input_transform (callable, optional): ``fn(inputs) -> inputs`` applied to
+            the (train and validation) input tensor inside every epoch, just before
+            the forward pass. Re-applied each step so a differentiable transform
+            driven by ``extra_parameters`` (e.g. ``log(brightness + epsilon)``)
+            receives gradients. Defaults to None (inputs used as given).
+        output_transform (callable, optional): ``fn(outputs) -> outputs`` applied
+            to the model output ``(batch, num_neurons, num_layers)`` right after
+            every forward pass (train and validation), before the targets are
+            gathered. Used to append a fixed observation model to the dynamics --
+            e.g. a causal sensor/indicator convolution along the time axis (see
+            ``sensor_kernel.make_sensor_output_transform``) so the fit compares a
+            forward-modelled measurement, not the raw latent, to the data. Must
+            preserve the shape and be differentiable wrt ``outputs``. Note this
+            retains a second copy of the full output in the autograd graph: at 139k
+            neurons, batch 8 and 750 layers that is ~3 GB on top of the output
+            itself. Defaults to None (outputs used as given).
+
+    Returns:
+        tuple: ``(model, history, train_inputs, val_inputs, train_targets,
+        val_targets, train_indices, val_indices)``.
+
+        After every optimizer step the model's parameter bounds and (when set) its
+        ``incoming_weight_budget`` are projected -- both unconditionally, including
+        on the last step, so the returned model always satisfies its constraints.
+        When a budget fired, ``history["budget_projections"]`` maps each post-node
+        index to ``{"steps": <how many steps it was pulled back>, "min_scale":
+        <smallest factor applied>}``. It is a summary dict rather than a per-epoch
+        list, so pop it before ``pd.DataFrame(history)``.
     """
+    if output_transform is not None and not callable(output_transform):
+        raise TypeError("output_transform must be callable or None.")
 
     def train_test_split(inputs, targets, train_fraction):
         """Split the inputs and targets into training and validation sets."""
-        train_num = int(inputs.shape[0] * train_fraction)
-        # random selection of train indices
-        train_indices = np.random.choice(
-            range(inputs.shape[0]), train_num, replace=False
-        )
-        # target is the rest
-        val_indices = np.setdiff1d(range(inputs.shape[0]), train_indices)
+        if not 0 < train_fraction <= 1:
+            raise ValueError("train_fraction must be in the interval (0, 1].")
+        if train_fraction == 1:
+            train_indices = np.arange(inputs.shape[0])
+            val_indices = np.array([], dtype=int)
+        else:
+            train_num = max(1, int(inputs.shape[0] * train_fraction))
+            # random selection of train indices
+            train_indices = np.random.choice(
+                range(inputs.shape[0]), train_num, replace=False
+            )
+            # target is the rest
+            val_indices = np.setdiff1d(range(inputs.shape[0]), train_indices)
 
         train_inputs = inputs[train_indices]
         val_inputs = inputs[val_indices]
 
-        train_targets = targets[targets["batch"].isin(train_indices)]
+        train_targets = targets[targets["batch"].isin(train_indices)].copy()
         train_targets.loc[:, ["batch"]] = pd.Categorical(
             train_targets["batch"], categories=list(train_indices)
         )
@@ -1372,7 +2201,7 @@ def train_model(
         batch2local_batch = {b: i for i, b in enumerate(train_indices)}
         train_targets.loc[:, ["batch"]] = train_targets.batch.map(batch2local_batch)
 
-        val_targets = targets[targets["batch"].isin(val_indices)]
+        val_targets = targets[targets["batch"].isin(val_indices)].copy()
         val_targets.loc[:, ["batch"]] = pd.Categorical(
             val_targets["batch"], categories=list(val_indices)
         )
@@ -1393,6 +2222,11 @@ def train_model(
     # Set random seed for reproducibility
     torch.manual_seed(seed)
     np.random.seed(seed)
+
+    # Extra (model-external) trainable parameters and optional input transform.
+    extra_parameters = list(extra_parameters) if extra_parameters is not None else []
+    if input_transform is not None and not callable(input_transform):
+        raise TypeError("input_transform must be callable or None.")
 
     # Resolve the loss function once
     if isinstance(activation_loss_fn, str):
@@ -1422,6 +2256,33 @@ def train_model(
             "Optionally include 'layer' for time series targets."
         )
 
+    # Optional group-mean reduction: targets' "neuron_idx" holds group ids and each
+    # group's prediction is the mean over its member node indices, so we fit a
+    # population/cell-type average rather than individual nodes.
+    group_order = None
+    group_members = None
+    group_id_to_row = None
+    if target_node_groups is not None:
+        if len(target_node_groups) == 0:
+            raise ValueError("target_node_groups must be non-empty when provided.")
+        group_order = list(target_node_groups.keys())
+        group_id_to_row = {g: i for i, g in enumerate(group_order)}
+        group_members = [
+            torch.as_tensor(list(target_node_groups[g]), dtype=torch.long)
+            for g in group_order
+        ]
+        for g, members in zip(group_order, group_members):
+            if members.numel() == 0:
+                raise ValueError(
+                    f"target_node_groups[{g!r}] has no member node indices."
+                )
+        missing = set(targets["neuron_idx"].unique()) - set(group_order)
+        if missing:
+            raise ValueError(
+                f"targets 'neuron_idx' values {sorted(missing)[:5]} are not keys of "
+                "target_node_groups."
+            )
+
     if wandb:
         try:
             import wandb
@@ -1441,9 +2302,15 @@ def train_model(
 
     # Use training mode context manager
     with training_mode(
-        model, train_slopes, train_biases, train_divisive_strength, train_tau
+        model,
+        train_slopes,
+        train_biases,
+        train_divisive_strength,
+        train_tau,
     ):
-        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        # Model parameters plus any model-external trainable parameters (e.g. epsilon).
+        trainable_parameters = list(model.parameters()) + extra_parameters
+        optimizer = torch.optim.Adam(trainable_parameters, lr=learning_rate)
 
         # Training history
         history = {
@@ -1453,7 +2320,13 @@ def train_model(
             "val_loss": [],
         }
 
-        initial_params = [param.clone() for param in model.parameters()]
+        # Per-post-node tally of how often the incoming-weight budget bound and
+        # how hard it pulled, summarized into history at the end of training.
+        n_nodes_total = model.all_weights.shape[0]
+        budget_fire_counts = torch.zeros(n_nodes_total, dtype=torch.long)
+        budget_min_scale = torch.ones(n_nodes_total, dtype=torch.float32)
+
+        initial_params = [param.clone() for param in trainable_parameters]
 
         # train validation split
         (
@@ -1465,64 +2338,188 @@ def train_model(
             val_indices,
         ) = train_test_split(inputs, targets, train_fraction)
 
-        batch_idx = torch.tensor(train_targets["batch"].values, dtype=torch.long)
-        neuron_idx = torch.tensor(train_targets["neuron_idx"].values, dtype=torch.long)
-        if "layer" in train_targets.columns:
-            layer_idx = torch.tensor(train_targets["layer"].values, dtype=torch.long)
-        target_vals = torch.tensor(train_targets["value"].values, dtype=torch.float32)
-
-        batch_idx_val = torch.tensor(val_targets["batch"].values, dtype=torch.long)
-        neuron_idx_val = torch.tensor(
-            val_targets["neuron_idx"].values, dtype=torch.long
+        batch_idx = torch.tensor(
+            train_targets["batch"].astype(int).values,
+            dtype=torch.long,
         )
-        if "layer" in val_targets.columns:
-            layer_idx_val = torch.tensor(val_targets["layer"].values, dtype=torch.long)
-        target_vals_val = torch.tensor(val_targets["value"].values, dtype=torch.float32)
+        if target_node_groups is not None:
+            neuron_idx = torch.tensor(
+                train_targets["neuron_idx"].map(group_id_to_row).astype(int).values,
+                dtype=torch.long,
+            )
+        else:
+            neuron_idx = torch.tensor(
+                train_targets["neuron_idx"].astype(int).values,
+                dtype=torch.long,
+            )
+        if "layer" in train_targets.columns:
+            layer_idx = torch.tensor(
+                train_targets["layer"].astype(int).values,
+                dtype=torch.long,
+            )
+        target_vals = torch.tensor(
+            train_targets["value"].values,
+            dtype=torch.float32,
+        )
+
+        has_validation = len(val_targets) > 0
+        if has_validation:
+            batch_idx_val = torch.tensor(
+                val_targets["batch"].astype(int).values,
+                dtype=torch.long,
+            )
+            if target_node_groups is not None:
+                neuron_idx_val = torch.tensor(
+                    val_targets["neuron_idx"].map(group_id_to_row).astype(int).values,
+                    dtype=torch.long,
+                )
+            else:
+                neuron_idx_val = torch.tensor(
+                    val_targets["neuron_idx"].astype(int).values,
+                    dtype=torch.long,
+                )
+            if "layer" in val_targets.columns:
+                layer_idx_val = torch.tensor(
+                    val_targets["layer"].astype(int).values,
+                    dtype=torch.long,
+                )
+            target_vals_val = torch.tensor(
+                val_targets["value"].values,
+                dtype=torch.float32,
+            )
 
         for epoch in tqdm(range(num_epochs)):
             optimizer.zero_grad()
-            # Forward pass
+            # Forward pass. The transform is re-applied each epoch so a
+            # differentiable transform (driven by extra_parameters) gets gradients.
             outputs = model(
-                train_inputs, checkpoint_steps=checkpoint_steps
+                train_inputs
+                if input_transform is None
+                else input_transform(train_inputs),
+                checkpoint_steps=checkpoint_steps,
+                initial_state=initial_state,
             )  # shape: (train_num, num_neurons, num_layers)
+            if output_transform is not None:
+                outputs = output_transform(outputs)
 
+            output_device = outputs.device
+            if target_node_groups is not None:
+                # Reduce to per-group means: (batch, num_groups, num_layers).
+                outputs = torch.stack(
+                    [
+                        outputs[:, members.to(output_device), :].mean(dim=1)
+                        for members in group_members
+                    ],
+                    dim=1,
+                )
+            batch_idx_out = batch_idx.to(output_device)
+            neuron_idx_out = neuron_idx.to(output_device)
             if "layer" in train_targets.columns:
-                actual = outputs[batch_idx, neuron_idx, layer_idx]
+                actual = outputs[
+                    batch_idx_out,
+                    neuron_idx_out,
+                    layer_idx.to(output_device),
+                ]
             else:
-                actual = outputs[batch_idx, neuron_idx, :].mean(dim=-1)
-            activation_loss = loss_fn(actual, target_vals)
+                actual = outputs[batch_idx_out, neuron_idx_out, :].mean(dim=-1)
+            activation_loss = loss_fn(actual, target_vals.to(output_device))
 
             # regularization loss
             param_reg_loss = 0
-            for param, param0 in zip(model.parameters(), initial_params):
+            for param, param0 in zip(trainable_parameters, initial_params):
                 param_reg_loss += (param - param0).abs().mean()
 
             param_reg_loss = param_reg_lambda * param_reg_loss
 
             loss = activation_loss + param_reg_loss
             loss.backward()
-            if not torch.isfinite(loss):
-                print(f"[epoch {epoch}] non-finite loss, skipping step")
+            grad_params = [p for p in trainable_parameters if p.requires_grad]
+            # Skip the step on a non-finite loss OR a non-finite gradient. The
+            # gradient check must precede clip_grad_norm_, because clipping an inf
+            # gradient produces NaN (inf * clip_coef, with clip_coef -> 0), which
+            # optimizer.step() would then write permanently into the parameters.
+            grads_finite = all(
+                p.grad is None or torch.isfinite(p.grad).all() for p in grad_params
+            )
+            if not torch.isfinite(loss) or not grads_finite:
+                reason = (
+                    "non-finite loss"
+                    if not torch.isfinite(loss)
+                    else "non-finite gradient"
+                )
+                print(f"[epoch {epoch}] {reason}, skipping step")
                 optimizer.zero_grad()
                 continue
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in model.parameters() if p.requires_grad], max_norm=1.0
+            # Global gradient-norm clipping is disabled for now: the norm is taken
+            # across all parameters jointly, so a large gradient on any one of them
+            # shrinks the step for every other. Restore it (per parameter group, or
+            # globally) if exploding gradients show up.
+            # torch.nn.utils.clip_grad_norm_(grad_params, max_norm=1.0)
+            slope_before = (
+                model.slope.detach().clone()
+                if rescale_slope_updates
+                and getattr(model, "slope", None) is not None
+                and getattr(model, "slope_is_pairwise", False)
+                else None
             )
             optimizer.step()
-            if train_slopes:
-                with torch.no_grad():
-                    model.slope.clamp_(min=1e-6)
+            if slope_before is not None:
+                model.rescale_slope_update_(slope_before)
+            # Parameter bounds and the incoming-weight budget are constraints on
+            # the parameter, not on the forward pass, so they are re-imposed after
+            # every step (including the last one).
+            if hasattr(model, "project_parameter_bounds_"):
+                model.project_parameter_bounds_()
+            if hasattr(model, "project_incoming_budget_"):
+                row_scale = model.project_incoming_budget_()
+                if row_scale is not None:
+                    fired = row_scale < 1.0 - 1e-9
+                    budget_fire_counts += fired.long().cpu()
+                    budget_min_scale = torch.minimum(
+                        budget_min_scale, row_scale.detach().float().cpu()
+                    )
 
             # validation loss
-            with torch.no_grad():
-                val_outputs = model(val_inputs)
-                if "layer" in val_targets.columns:
-                    actual = val_outputs[batch_idx_val, neuron_idx_val, layer_idx_val]
-                else:
-                    actual = val_outputs[batch_idx_val, neuron_idx_val, :].mean(dim=-1)
-                val_activation_loss = loss_fn(actual, target_vals_val)
-                if wandb:
-                    wandb.log({"val_activation_loss": val_activation_loss.item()})
+            if has_validation:
+                with torch.no_grad():
+                    val_outputs = model(
+                        val_inputs
+                        if input_transform is None
+                        else input_transform(val_inputs),
+                        initial_state=initial_state,
+                    )
+                    if output_transform is not None:
+                        val_outputs = output_transform(val_outputs)
+                    val_output_device = val_outputs.device
+                    if target_node_groups is not None:
+                        val_outputs = torch.stack(
+                            [
+                                val_outputs[:, members.to(val_output_device), :].mean(
+                                    dim=1
+                                )
+                                for members in group_members
+                            ],
+                            dim=1,
+                        )
+                    batch_idx_val_out = batch_idx_val.to(val_output_device)
+                    neuron_idx_val_out = neuron_idx_val.to(val_output_device)
+                    if "layer" in val_targets.columns:
+                        actual = val_outputs[
+                            batch_idx_val_out,
+                            neuron_idx_val_out,
+                            layer_idx_val.to(val_output_device),
+                        ]
+                    else:
+                        actual = val_outputs[
+                            batch_idx_val_out, neuron_idx_val_out, :
+                        ].mean(dim=-1)
+                    val_activation_loss = loss_fn(
+                        actual, target_vals_val.to(val_output_device)
+                    )
+                    if wandb:
+                        wandb.log({"val_activation_loss": val_activation_loss.item()})
+            else:
+                val_activation_loss = activation_loss.detach()
 
             if epoch % 10 == 0:
                 print(
@@ -1546,6 +2543,21 @@ def train_model(
             history["activation_loss"].append(activation_loss.item())
             history["param_reg_loss"].append(param_reg_loss.item())
             history["val_loss"].append(val_activation_loss.item())
+
+    budget_projections = {
+        int(node): {
+            "steps": int(budget_fire_counts[node]),
+            "min_scale": float(budget_min_scale[node]),
+        }
+        for node in torch.nonzero(budget_fire_counts).flatten().tolist()
+    }
+    history["budget_projections"] = budget_projections
+    if budget_projections:
+        tightest = min(v["min_scale"] for v in budget_projections.values())
+        print(
+            f"incoming_weight_budget bound on {len(budget_projections)} post node(s); "
+            f"tightest single projection scaled the gains by {tightest:.4g}."
+        )
 
     # Free up memory
     torch.cuda.empty_cache()
@@ -2534,15 +3546,15 @@ def get_activations_for_path(
         path (pd.DataFrame): A dataframe representing the paths in the network.
             Each row is a connection, with columns for 'pre' and 'post' neuron
             indices, and 'layer'.
-        activations (torch.Tensor | numpy.ndarray): The activations of the model. 
+        activations (torch.Tensor | numpy.ndarray): The activations of the model.
             Shape should be (num_neurons, num_layers). If the shape is (num_neurons, 1)
-            or (num_neurons,), then the same activation will be used for all layers in 
+            or (num_neurons,), then the same activation will be used for all layers in
             the path.
         model_in (torch.Tensor | numpy.ndarray): The input to the model. Shape
             should be (num_neurons, something) -  only the first column
             (num_neurons, 0), is used, when there is 1 in 'layer' in `path`. It
-            is otherwise not used. Note: if aggregate is not None, then the input will 
-            be ignored. 
+            is otherwise not used. Note: if aggregate is not None, then the input will
+            be ignored.
         sensory_indices (arrayable): The indices of sensory neurons.
         idx_to_group (dict, optional): A dictionary mapping indices from the
             model to the groups in path (e.g. cell type). Defaults to None.
@@ -2553,10 +3565,10 @@ def get_activations_for_path(
             path.pre[path.layer == 1], set activation_start = 2. If you want
             the last timepoint to correspond to the last layer in path, set
             activation_start = activations.shape[1] - path.layer.max().
-        aggregate (str or None, optional): Whether to aggregate activations across time 
-            first before mapping to path. If e.g. 'mean', will take the mean across 
-            timepoints. If None (default), each layer in the path corresponds to one 
-            timepoint in the activations. 
+        aggregate (str or None, optional): Whether to aggregate activations across time
+            first before mapping to path. If e.g. 'mean', will take the mean across
+            timepoints. If None (default), each layer in the path corresponds to one
+            timepoint in the activations.
 
     Returns:
         pd.DataFrame:
@@ -2568,7 +3580,7 @@ def get_activations_for_path(
         activations = activations.cpu().detach().numpy()
     if isinstance(model_in, torch.Tensor):
         model_in = model_in.cpu().detach().numpy()
-    
+
     # single column = already aggregated; otherwise aggregate across time if requested
     if activations.ndim == 1:
         activations = activations[:, None]
@@ -2648,7 +3660,7 @@ def get_activations_for_el(
     """
     Add node activations to an edgelist with non-discrete (continuous) layers,
     such as the output of `external_paths.layered_el()` (columns 'pre', 'post',
-    'pre_layer', 'post_layer'). Written by Claude, adapted from 
+    'pre_layer', 'post_layer'). Written by Claude, adapted from
     `get_activations_for_path()`.
 
     Unlike `get_activations_for_path()`, layers here are continuous (in
@@ -2684,9 +3696,7 @@ def get_activations_for_el(
     if activations.ndim == 1:
         activations = activations[:, None]
     if activations.ndim > 2:
-        raise ValueError(
-            f"activations must be 1D or 2D, got shape {activations.shape}"
-        )
+        raise ValueError(f"activations must be 1D or 2D, got shape {activations.shape}")
     if activations.shape[1] > 1:
         if aggregate is None:
             raise ValueError(
@@ -3518,10 +4528,12 @@ def legacy_activation_function(
     if self.custom_activation_function is not None:
         return self.custom_activation_function(self, x, x_previous)
 
-    if self.slope is None:
+    if self.slope_is_pairwise:
+        slopes = 1.0  # pair-mode gain folded into effective_weights
+    elif self.slope is None:
         slopes = self.tanh_steepness
     else:
-        slopes = self.slope[self.indices]  # shape: (num_neurons,)
+        slopes = self.effective_slope[self.indices]  # shape: (num_neurons,)
         # shape: (num_neurons, batch_size)
         slopes = slopes.view(-1, 1).expand(-1, x.shape[1]).to(x.device)
 
@@ -3569,10 +4581,12 @@ def legacy_activation_function_linear(
     if self.custom_activation_function is not None:
         return self.custom_activation_function(self, x, x_previous)
 
-    if self.slope is None:
+    if self.slope_is_pairwise:
+        slopes = 1.0  # pair-mode gain folded into effective_weights
+    elif self.slope is None:
         slopes = self.tanh_steepness
     else:
-        slopes = self.slope[self.indices]  # shape: (num_neurons,)
+        slopes = self.effective_slope[self.indices]  # shape: (num_neurons,)
         # shape: (num_neurons, batch_size)
         slopes = slopes.view(-1, 1).expand(-1, x.shape[1]).to(x.device)
 

@@ -1,4 +1,6 @@
+import copy
 import unittest
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -18,7 +20,7 @@ from connectome_interpreter.activation_maximisation import (
     guess_optimal_stimulus,
     training_mode,
     train_model,
-    get_activations_for_path
+    get_activations_for_path,
 )
 
 
@@ -269,7 +271,6 @@ class TestActivationsToDFBatched(unittest.TestCase):
 
 
 class TestGetNeuronActivation(unittest.TestCase):
-
     def test_2d_output_with_groups(self):
         output = torch.tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]])
         neuron_indices = [0, 2]
@@ -1110,6 +1111,26 @@ class TestDivisiveNormalization(unittest.TestCase):
                 divisive_normalization=dn,
             )
 
+    def test_positive_divnorm_weight_reports_offending_pairs(self):
+        # Regression: divnorm_indices is (2, n_edges), so the offending edges select
+        # columns, not rows. Indexing rows instead is in-bounds (and silently reports
+        # the wrong numbers) for 1-2 offending edges, but raises IndexError from 3 on.
+        dense = np.zeros((4, 4), dtype=float)
+        dense[1, 0] = 0.7  # post 1 (B) <- pre 0 (A)
+        dense[2, 0] = 0.8  # post 2 (B) <- pre 0 (A)
+        dense[3, 0] = 0.9  # post 3 (B) <- pre 0 (A)
+        idx_to_group = {0: "A", 1: "B", 2: "B", 3: "B"}
+        with self.assertRaises(ValueError) as ctx:
+            MultilayeredNetwork(
+                csr_matrix(dense),
+                [0],
+                idx_to_group=idx_to_group,
+                divisive_normalization={"A": ["B"]},
+            )
+        msg = str(ctx.exception)
+        for pair in ("[1, 0]", "[2, 0]", "[3, 0]"):
+            self.assertIn(pair, msg)
+
     def test_weight_removal_and_storage(self):
         dense = np.array([[0.0, -0.5], [0.3, 0.0]], dtype=float)  # from B to A, -0.5
         weights = csr_matrix(dense)
@@ -1509,6 +1530,22 @@ class TestLinearNetwork(unittest.TestCase):
             "Weights matrices are not equal within tolerance",
         )
 
+    def test_sparse_torch_weight_initialization(self):
+        weights = torch.eye(3, dtype=torch.float32).to_sparse()
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=1,
+        ).to(self.device)
+
+        self.assertTrue(model.all_weights.is_sparse)
+        self.assertTrue(
+            torch.allclose(
+                model.all_weights.to_dense().cpu(),
+                torch.eye(3, dtype=torch.float32),
+            )
+        )
+
     def test_forward_pass_2d(self):
         """Test 2D forward pass (single batch)"""
         input_tensor = torch.rand(self.num_sensory, self.num_layers).to(self.device)
@@ -1558,6 +1595,265 @@ class TestLinearNetwork(unittest.TestCase):
         self.assertEqual(
             output.shape, (self.batch_size, self.num_neurons, self.num_layers)
         )
+
+    def test_pair_slope_scales_selected_pre_post_edges(self):
+        weights = csr_matrix(
+            np.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                    [3.0, 0.0, 0.0],
+                ],
+                dtype=np.float32,
+            )
+        )
+        idx_to_group = {0: "lum", 1: "A", 2: "B"}
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=1,
+            tanh_steepness=1.0,
+            tau=1.0,
+            idx_to_group=idx_to_group,
+            slope_dict={("lum", "A"): 0.5},
+        ).to(self.device)
+
+        inputs = torch.tensor([[[1.0]]], device=self.device)
+        output = model(inputs)
+
+        self.assertTrue(torch.allclose(output[0, 1, 0], torch.tensor(1.0)))
+        self.assertTrue(torch.allclose(output[0, 2, 0], torch.tensor(3.0)))
+        self.assertEqual(model.slope_pairs, (("lum", "A"),))
+
+    def test_pair_slope_receives_gradients(self):
+        weights = csr_matrix(
+            np.array(
+                [
+                    [0.0, 0.0],
+                    [1.0, 0.0],
+                ],
+                dtype=np.float32,
+            )
+        )
+        idx_to_group = {0: "lum", 1: "A"}
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=1,
+            tanh_steepness=1.0,
+            tau=1.0,
+            idx_to_group=idx_to_group,
+            slope_dict={("lum", "A"): 1.0},
+        ).to(self.device)
+        model.set_param_grads(slopes=True)
+
+        output = model(torch.tensor([[[1.0]]], device=self.device))
+        loss = (output[0, 1, 0] - 2.0) ** 2
+        loss.backward()
+
+        self.assertIsNotNone(model.slope.grad)
+        self.assertGreater(torch.abs(model.slope.grad).item(), 0.0)
+
+    def test_pair_slope_bounds_project_effective_multiplier(self):
+        weights = csr_matrix(np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32))
+        idx_to_group = {0: "lum", 1: "A"}
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=1,
+            tanh_steepness=1.0,
+            tau=1.0,
+            idx_to_group=idx_to_group,
+            slope_dict={("lum", "A"): 2.0},
+            slope_bounds={("lum", "A"): (0.5, 1.5)},
+        ).to(self.device)
+
+        self.assertTrue(
+            torch.allclose(model.effective_slope.cpu(), torch.tensor([1.5]))
+        )
+        model.project_parameter_bounds_()
+        self.assertTrue(torch.allclose(model.slope.cpu(), torch.tensor([1.5])))
+
+    def test_negative_slope_bounds_are_rejected(self):
+        """The gain multiplies the connectome weight, whose sign carries the
+        edge's excitation/inhibition -- a negative gain would silently flip it,
+        so negative bounds are never legal (budget or not)."""
+        weights = csr_matrix(np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32))
+        idx_to_group = {0: "lum", 1: "A"}
+        for bad in ((-2.0, 2.0), (0.5, -1.0), (-3.0, -1.0)):
+            with self.subTest(bounds=bad):
+                with self.assertRaises(ValueError) as ctx:
+                    LinearNetwork(
+                        weights,
+                        sensory_indices=[0],
+                        num_layers=1,
+                        idx_to_group=idx_to_group,
+                        slope_dict={("lum", "A"): 1.0},
+                        slope_bounds={("lum", "A"): bad},
+                    )
+                self.assertIn("non-negative", str(ctx.exception))
+
+    def test_pair_slope_update_rescale_uses_configured_scale(self):
+        weights = csr_matrix(np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32))
+        idx_to_group = {0: "lum", 1: "A"}
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=1,
+            tanh_steepness=1.0,
+            tau=1.0,
+            idx_to_group=idx_to_group,
+            slope_dict={("lum", "A"): 1.0},
+            slope_update_scales={("lum", "A"): 0.1},
+        ).to(self.device)
+
+        before = model.slope.detach().clone()
+        with torch.no_grad():
+            model.slope.add_(0.2)
+        model.rescale_slope_update_(before)
+
+        self.assertTrue(torch.allclose(model.slope.cpu(), torch.tensor([3.0])))
+
+    def test_sensory_replace_mode_keeps_sensory_trace(self):
+        weights = csr_matrix(np.array([[1.0]], dtype=np.float32))
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=3,
+            tanh_steepness=1.0,
+            tau=1.0,
+            sensory_input_mode="replace",
+        ).to(self.device)
+
+        inputs = torch.tensor([[[1.0, 2.0, 3.0]]], device=self.device)
+        output = model(inputs)
+
+        self.assertTrue(torch.allclose(output[0, 0, :], inputs[0, 0, :].cpu()))
+
+    def test_initial_state_sets_first_full_state(self):
+        weights = csr_matrix(np.zeros((2, 2), dtype=np.float32))
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=1,
+            tanh_steepness=1.0,
+            tau=2.0,
+            sensory_input_mode="replace",
+        ).to(self.device)
+
+        inputs = torch.tensor([[[3.0]]], device=self.device)
+        initial_state = torch.tensor([7.0, 2.0], device=self.device)
+        output = model(inputs, initial_state=initial_state)
+
+        self.assertTrue(torch.allclose(output[0, 0, 0], torch.tensor(3.0)))
+        self.assertTrue(torch.allclose(output[0, 1, 0], torch.tensor(1.0)))
+
+    def test_initial_state_square_batch_is_rejected(self):
+        """(batch, nodes) and (nodes, batch) are indistinguishable when equal."""
+        weights = csr_matrix(np.zeros((2, 2), dtype=np.float32))
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=1,
+            tanh_steepness=1.0,
+            tau=2.0,
+            sensory_input_mode="replace",
+        ).to(self.device)
+
+        inputs = torch.zeros((2, 1, 1), device=self.device)  # batch 2 == 2 nodes
+        with self.assertRaises(ValueError) as ctx:
+            model(inputs, initial_state=torch.zeros((2, 2), device=self.device))
+        self.assertIn("ambiguous", str(ctx.exception))
+
+        # a 1-D initial_state is unambiguous and still accepted
+        output = model(inputs, initial_state=torch.tensor([7.0, 2.0], device=self.device))
+        self.assertEqual(tuple(output.shape), (2, 2, 1))
+
+    def test_output_flags_are_multilayered_only(self):
+        """They are honoured only by MultilayeredNetwork, so only it accepts them."""
+        weights = csr_matrix(np.zeros((2, 2), dtype=np.float32))
+        for flag in ({"output_rectify": False}, {"output_clamp_max": None}):
+            with self.subTest(**flag):
+                with self.assertRaises(TypeError):
+                    LinearNetwork(weights, sensory_indices=[0], num_layers=1, **flag)
+                model = MultilayeredNetwork(
+                    weights, sensory_indices=[0], num_layers=1, **flag
+                )
+                key, value = next(iter(flag.items()))
+                self.assertEqual(getattr(model, key), value)
+
+    def test_bias_transform_identity_allows_negative_biases(self):
+        idx_to_group = {i: f"group_{i}" for i in range(3)}
+        bias_dict = {"group_0": -0.2, "group_1": 0.3, "group_2": -0.4}
+        model = LinearNetwork(
+            csr_matrix(np.eye(3, dtype=np.float32)),
+            sensory_indices=[0],
+            num_layers=1,
+            idx_to_group=idx_to_group,
+            bias_dict=bias_dict,
+            bias_transform="identity",
+        ).to(self.device)
+
+        expected = torch.tensor([-0.2, 0.3, -0.4], device=self.device)
+        self.assertTrue(torch.allclose(model.biases, expected))
+
+    def test_train_model_trains_pair_slope_with_single_batch(self):
+        weights = csr_matrix(
+            np.array(
+                [
+                    [0.0, 0.0],
+                    [1.0, 0.0],
+                ],
+                dtype=np.float32,
+            )
+        )
+        idx_to_group = {0: "lum", 1: "A"}
+        model = LinearNetwork(
+            weights,
+            sensory_indices=[0],
+            num_layers=1,
+            tanh_steepness=1.0,
+            tau=1.0,
+            idx_to_group=idx_to_group,
+            slope_dict={("lum", "A"): 1.0},
+        ).to(self.device)
+        before = model.slope.detach().clone()
+        inputs = torch.tensor([[[1.0]]], device=self.device)
+        targets = pd.DataFrame(
+            [{"batch": 0, "neuron_idx": 1, "layer": 0, "value": 2.0}]
+        )
+
+        (
+            _,
+            history,
+            _,
+            val_inputs,
+            _,
+            val_targets,
+            train_indices,
+            val_indices,
+        ) = train_model(
+            model,
+            inputs,
+            targets,
+            num_epochs=5,
+            learning_rate=0.1,
+            param_reg_lambda=0.0,
+            wandb=False,
+            train_fraction=1.0,
+            train_slopes=True,
+            train_biases=False,
+            train_divisive_strength=False,
+            train_tau=False,
+            checkpoint_steps=0,
+        )
+
+        self.assertEqual(len(history["loss"]), 5)
+        self.assertEqual(val_inputs.shape[0], 0)
+        self.assertEqual(len(val_targets), 0)
+        self.assertEqual(train_indices.tolist(), [0])
+        self.assertEqual(val_indices.tolist(), [])
+        self.assertGreater(model.slope.detach().item(), before.item())
 
     def test_custom_activation_function(self):
         """Test LinearNetwork with custom activation function"""
@@ -3275,6 +3571,7 @@ class TestMultiGroupDivnorm(unittest.TestCase):
         # all divnorm edges point at the single strength parameter
         self.assertTrue(torch.all(model.edge_pre_param_idx == 0))
 
+
 class TestGetActivationsForPath(unittest.TestCase):
     def setUp(self):
         self.num_neurons = 6
@@ -3301,10 +3598,10 @@ class TestGetActivationsForPath(unittest.TestCase):
         )
         # layer1 pre from model_in[:,0]; post from activations[:,0]
         pre, post = self._row(out, 0, 3)
-        self.assertEqual(pre, 10.0)                      # model_in[0,0]
+        self.assertEqual(pre, 10.0)  # model_in[0,0]
         self.assertEqual(post, self.activations[3, 0])
         pre, post = self._row(out, 1, 4)
-        self.assertEqual(pre, 20.0)                      # model_in[1,0]
+        self.assertEqual(pre, 20.0)  # model_in[1,0]
         self.assertEqual(post, self.activations[4, 0])
         # layer2 pre from activations[:,0], post from activations[:,1]
         pre, post = self._row(out, 3, 5)
@@ -3318,8 +3615,11 @@ class TestGetActivationsForPath(unittest.TestCase):
 
     def test_aggregate_mean_ignores_model_in(self):
         out = get_activations_for_path(
-            self.path, self.activations, model_in=None,
-            sensory_indices=None, aggregate="mean"
+            self.path,
+            self.activations,
+            model_in=None,
+            sensory_indices=None,
+            aggregate="mean",
         )
         means = self.activations.mean(axis=1)
         # layer1 pre now from aggregated activations, not model_in
@@ -3359,12 +3659,1169 @@ class TestGetActivationsForPath(unittest.TestCase):
 
     def test_torch_input(self):
         out = get_activations_for_path(
-            self.path, torch.tensor(self.activations),
-            torch.tensor(self.model_in), self.sensory_indices
+            self.path,
+            torch.tensor(self.activations),
+            torch.tensor(self.model_in),
+            self.sensory_indices,
         )
         pre, post = self._row(out, 0, 3)
         self.assertEqual(pre, 10.0)
         self.assertEqual(post, self.activations[3, 0])
+
+
+class TestTrainModelGroupTargets(unittest.TestCase):
+    """train_model(..., target_node_groups=...) fits group (cell-type) averages."""
+
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        torch.manual_seed(0)
+        np.random.seed(0)
+        dense_weights = np.random.rand(6, 6) * 0.1
+        self.all_weights = csr_matrix(dense_weights)
+        self.sensory_indices = [0, 1]
+        self.idx_to_group = {i: f"type_{i // 2}" for i in range(6)}
+        self.inputs = torch.rand(3, 2, 2).to(self.device)
+
+    def _make_model(self, cls):
+        return cls(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+        ).to(self.device)
+
+    def test_runs_and_finite_for_both_model_classes(self):
+        groups = {0: [2, 3], 1: [4, 5]}
+        targets = pd.DataFrame(
+            [
+                {"batch": 0, "neuron_idx": 0, "layer": 1, "value": 0.5},
+                {"batch": 1, "neuron_idx": 1, "layer": 1, "value": 0.3},
+                {"batch": 2, "neuron_idx": 0, "layer": 0, "value": 0.7},
+            ]
+        )
+        for cls in (LinearNetwork, MultilayeredNetwork):
+            with self.subTest(model=cls.__name__):
+                model = self._make_model(cls)
+                _, history, *_ = train_model(
+                    model,
+                    self.inputs,
+                    targets,
+                    num_epochs=3,
+                    wandb=False,
+                    train_fraction=1.0,
+                    checkpoint_steps=0,
+                    target_node_groups=groups,
+                )
+                self.assertEqual(len(history["loss"]), 3)
+                self.assertTrue(all(np.isfinite(history["activation_loss"])))
+
+    def test_group_mean_matches_manual_loss(self):
+        """Epoch-0 activation loss equals the manual MSE of the group means."""
+        model = self._make_model(LinearNetwork)
+        groups = {0: [2, 3, 4]}
+        target_value = 0.42
+        targets = pd.DataFrame(
+            [
+                {"batch": b, "neuron_idx": 0, "layer": 1, "value": target_value}
+                for b in range(3)
+            ]
+        )
+
+        with torch.no_grad():
+            outputs = model(self.inputs, checkpoint_steps=0)  # (batch, nodes, layers)
+            group_mean = outputs[:, groups[0], :].mean(dim=1)  # (batch, layers)
+            pred = group_mean[:, 1]  # layer 1, all batches
+            expected = float(((pred - target_value) ** 2).mean().cpu())
+
+        _, history, *_ = train_model(
+            model,
+            self.inputs,
+            targets,
+            num_epochs=1,
+            wandb=False,
+            train_fraction=1.0,
+            checkpoint_steps=0,
+            param_reg_lambda=0.0,
+            activation_loss_fn="mse",
+            target_node_groups=groups,
+        )
+        self.assertAlmostEqual(history["activation_loss"][0], expected, places=5)
+
+    def test_single_member_groups_match_per_node_targets(self):
+        """Single-member groups reproduce ordinary per-node training exactly."""
+        per_node_targets = pd.DataFrame(
+            [
+                {"batch": 0, "neuron_idx": 2, "layer": 1, "value": 0.5},
+                {"batch": 1, "neuron_idx": 3, "layer": 1, "value": 0.3},
+                {"batch": 2, "neuron_idx": 2, "layer": 0, "value": 0.7},
+            ]
+        )
+        group_targets = per_node_targets.copy()
+        group_targets["neuron_idx"] = group_targets["neuron_idx"].map({2: 0, 3: 1})
+        groups = {0: [2], 1: [3]}
+
+        torch.manual_seed(1)
+        model_a = self._make_model(LinearNetwork)
+        _, hist_node, *_ = train_model(
+            model_a,
+            self.inputs,
+            per_node_targets,
+            num_epochs=4,
+            wandb=False,
+            train_fraction=1.0,
+            checkpoint_steps=0,
+            seed=7,
+        )
+        torch.manual_seed(1)
+        model_b = self._make_model(LinearNetwork)
+        _, hist_group, *_ = train_model(
+            model_b,
+            self.inputs,
+            group_targets,
+            num_epochs=4,
+            wandb=False,
+            train_fraction=1.0,
+            checkpoint_steps=0,
+            seed=7,
+            target_node_groups=groups,
+        )
+        np.testing.assert_allclose(
+            hist_node["activation_loss"],
+            hist_group["activation_loss"],
+            rtol=1e-5,
+            atol=1e-7,
+        )
+
+    def test_unknown_group_id_in_targets_raises(self):
+        model = self._make_model(LinearNetwork)
+        targets = pd.DataFrame(
+            [{"batch": 0, "neuron_idx": 9, "layer": 1, "value": 0.5}]
+        )
+        with self.assertRaises(ValueError):
+            train_model(
+                model,
+                self.inputs,
+                targets,
+                num_epochs=1,
+                wandb=False,
+                train_fraction=1.0,
+                target_node_groups={0: [2, 3]},
+            )
+
+
+class TestTrainModelExtraParamsAndInputTransform(unittest.TestCase):
+    """train_model(..., extra_parameters=..., input_transform=...)."""
+
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        torch.manual_seed(0)
+        np.random.seed(0)
+        dense_weights = np.random.rand(6, 6) * 0.1
+        self.all_weights = csr_matrix(dense_weights)
+        self.sensory_indices = [0, 1]
+        self.idx_to_group = {i: f"type_{i // 2}" for i in range(6)}
+        # positive inputs so log(inputs + epsilon) is well defined
+        self.inputs = torch.rand(3, 2, 2).to(self.device)
+        self.targets = pd.DataFrame(
+            [
+                {"batch": 0, "neuron_idx": 2, "layer": 1, "value": 0.5},
+                {"batch": 1, "neuron_idx": 3, "layer": 1, "value": 0.3},
+                {"batch": 2, "neuron_idx": 4, "layer": 1, "value": 0.7},
+            ]
+        )
+
+    def _make_model(self, cls):
+        return cls(
+            self.all_weights,
+            self.sensory_indices,
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+        ).to(self.device)
+
+    def test_input_transform_matches_precomputed_transform(self):
+        """Passing input_transform=t equals pre-applying t to the inputs."""
+        transform = lambda x: torch.log(x + 0.3)
+
+        torch.manual_seed(1)
+        model_a = self._make_model(LinearNetwork)
+        _, hist_pre, *_ = train_model(
+            model_a,
+            transform(self.inputs),
+            self.targets,
+            num_epochs=4,
+            wandb=False,
+            train_fraction=1.0,
+            checkpoint_steps=0,
+            seed=7,
+        )
+        torch.manual_seed(1)
+        model_b = self._make_model(LinearNetwork)
+        _, hist_tf, *_ = train_model(
+            model_b,
+            self.inputs,
+            self.targets,
+            num_epochs=4,
+            wandb=False,
+            train_fraction=1.0,
+            checkpoint_steps=0,
+            seed=7,
+            input_transform=transform,
+        )
+        np.testing.assert_allclose(
+            hist_pre["activation_loss"],
+            hist_tf["activation_loss"],
+            rtol=1e-5,
+            atol=1e-7,
+        )
+
+    def test_extra_parameter_is_trained(self):
+        """A model-external epsilon used by input_transform receives updates."""
+        for cls in (LinearNetwork, MultilayeredNetwork):
+            with self.subTest(model=cls.__name__):
+                torch.manual_seed(0)
+                model = self._make_model(cls)
+                epsilon = torch.nn.Parameter(torch.tensor(0.2, device=self.device))
+                transform = lambda x: torch.log(
+                    x + torch.nn.functional.softplus(epsilon)
+                )
+                eps0 = float(epsilon.detach().cpu())
+                _, history, *_ = train_model(
+                    model,
+                    self.inputs,
+                    self.targets,
+                    num_epochs=5,
+                    wandb=False,
+                    train_fraction=1.0,
+                    checkpoint_steps=0,
+                    learning_rate=0.05,
+                    param_reg_lambda=0.0,
+                    extra_parameters=[epsilon],
+                    input_transform=transform,
+                )
+                self.assertTrue(np.isfinite(float(epsilon.detach().cpu())))
+                self.assertNotAlmostEqual(float(epsilon.detach().cpu()), eps0, places=6)
+                self.assertEqual(len(history["loss"]), 5)
+                self.assertTrue(all(np.isfinite(history["activation_loss"])))
+
+    def test_extra_parameter_regularized_toward_initial_value(self):
+        """extra_parameters contribute to the L1 parameter-change regularization."""
+        torch.manual_seed(0)
+        model = self._make_model(LinearNetwork)
+        epsilon = torch.nn.Parameter(torch.tensor(0.2, device=self.device))
+        transform = lambda x: torch.log(x + torch.nn.functional.softplus(epsilon))
+        _, history, *_ = train_model(
+            model,
+            self.inputs,
+            self.targets,
+            num_epochs=3,
+            wandb=False,
+            train_fraction=1.0,
+            checkpoint_steps=0,
+            learning_rate=0.05,
+            param_reg_lambda=1.0,
+            train_slopes=False,
+            train_biases=False,
+            train_tau=False,
+            extra_parameters=[epsilon],
+            input_transform=transform,
+        )
+        # Only epsilon moves (all model params frozen), so a positive reg loss
+        # after epoch 0 can only come from the extra parameter being included.
+        self.assertGreater(history["param_reg_loss"][-1], 0.0)
+
+    def test_input_transform_not_callable_raises(self):
+        model = self._make_model(LinearNetwork)
+        with self.assertRaises(TypeError):
+            train_model(
+                model,
+                self.inputs,
+                self.targets,
+                num_epochs=1,
+                wandb=False,
+                train_fraction=1.0,
+                input_transform=123,
+            )
+
+    def test_nonfinite_gradient_step_is_skipped(self):
+        """An inf gradient skips the step instead of corrupting parameters to NaN."""
+        torch.manual_seed(0)
+        model = self._make_model(LinearNetwork)
+        state = {"n": 0}
+
+        def inject_inf_once(grad):
+            state["n"] += 1
+            if state["n"] == 1:  # first backward only
+                return torch.full_like(grad, float("inf"))
+            return grad
+
+        model.raw_biases.requires_grad_(True)  # hooks require grad at registration
+        model.raw_biases.register_hook(inject_inf_once)
+        _, history, *_ = train_model(
+            model,
+            self.inputs,
+            self.targets,
+            num_epochs=3,
+            wandb=False,
+            train_fraction=1.0,
+            checkpoint_steps=0,
+            train_biases=True,
+        )
+        # Without the guard, Adam's step on the inf grad would write NaN into
+        # the bias permanently.
+        self.assertTrue(torch.isfinite(model.raw_biases).all())
+        self.assertTrue(all(np.isfinite(history["activation_loss"])))
+
+
+class TestTrainModelOutputTransform(unittest.TestCase):
+    """train_model(output_transform=...): applied to the (batch, nodes, layers)
+    model output before the targets are gathered.
+
+    This is the hook the L123 fits use to push the rate model through a forward
+    GCaMP sensor convolution; the convolution itself lives in the analysis tree,
+    so the cases here use plain shape-preserving stand-ins."""
+
+    @classmethod
+    def setUpClass(cls):
+        torch.manual_seed(0)
+        w = np.random.RandomState(0).rand(6, 6)
+        w = w / w.sum(axis=1, keepdims=True)
+        groups = {i: f"n{i}" for i in range(6)}
+        # bias_dict + tau_dict register trainable parameters so train_model's
+        # optimizer has something to step (a bare network exposes none).
+        cls._shared = MultilayeredNetwork(
+            csr_matrix(w),
+            sensory_indices=[0, 1],
+            num_layers=4,
+            idx_to_group=groups,
+            bias_dict={f"n{i}": 0.0 for i in range(6)},
+            tau_dict={f"n{i}": 5.0 for i in range(6)},
+        )
+
+    def _model(self):
+        # identical model each call, so the epoch-0 forward is deterministic.
+        return copy.deepcopy(self._shared)
+
+    @staticmethod
+    def _targets():
+        # time-series targets on neuron 5 at every layer (uses the "layer" path).
+        return pd.DataFrame(
+            {
+                "batch": [0, 0, 0, 0],
+                "neuron_idx": [5, 5, 5, 5],
+                "layer": [0, 1, 2, 3],
+                "value": [0.2, 0.3, 0.4, 0.5],
+            }
+        )
+
+    @staticmethod
+    def _inputs():
+        return torch.zeros(1, 2, 4, dtype=torch.float32)
+
+    def _capture_first_pred(self, output_transform):
+        grabbed = {}
+
+        def loss_fn(pred, target):
+            grabbed.setdefault("pred", pred.detach().clone())
+            return ((pred - target) ** 2).mean()
+
+        train_model(
+            self._model(),
+            self._inputs(),
+            self._targets(),
+            num_epochs=1,
+            train_fraction=1.0,
+            param_reg_lambda=0.0,
+            checkpoint_steps=0,
+            activation_loss_fn=loss_fn,
+            output_transform=output_transform,
+            seed=0,
+        )
+        return grabbed["pred"]
+
+    def test_output_transform_applied_before_gather(self):
+        """A shape-preserving scale on the output shows up in the gathered pred."""
+        pred_none = self._capture_first_pred(None)
+        pred_scaled = self._capture_first_pred(lambda o: o * 3.0)
+        self.assertEqual(pred_none.shape, (4,))
+        self.assertEqual(pred_scaled.shape, (4,))
+        torch.testing.assert_close(pred_scaled, pred_none * 3.0, rtol=1e-5, atol=1e-6)
+
+    def test_output_transform_receives_3d_output(self):
+        seen = {}
+
+        def spy(o):
+            seen["shape"] = tuple(o.shape)
+            return o
+
+        train_model(
+            self._model(),
+            self._inputs(),
+            self._targets(),
+            num_epochs=1,
+            train_fraction=1.0,
+            param_reg_lambda=0.0,
+            checkpoint_steps=0,
+            output_transform=spy,
+            seed=0,
+        )
+        self.assertEqual(seen["shape"], (1, 6, 4))  # (batch, num_neurons, num_layers)
+
+    def test_non_callable_output_transform_rejected(self):
+        with self.assertRaises(TypeError):
+            train_model(
+                self._model(),
+                self._inputs(),
+                self._targets(),
+                num_epochs=1,
+                output_transform=123,
+                seed=0,
+            )
+
+    def test_output_transform_trains_over_multiple_epochs(self):
+        """A stateful, shape-preserving transform keeps the loss finite while
+        training."""
+        hist = train_model(
+            self._model(),
+            self._inputs(),
+            self._targets(),
+            num_epochs=2,
+            train_fraction=1.0,
+            param_reg_lambda=0.0,
+            checkpoint_steps=0,
+            output_transform=lambda o: torch.cumsum(o, dim=-1) * 0.5,
+            seed=0,
+        )[1]
+        losses = hist["activation_loss"]
+        self.assertTrue(np.all(np.isfinite(losses)))
+
+
+class TestOutputClampMax(unittest.TestCase):
+    """MultilayeredNetwork.output_clamp_max controls the post-layer rate ceiling."""
+
+    @staticmethod
+    def _unbounded_activation(model, x, x_previous=None):
+        # Deterministic activation whose output exceeds 1, so the [0, 1] output
+        # clamp (when active) is observable on the non-sensory nodes.
+        return torch.relu(x) + 5.0
+
+    def _build(self, output_clamp_max):
+        n, s, layers = 6, 2, 4
+        weights = np.zeros((n, n), dtype=np.float32)
+        weights[s:, s:] = 0.3  # positive recurrence among non-sensory nodes
+        return MultilayeredNetwork(
+            csr_matrix(weights),
+            sensory_indices=list(range(s)),
+            num_layers=layers,
+            threshold=0.0,
+            activation_function=self._unbounded_activation,
+            sensory_input_mode="replace",
+            output_clamp_max=output_clamp_max,
+        )
+
+    def test_default_attribute_is_one(self):
+        model = MultilayeredNetwork(
+            csr_matrix(np.zeros((4, 4), dtype=np.float32)),
+            sensory_indices=[0],
+            num_layers=2,
+        )
+        self.assertEqual(model.output_clamp_max, 1.0)
+
+    def test_default_clamps_non_sensory_to_one(self):
+        model = self._build(1.0)
+        inp = torch.full((2, 4), 0.5)
+        out = model(inp)  # (n_neurons, num_layers)
+        non_sensory = out[2:, :]
+        self.assertLessEqual(float(non_sensory.max()), 1.0 + 1e-5)
+
+    def test_none_disables_clamp(self):
+        model = self._build(None)
+        inp = torch.full((2, 4), 0.5)
+        out = model(inp)
+        non_sensory = out[2:, :]
+        self.assertGreater(float(non_sensory.max()), 1.0)
+
+    def test_none_matches_default_where_checkpointed(self):
+        # The checkpointed path (_forward_chunk) must honour output_clamp_max too.
+        model = self._build(None)
+        inp = torch.full((2, 4), 0.5, requires_grad=True)
+        out = model(inp, checkpoint_steps=2)
+        self.assertGreater(float(out[2:, :].max()), 1.0)
+
+
+class TestOutputRectify(unittest.TestCase):
+    """MultilayeredNetwork.output_rectify controls the post-layer >= 0 floor."""
+
+    @staticmethod
+    def _negative_activation(model, x, x_previous=None):
+        # Deterministic activation whose output is negative, so the hard
+        # rectification (when active) is observable on the non-sensory nodes.
+        return torch.relu(x) - 3.0
+
+    def _build(self, output_rectify):
+        n, s, layers = 6, 2, 4
+        weights = np.zeros((n, n), dtype=np.float32)
+        weights[s:, s:] = 0.3  # positive recurrence among non-sensory nodes
+        return MultilayeredNetwork(
+            csr_matrix(weights),
+            sensory_indices=list(range(s)),
+            num_layers=layers,
+            threshold=0.0,
+            activation_function=self._negative_activation,
+            sensory_input_mode="replace",
+            output_clamp_max=None,  # isolate the floor from the ceiling
+            output_rectify=output_rectify,
+        )
+
+    def test_default_attribute_is_true(self):
+        model = MultilayeredNetwork(
+            csr_matrix(np.zeros((4, 4), dtype=np.float32)),
+            sensory_indices=[0],
+            num_layers=2,
+        )
+        self.assertTrue(model.output_rectify)
+
+    def test_default_rectifies_non_sensory_to_floor(self):
+        model = self._build(True)
+        inp = torch.full((2, 4), 0.5)
+        out = model(inp)  # (n_neurons, num_layers)
+        non_sensory = out[2:, :]
+        self.assertGreaterEqual(float(non_sensory.min()), -1e-5)
+
+    def test_false_allows_negative_rates(self):
+        model = self._build(False)
+        inp = torch.full((2, 4), 0.5)
+        out = model(inp)
+        non_sensory = out[2:, :]
+        self.assertLess(float(non_sensory.min()), 0.0)
+
+    def test_false_matches_where_checkpointed(self):
+        # The checkpointed path (_forward_chunk) must honour output_rectify too.
+        model = self._build(False)
+        inp = torch.full((2, 4), 0.5, requires_grad=True)
+        out = model(inp, checkpoint_steps=2)
+        self.assertLess(float(out[2:, :].min()), 0.0)
+
+    def test_builtin_activation_changes_output_but_stays_nonnegative(self):
+        """The flag gates only the post-layer application.
+
+        The built-in activation_function applies the same gate internally, as the
+        relu of tanh(relu(slope * x + bias)), and that one is not under the flag.
+        So with the built-in activation False cannot produce negative rates -- but
+        it is not a no-op either: sub-threshold activity is no longer re-zeroed
+        after the tau integration, so it survives and accumulates across layers.
+        """
+        n, s, layers = 6, 2, 4
+        weights = np.zeros((n, n), dtype=np.float32)
+        weights[s:, s:] = 0.05  # weak, so activations land below the threshold
+        weights[s:, :s] = 0.05
+
+        def build(rectify):
+            return MultilayeredNetwork(
+                csr_matrix(weights),
+                sensory_indices=list(range(s)),
+                num_layers=layers,
+                threshold=0.01,
+                output_rectify=rectify,
+            )
+
+        inp = torch.full((s, layers), 0.02)
+        on = build(True)(inp).detach()
+        off = build(False)(inp).detach()
+        self.assertFalse(torch.equal(on, off))
+        self.assertGreater(float((on - off).abs().max()), 1e-4)
+        # never negative, despite output_rectify=False
+        self.assertGreaterEqual(float(off[s:, :].min()), 0.0)
+
+
+class TestIncomingWeightBudget(unittest.TestCase):
+    """incoming_weight_budget: a constraint on the gains, enforced by projection.
+
+    The forward path is always ``w_eff = m * w`` -- the budget never appears in
+    it. After each optimizer step ``project_incoming_budget_`` pulls any
+    non-sensory row whose incoming ``|w_eff|`` sum exceeds the budget back to it,
+    by scaling every trainable gain in that row's excess above its lower bound by
+    one common factor ``c_j``. Rows under budget are untouched, so the model is
+    exactly gain x connectome until the constraint binds.
+    """
+
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # rows are post, columns are pre. Node 0 is sensory.
+        dense = np.zeros((4, 4), dtype=np.float32)
+        dense[1, 0] = 0.4  # S -> A, pair ("S", "A")
+        dense[2, 0] = 0.6  # S -> C, pair ("S", "C")
+        dense[3, 1] = 0.4  # A -> B, pair ("A", "B")
+        dense[3, 2] = -0.3  # C -> B, pair ("C", "B"), negative: sign must survive
+        dense[3, 0] = 0.2  # S -> B, no pair declared -> frozen
+        self.dense = dense
+        self.idx_to_group = {0: "S", 1: "A", 2: "C", 3: "B"}
+        self.slope_dict = {
+            ("S", "A"): 1.0,
+            ("S", "C"): 1.0,
+            ("A", "B"): 1.0,
+            ("C", "B"): 1.0,
+        }
+
+    def _model(self, budget=1.0, dense=None, groups=None, **kwargs):
+        kwargs.setdefault("slope_dict", self.slope_dict)
+        return MultilayeredNetwork(
+            csr_matrix(self.dense if dense is None else dense),
+            sensory_indices=[0],
+            num_layers=2,
+            idx_to_group=self.idx_to_group if groups is None else groups,
+            incoming_weight_budget=budget,
+            **kwargs,
+        ).to(self.device)
+
+    @staticmethod
+    def _dense_effective(model):
+        return model.effective_weights.to_dense().detach().cpu()
+
+    def _row_l1(self, model):
+        return self._dense_effective(model).abs().sum(dim=1)
+
+    @staticmethod
+    def _set_slope(model, **by_pair):
+        with torch.no_grad():
+            for pair, value in by_pair.items():
+                pre, post = pair.split("__")
+                model.slope[model.slope_pairs.index((pre, post))] = value
+
+    @staticmethod
+    def _slope_of(model, pre, post):
+        return float(model.slope[model.slope_pairs.index((pre, post))])
+
+    # ---- forward path: w_eff = m * w, always (section B) ----
+
+    def test_forward_path_is_gain_times_connectome(self):
+        """The budget does not reparametrize the forward pass at all."""
+        model = self._model(budget=1.0)
+        self._set_slope(model, A__B=2.0, C__B=0.5)
+        w = self._dense_effective(model)
+        self.assertAlmostEqual(float(w[3, 1]), 0.4 * 2.0, places=6)
+        self.assertAlmostEqual(float(w[3, 2]), -0.3 * 0.5, places=6)
+        self.assertAlmostEqual(float(w[1, 0]), 0.4 * 1.0, places=6)
+
+    def test_effective_weights_identical_with_and_without_budget(self):
+        capped = self._model(budget=1.0)
+        uncapped = self._model(budget=None)
+        for model in (capped, uncapped):
+            self._set_slope(model, A__B=1.5, C__B=0.5, S__A=2.0, S__C=0.25)
+        np.testing.assert_allclose(
+            self._dense_effective(capped).numpy(),
+            self._dense_effective(uncapped).numpy(),
+            atol=1e-6,
+        )
+
+    def test_frozen_edges_keep_connectome_magnitude(self):
+        model = self._model(budget=1.0)
+        self._set_slope(model, A__B=5.0)
+        model.project_incoming_budget_()
+        self.assertAlmostEqual(float(self._dense_effective(model)[3, 0]), 0.2, places=6)
+
+    def test_signs_are_preserved_by_the_projection(self):
+        model = self._model(budget=1.0)
+        self._set_slope(model, A__B=5.0)
+        model.project_incoming_budget_()
+        w = self._dense_effective(model)
+        self.assertGreater(float(w[3, 1]), 0.0)
+        self.assertLess(float(w[3, 2]), 0.0)
+
+    def test_default_slope_bounds_are_zero_to_fifty(self):
+        model = self._model(budget=1.0)
+        np.testing.assert_allclose(
+            model.slope_lower_bound.cpu().numpy(), np.zeros(4), atol=0
+        )
+        np.testing.assert_allclose(
+            model.slope_upper_bound.cpu().numpy(), np.full(4, 50.0), atol=0
+        )
+
+    # ---- the projection (section C) ----
+
+    def test_projection_is_a_noop_below_the_cap(self):
+        """Row 3 sits at 0.2 + 0.4 + 0.3 = 0.9, under a budget of 1.0."""
+        model = self._model(budget=1.0)
+        before = model.slope.detach().clone()
+        scale = model.project_incoming_budget_()
+        self.assertTrue(torch.allclose(model.slope, before))
+        np.testing.assert_allclose(scale.cpu().numpy(), np.ones(4), atol=1e-6)
+        np.testing.assert_allclose(self._row_l1(model).numpy()[1:], [0.4, 0.6, 0.9], atol=1e-6)
+
+    def test_projection_lands_the_row_exactly_on_the_budget(self):
+        model = self._model(budget=1.0)
+        self._set_slope(model, A__B=2.0)  # row 3 -> 0.2 + 0.8 + 0.3 = 1.3
+        self.assertAlmostEqual(float(self._row_l1(model)[3]), 1.3, places=6)
+        scale = model.project_incoming_budget_()
+        self.assertAlmostEqual(float(self._row_l1(model)[3]), 1.0, places=5)
+        # c_3 = (1.0 - 0.2) / (0.4*2 + 0.3*1) = 0.8 / 1.1
+        self.assertAlmostEqual(float(scale[3]), 0.8 / 1.1, places=5)
+
+    def test_projection_is_ratio_neutral(self):
+        """Reallocation between edges is the gradient's job, not the budget's."""
+        model = self._model(budget=1.0)
+        self._set_slope(model, A__B=3.0, C__B=1.5)
+        ratio_before = self._slope_of(model, "A", "B") / self._slope_of(model, "C", "B")
+        model.project_incoming_budget_()
+        ratio_after = self._slope_of(model, "A", "B") / self._slope_of(model, "C", "B")
+        self.assertAlmostEqual(ratio_before, ratio_after, places=5)
+
+    def test_projection_leaves_rows_under_budget_alone(self):
+        """Row 1 is far under budget, so its gain must not follow row 3 down."""
+        model = self._model(budget=1.0)
+        self._set_slope(model, A__B=5.0, S__A=2.0)
+        model.project_incoming_budget_()
+        self.assertAlmostEqual(self._slope_of(model, "S", "A"), 2.0, places=6)
+        self.assertLess(self._slope_of(model, "A", "B"), 5.0)
+
+    def test_projection_respects_nonzero_lower_bounds(self):
+        dense = np.zeros((3, 3), dtype=np.float32)
+        dense[1, 0] = 0.5  # S -> A, pair ("S", "A")
+        dense[2, 1] = 0.4  # A -> B, pair ("A", "B")
+        dense[2, 0] = 0.2  # S -> B, frozen
+        groups = {0: "S", 1: "A", 2: "B"}
+        model = self._model(
+            budget=1.0,
+            dense=dense,
+            groups=groups,
+            slope_dict={("S", "A"): 1.0, ("A", "B"): 1.0},
+            slope_bounds={("A", "B"): (0.5, 10.0)},
+        )
+        self._set_slope(model, A__B=5.0)  # row 2 -> 0.2 + 2.0 = 2.2
+        model.project_incoming_budget_()
+        # c = (1.0 - 0.2 - 0.4*0.5) / (0.4*(5.0 - 0.5)) = 0.6 / 1.8
+        # m  = 0.5 + (5.0 - 0.5) * 1/3 = 2.0
+        self.assertAlmostEqual(self._slope_of(model, "A", "B"), 2.0, places=5)
+        self.assertAlmostEqual(float(self._row_l1(model)[2]), 1.0, places=5)
+
+    def test_projection_keeps_slopes_inside_their_bounds(self):
+        dense = np.zeros((3, 3), dtype=np.float32)
+        dense[1, 0] = 0.5
+        dense[2, 1] = 0.4
+        dense[2, 0] = 0.2
+        groups = {0: "S", 1: "A", 2: "B"}
+        model = self._model(
+            budget=1.0,
+            dense=dense,
+            groups=groups,
+            slope_dict={("S", "A"): 1.0, ("A", "B"): 1.0},
+            slope_bounds={("A", "B"): (0.5, 10.0)},
+        )
+        for value in (0.5, 2.0, 5.0, 10.0):
+            with self.subTest(slope=value):
+                self._set_slope(model, A__B=value)
+                model.project_incoming_budget_()
+                slope = self._slope_of(model, "A", "B")
+                self.assertGreaterEqual(slope, 0.5 - 1e-6)
+                self.assertLessEqual(slope, 10.0 + 1e-6)
+
+    def test_pair_takes_the_minimum_scale_over_its_rows(self):
+        """One pair, two post nodes: the tighter row decides the whole pair."""
+        dense = np.zeros((4, 4), dtype=np.float32)
+        dense[1, 0] = 0.5  # S -> P, pair ("S", "P")
+        dense[2, 1] = 0.2  # P -> Q (node 2), pair ("P", "Q")
+        dense[3, 1] = 0.8  # P -> Q (node 3), same pair
+        groups = {0: "S", 1: "P", 2: "Q", 3: "Q"}
+        model = self._model(
+            budget=1.0,
+            dense=dense,
+            groups=groups,
+            slope_dict={("S", "P"): 1.0, ("P", "Q"): 1.0},
+        )
+        self._set_slope(model, P__Q=2.0)  # row 2 -> 0.4 (fine), row 3 -> 1.6 (over)
+        scale = model.project_incoming_budget_()
+        self.assertAlmostEqual(float(scale[2]), 1.0, places=6)
+        self.assertAlmostEqual(float(scale[3]), 1.0 / 1.6, places=5)
+        # the pair takes row 3's factor, so row 2 ends well under its own budget
+        self.assertAlmostEqual(self._slope_of(model, "P", "Q"), 1.25, places=5)
+        self.assertAlmostEqual(float(self._row_l1(model)[3]), 1.0, places=5)
+        self.assertAlmostEqual(float(self._row_l1(model)[2]), 0.25, places=5)
+
+    def test_one_pass_brings_every_row_under_budget(self):
+        model = self._model(budget=1.0)
+        self._set_slope(model, S__A=40.0, S__C=40.0, A__B=40.0, C__B=40.0)
+        model.project_incoming_budget_()
+        row_l1 = self._row_l1(model)[1:]
+        self.assertTrue(
+            bool((row_l1 <= 1.0 + 1e-5).all()), f"row L1 {row_l1.tolist()} over 1.0"
+        )
+
+    def test_projection_is_idempotent(self):
+        model = self._model(budget=1.0)
+        self._set_slope(model, A__B=7.0, C__B=3.0)
+        model.project_incoming_budget_()
+        once = model.slope.detach().clone()
+        scale = model.project_incoming_budget_()
+        self.assertTrue(torch.allclose(model.slope, once, atol=1e-6))
+        np.testing.assert_allclose(scale.cpu().numpy(), np.ones(4), atol=1e-5)
+
+    def test_projection_returns_none_without_a_budget(self):
+        self.assertIsNone(self._model(budget=None).project_incoming_budget_())
+
+    def test_projection_clamps_an_out_of_box_slope_first(self):
+        """Standalone it must be correct even if the raw slope drifted outside."""
+        model = self._model(budget=1.0)
+        self._set_slope(model, A__B=-4.0, C__B=80.0)  # both outside (0, 50)
+        model.project_incoming_budget_()
+        self.assertGreaterEqual(self._slope_of(model, "A", "B"), 0.0)
+        self.assertLessEqual(self._slope_of(model, "C", "B"), 50.0)
+        self.assertLessEqual(float(self._row_l1(model)[3]), 1.0 + 1e-5)
+
+    def test_sensory_rows_are_exempt(self):
+        """A sensory node's state is written by the input, so its row is exempt."""
+        dense = self.dense.copy()
+        dense[0, 1] = 3.0  # A -> S, lands on the sensory row; pair ("A", "S")
+        slope_dict = dict(self.slope_dict)
+        slope_dict[("A", "S")] = 1.0
+        model = self._model(budget=1.0, dense=dense, slope_dict=slope_dict)
+        self.assertGreater(float(self._row_l1(model)[0]), 1.0)
+        scale = model.project_incoming_budget_()
+        self.assertAlmostEqual(float(scale[0]), 1.0, places=6)
+        self.assertAlmostEqual(self._slope_of(model, "A", "S"), 1.0, places=6)
+
+    def test_self_edges_count_toward_the_row(self):
+        dense = np.zeros((3, 3), dtype=np.float32)
+        dense[1, 0] = 0.5  # S -> A
+        dense[1, 1] = 0.6  # A -> A, a self edge on the same row
+        groups = {0: "S", 1: "A", 2: "A"}
+        model = self._model(
+            budget=1.0,
+            dense=dense,
+            groups=groups,
+            slope_dict={("S", "A"): 0.5, ("A", "A"): 0.5},
+        )
+        self._set_slope(model, A__A=1.0, S__A=1.0)  # row 1 -> 0.5 + 0.6 = 1.1, over
+        model.project_incoming_budget_()
+        self.assertAlmostEqual(float(self._row_l1(model)[1]), 1.0, places=5)
+        self.assertAlmostEqual(self._slope_of(model, "A", "A"), 1.0 / 1.1, places=5)
+
+    def test_frozen_row_l1_buffer(self):
+        frozen = self._model().frozen_row_l1.detach().cpu().numpy()
+        # only post 3 has a frozen incoming edge (S -> B, 0.2)
+        np.testing.assert_allclose(frozen, [0.0, 0.0, 0.0, 0.2], atol=1e-6)
+
+    def test_forward_pass_is_finite_under_budget(self):
+        model = self._model(budget=1.0)
+        out = model(torch.full((1, 2), 0.5))
+        self.assertTrue(bool(torch.isfinite(out).all()))
+
+    # ---- construction-time errors (section E) ----
+
+    def test_node_mode_raises_value_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._model(budget=1.0, slope_dict={"A": 1.5})  # cell-type keys
+        self.assertIn("pair-mode", str(ctx.exception))
+
+    def test_non_positive_budget_raises(self):
+        for bad in (0.0, -1.0):
+            with self.subTest(budget=bad):
+                with self.assertRaises(ValueError):
+                    self._model(budget=bad)
+
+    def test_divisive_normalization_raises_not_implemented(self):
+        dense = np.zeros((4, 4), dtype=np.float32)
+        dense[1, 0] = 0.4
+        dense[3, 1] = -0.5  # A -> B, negative so it is a valid divnorm edge
+        dense[3, 2] = -0.3
+        with self.assertRaises(NotImplementedError):
+            MultilayeredNetwork(
+                csr_matrix(dense),
+                sensory_indices=[0],
+                num_layers=2,
+                idx_to_group=self.idx_to_group,
+                slope_dict={("S", "A"): 1.0},
+                divisive_normalization={"A": ["B"]},
+                incoming_weight_budget=1.0,
+            )
+
+    def test_infeasible_row_raises(self):
+        """F_j plus the trainable edges' lower-bound |w| already over budget."""
+        with self.assertRaises(ValueError) as ctx:
+            self._model(
+                budget=0.5,
+                slope_bounds={("A", "B"): (1.0, 10.0), ("C", "B"): (1.0, 10.0)},
+            )
+        # row 3: 0.2 frozen + 0.4*1 + 0.3*1 = 0.9 > 0.5, unreachable at any gain
+        self.assertIn("infeasible", str(ctx.exception))
+        self.assertIn("3", str(ctx.exception))
+
+    def test_infeasible_reduces_to_frozen_mass_over_budget_at_zero_lower_bounds(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._model(budget=0.15)  # row 3's frozen 0.2 alone exceeds it
+        self.assertIn("infeasible", str(ctx.exception))
+
+    def test_row_with_no_trainable_edges_at_or_over_budget_raises(self):
+        dense = np.zeros((3, 3), dtype=np.float32)
+        dense[1, 0] = 0.5  # S -> A, trainable
+        dense[2, 0] = 1.0  # S -> B, frozen and exactly at the budget
+        groups = {0: "S", 1: "A", 2: "B"}
+        with self.assertRaises(ValueError) as ctx:
+            self._model(
+                budget=1.0,
+                dense=dense,
+                groups=groups,
+                slope_dict={("S", "A"): 1.0},
+            )
+        self.assertIn("no trainable incoming edges", str(ctx.exception))
+
+    def test_row_with_no_trainable_edges_under_budget_is_fine(self):
+        dense = np.zeros((3, 3), dtype=np.float32)
+        dense[1, 0] = 0.5
+        dense[2, 0] = 0.9  # frozen, under budget: nothing to enforce, no error
+        groups = {0: "S", 1: "A", 2: "B"}
+        model = self._model(
+            budget=1.0, dense=dense, groups=groups, slope_dict={("S", "A"): 1.0}
+        )
+        self.assertAlmostEqual(float(self._row_l1(model)[2]), 0.9, places=6)
+
+    def test_initial_slopes_over_budget_raise(self):
+        """Feasible but starting over the cap: the projection only runs in training."""
+        with self.assertRaises(ValueError) as ctx:
+            self._model(budget=1.0, slope_dict={**self.slope_dict, ("A", "B"): 2.0})
+        self.assertIn("initial slopes", str(ctx.exception))
+
+    def test_row_exactly_at_budget_constructs(self):
+        model = self._model(budget=0.9)  # row 3 is exactly 0.9 at m = 1
+        self.assertAlmostEqual(float(self._row_l1(model)[3]), 0.9, places=6)
+
+    def test_sensory_rows_are_exempt_from_construction_errors(self):
+        dense = self.dense.copy()
+        dense[0, 1] = 9.0  # a huge edge onto the sensory row
+        slope_dict = dict(self.slope_dict)
+        slope_dict[("A", "S")] = 1.0
+        model = self._model(budget=1.0, dense=dense, slope_dict=slope_dict)
+        self.assertGreater(float(self._row_l1(model)[0]), 1.0)
+
+    # ---- weight-aware update scales (section G) ----
+
+    def test_update_scale_defaults_to_median_abs_weight_under_a_budget(self):
+        model = self._model(budget=1.0)
+        scales = {
+            pair: float(model.slope_update_scale[i])
+            for i, pair in enumerate(model.slope_pairs)
+        }
+        self.assertAlmostEqual(scales[("S", "A")], 0.4, places=6)
+        self.assertAlmostEqual(scales[("S", "C")], 0.6, places=6)
+        self.assertAlmostEqual(scales[("A", "B")], 0.4, places=6)
+        self.assertAlmostEqual(scales[("C", "B")], 0.3, places=6)
+
+    def test_update_scale_defaults_to_one_without_a_budget(self):
+        model = self._model(budget=None)
+        np.testing.assert_allclose(
+            model.slope_update_scale.cpu().numpy(), np.ones(4), atol=1e-6
+        )
+
+    def test_explicit_update_scale_overrides_the_median_default(self):
+        model = self._model(budget=1.0, slope_update_scales={("A", "B"): 0.05})
+        scales = {
+            pair: float(model.slope_update_scale[i])
+            for i, pair in enumerate(model.slope_pairs)
+        }
+        self.assertAlmostEqual(scales[("A", "B")], 0.05, places=6)
+        self.assertAlmostEqual(scales[("C", "B")], 0.3, places=6)
+
+    def test_update_scale_median_over_several_edges_of_one_pair(self):
+        dense = np.zeros((4, 4), dtype=np.float32)
+        dense[2, 1] = 0.1  # P -> Q (node 2)
+        dense[3, 1] = 0.3  # P -> Q (node 3), same pair
+        dense[1, 0] = 0.5  # S -> P
+        groups = {0: "S", 1: "P", 2: "Q", 3: "Q"}
+        model = self._model(
+            budget=1.0,
+            dense=dense,
+            groups=groups,
+            slope_dict={("S", "P"): 1.0, ("P", "Q"): 1.0},
+        )
+        idx = model.slope_pairs.index(("P", "Q"))
+        self.assertAlmostEqual(float(model.slope_update_scale[idx]), 0.2, places=6)
+
+    # ---- train_model integration (section H) ----
+
+    def test_train_model_keeps_the_row_under_budget_and_reports(self):
+        weights = np.zeros((3, 3), dtype=np.float32)
+        weights[1, 0] = 0.5  # S -> A, trainable
+        weights[2, 1] = 0.4  # A -> B, trainable
+        weights[2, 0] = 0.2  # S -> B, frozen
+        model = LinearNetwork(
+            csr_matrix(weights),
+            sensory_indices=[0],
+            num_layers=3,
+            threshold=0.0,
+            tanh_steepness=1.0,
+            tau=1.0,
+            idx_to_group={0: "S", 1: "A", 2: "B"},
+            bias_transform="identity",
+            sensory_input_mode="replace",
+            slope_dict={("S", "A"): 1.0, ("A", "B"): 1.0},
+            incoming_weight_budget=1.0,
+        ).to(self.device)
+        inputs = torch.ones((1, 1, 3), device=self.device)
+        # an unreachable target, to push the gains up against the cap
+        targets = pd.DataFrame(
+            [
+                {"batch": 0, "neuron_idx": 2, "layer": layer, "value": 50.0}
+                for layer in range(3)
+            ]
+        )
+        _, history, *_ = train_model(
+            model,
+            inputs,
+            targets,
+            num_epochs=40,
+            learning_rate=0.5,
+            param_reg_lambda=0.0,
+            wandb=False,
+            train_fraction=1.0,
+            train_slopes=True,
+            train_biases=False,
+            train_divisive_strength=False,
+            train_tau=False,
+            checkpoint_steps=0,
+        )
+        row_l1 = model.effective_weights.to_dense().detach().cpu().abs().sum(dim=1)
+        self.assertLessEqual(float(row_l1[2]), 1.0 + 1e-5)
+        projections = history["budget_projections"]
+        self.assertIn(2, projections)
+        self.assertGreater(projections[2]["steps"], 0)
+        self.assertLess(projections[2]["min_scale"], 1.0)
+        # the sensory row and the uncapped row 1 never fired
+        self.assertNotIn(0, projections)
+
+    def test_train_model_reports_nothing_when_the_budget_never_binds(self):
+        model = self._model(budget=1.0)
+        inputs = torch.zeros((1, 1, 2), device=self.device)
+        targets = pd.DataFrame([{"batch": 0, "neuron_idx": 3, "layer": 0, "value": 0.0}])
+        _, history, *_ = train_model(
+            model,
+            inputs,
+            targets,
+            num_epochs=3,
+            learning_rate=1e-4,
+            param_reg_lambda=0.0,
+            wandb=False,
+            train_fraction=1.0,
+            train_slopes=True,
+            train_biases=False,
+            train_divisive_strength=False,
+            train_tau=False,
+            checkpoint_steps=0,
+        )
+        self.assertEqual(history["budget_projections"], {})
+
+
+class TestTauLogScale(unittest.TestCase):
+    """tau_log_scale stores log(tau) so optimiser steps act multiplicatively."""
+
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.weights = csr_matrix(np.array([[0.0, 0.0], [0.5, 0.0]], dtype=np.float32))
+        self.idx_to_group = {0: "A", 1: "B"}
+
+    def _model(self, log_scale, tau_dict=None):
+        return MultilayeredNetwork(
+            self.weights,
+            sensory_indices=[0],
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+            tau_dict={"A": 4.0, "B": 16.0} if tau_dict is None else tau_dict,
+            tau_log_scale=log_scale,
+        ).to(self.device)
+
+    def test_param_stores_log_but_effective_tau_is_linear(self):
+        model = self._model(True)
+        np.testing.assert_allclose(
+            model.tau_param.detach().cpu().numpy(), np.log([4.0, 16.0]), rtol=1e-5
+        )
+        np.testing.assert_allclose(
+            model.effective_tau.detach().cpu().numpy(), [4.0, 16.0], rtol=1e-5
+        )
+
+    def test_linear_scale_stores_tau_directly(self):
+        model = self._model(False)
+        np.testing.assert_allclose(
+            model.tau_param.detach().cpu().numpy(), [4.0, 16.0], rtol=1e-6
+        )
+        np.testing.assert_allclose(
+            model.effective_tau.detach().cpu().numpy(), [4.0, 16.0], rtol=1e-6
+        )
+
+    def test_equal_step_is_multiplicative_in_log_scale(self):
+        model = self._model(True)
+        with torch.no_grad():
+            model.tau_param.add_(float(np.log(2.0)))
+        np.testing.assert_allclose(
+            model.effective_tau.detach().cpu().numpy(), [8.0, 32.0], rtol=1e-5
+        )
+
+    def test_equal_step_is_additive_in_linear_scale(self):
+        model = self._model(False)
+        step = float(np.log(2.0))
+        with torch.no_grad():
+            model.tau_param.add_(step)
+        np.testing.assert_allclose(
+            model.effective_tau.detach().cpu().numpy(),
+            [4.0 + step, 16.0 + step],
+            rtol=1e-5,
+        )
+
+    def test_effective_tau_clamped_at_one(self):
+        model = self._model(True, tau_dict={"A": 0.25, "B": 0.5})
+        np.testing.assert_allclose(
+            model.effective_tau.detach().cpu().numpy(), [1.0, 1.0], rtol=1e-6
+        )
+
+
+class TestRescaleSlopeUpdatesInTrainModel(unittest.TestCase):
+    """train_model(rescale_slope_updates=True) routes the optimizer step through
+    rescale_slope_update_, dividing it by the per-pair slope_update_scale."""
+
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        dense = np.zeros((3, 3), dtype=np.float32)
+        dense[1, 0] = 0.5  # S -> A
+        dense[2, 1] = 0.5  # A -> B
+        self.weights = csr_matrix(dense)
+        self.idx_to_group = {0: "S", 1: "A", 2: "B"}
+        self.scale = 0.1
+        self.targets = pd.DataFrame(
+            [{"batch": 0, "neuron_idx": 2, "layer": 1, "value": 0.6}]
+        )
+        self.inputs = torch.full((1, 1, 2), 0.8, device=self.device)
+
+    def _train(self, rescale):
+        torch.manual_seed(0)
+        model = MultilayeredNetwork(
+            self.weights,
+            sensory_indices=[0],
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+            slope_dict={("S", "A"): 1.0, ("A", "B"): 1.0},
+            slope_update_scales={("S", "A"): self.scale, ("A", "B"): self.scale},
+        ).to(self.device)
+        before = model.slope.detach().clone()
+        train_model(
+            model,
+            self.inputs,
+            self.targets,
+            num_epochs=1,
+            wandb=False,
+            train_fraction=1.0,
+            checkpoint_steps=0,
+            param_reg_lambda=0.0,
+            learning_rate=0.05,
+            seed=3,
+            train_slopes=True,
+            train_biases=False,
+            train_divisive_strength=False,
+            train_tau=False,
+            rescale_slope_updates=rescale,
+        )
+        return (model.slope.detach() - before).cpu().numpy()
+
+    def test_rescaled_step_is_plain_step_divided_by_scale(self):
+        plain = self._train(False)
+        rescaled = self._train(True)
+        self.assertGreater(float(np.abs(plain).max()), 0.0)
+        np.testing.assert_allclose(rescaled, plain / self.scale, rtol=1e-4, atol=1e-7)
 
 
 if __name__ == "__main__":
