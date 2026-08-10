@@ -23,7 +23,7 @@ Sections:
   (variable projection), its regularisers, and
   :func:`make_affine_readout_loss`, a ``train_model``-compatible loss factory.
 - **Windows & metrics** — transition-window scoring masks, long-format target
-  builders, window extraction and plateau means per stimulus level.
+  builders and window extraction.
 - **Persistence & tables** — :func:`save_fit` / :func:`load_fit` /
   :func:`rebuild_network` for a self-contained fitted-model round-trip, plus
   tidy parameter and trace tables.
@@ -67,11 +67,9 @@ __all__ = [
     "log_trace",
     "trace_to_input_tensor",
     # windows & metrics
-    "resolve_brightness_trace",
     "score_mask_for_transition_windows",
     "build_raw_window_targets",
     "extract_transition_windows",
-    "plateau_means_by_luminance",
     "r2",
     # persistence & tables
     "save_fit",
@@ -1044,11 +1042,6 @@ def trace_to_input_tensor(trace, device=None) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 
-def level_key(value) -> float:
-    """Canonical dict key for a stimulus level (rounded to 7 decimals)."""
-    return float(np.round(float(value), 7))
-
-
 def score_mask_for_transition_windows(
     n_samples: int, transition_idx, window_steps: int
 ) -> np.ndarray:
@@ -1167,74 +1160,6 @@ def extract_transition_windows(
         layers = list(traces) if layers is None else list(layers)
         return {layer: _one(traces[layer]) for layer in layers}
     return _one(traces)
-
-
-def resolve_brightness_trace(
-    stimulus_frames=None,
-    brightness_trace=None,
-    brightness_levels=None,
-    duration_per_level: Optional[int] = None,
-) -> np.ndarray:
-    """A 1-D nonnegative brightness trace from whichever stimulus form is given.
-
-    Accepts a ready-made trace, ``(x, y, time)`` stimulus frames (averaged over
-    space), or a sequence of levels plus a per-level duration.
-    """
-    if brightness_trace is not None:
-        brightness = np.asarray(brightness_trace, dtype=np.float32)
-    elif stimulus_frames is not None:
-        stimulus = np.asarray(stimulus_frames, dtype=np.float32)
-        if stimulus.ndim != 3:
-            raise ValueError("stimulus_frames must have shape (x, y, time).")
-        brightness = stimulus.mean(axis=(0, 1)).astype(np.float32)
-    elif brightness_levels is not None and duration_per_level is not None:
-        brightness = np.repeat(
-            np.asarray(brightness_levels, dtype=np.float32),
-            int(duration_per_level),
-        )
-    else:
-        raise ValueError(
-            "Provide brightness_trace, stimulus_frames, or brightness_levels "
-            "plus duration_per_level."
-        )
-    if brightness.ndim != 1:
-        raise ValueError("brightness trace must be 1D.")
-    if brightness.min() < -1e-7:
-        raise ValueError("brightness values must be nonnegative.")
-    return brightness.astype(np.float32)
-
-
-def plateau_means_by_luminance(
-    brightness, trace, window_steps: int, strict: bool = False
-) -> dict:
-    """Mean of the last ``window_steps`` samples of each constant-stimulus block.
-
-    Blocks are contiguous runs of constant ``brightness``; blocks shorter than
-    the window are skipped (or raise, with ``strict=True`` — right when the
-    blocks define fit targets and a silent skip would hide a data problem);
-    repeats of a level are averaged.
-
-    Returns:
-        dict: ``{level_key(level): plateau mean}``.
-    """
-    brightness = np.asarray(brightness, dtype=np.float32)
-    trace = np.asarray(trace, dtype=np.float32)
-    change_idx = np.flatnonzero(np.diff(brightness) != 0).astype(np.int64) + 1
-    starts = np.r_[0, change_idx]
-    stops = np.r_[change_idx, brightness.size]
-    values = {}
-    for start, stop in zip(starts, stops):
-        if stop - start < int(window_steps):
-            if strict:
-                raise ValueError(
-                    "window_steps is longer than at least one constant-"
-                    "stimulus block."
-                )
-            continue
-        luminance = level_key(brightness[int(start)])
-        plateau = float(np.mean(trace[int(stop) - int(window_steps) : int(stop)]))
-        values.setdefault(luminance, []).append(plateau)
-    return {luminance: float(np.mean(rows)) for luminance, rows in values.items()}
 
 
 def r2(y, y_pred) -> float:

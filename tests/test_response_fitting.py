@@ -810,32 +810,6 @@ class TestWindowsAndMetrics:
         as_frame = rf.extract_transition_windows(pd.DataFrame({"A": trace}), [2], 3)
         np.testing.assert_allclose(as_frame["A"][0], [2, 3, 4])
 
-    def test_plateau_means_by_luminance(self):
-        brightness = np.repeat([0.2, 0.8, 0.2], 10)
-        trace = np.repeat([1.0, 3.0, 2.0], 10)
-        plateaus = rf.plateau_means_by_luminance(brightness, trace, 5)
-        # repeated 0.2 blocks average: (1.0 + 2.0) / 2
-        assert plateaus[rf.level_key(0.2)] == pytest.approx(1.5)
-        assert plateaus[rf.level_key(0.8)] == pytest.approx(3.0)
-        # a too-short block is skipped by default but raises in strict mode
-        assert rf.plateau_means_by_luminance(brightness, trace, 15) == {}
-        with pytest.raises(ValueError, match="block"):
-            rf.plateau_means_by_luminance(brightness, trace, 15, strict=True)
-
-    def test_resolve_brightness_trace(self):
-        trace = rf.resolve_brightness_trace(
-            brightness_levels=[0.2, 0.8], duration_per_level=3
-        )
-        np.testing.assert_allclose(trace, [0.2, 0.2, 0.2, 0.8, 0.8, 0.8], rtol=1e-6)
-        frames = np.full((2, 2, 4), 0.5, dtype=np.float32)
-        np.testing.assert_allclose(
-            rf.resolve_brightness_trace(stimulus_frames=frames), [0.5] * 4
-        )
-        with pytest.raises(ValueError, match="Provide"):
-            rf.resolve_brightness_trace()
-        with pytest.raises(ValueError, match="nonnegative"):
-            rf.resolve_brightness_trace(brightness_trace=[-1.0, 0.0])
-
     def test_r2(self):
         y = np.array([1.0, 2.0, 3.0])
         assert rf.r2(y, y) == pytest.approx(1.0)
