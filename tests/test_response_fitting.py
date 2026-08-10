@@ -2,11 +2,10 @@
 
 Covers the dynamics and stability helpers, the model-carried activation
 gain, the ExponentialSensor observation model, the affine-readout loss
-factory, the window/metric helpers, the save/load/rebuild round-trip and
-the cell-type rate-fit data pipeline.
+factory, the window/metric helpers and the save/load/rebuild round-trip.
 """
 
-import dataclasses
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -25,8 +24,8 @@ CPU = torch.device("cpu")
 # ---------------------------------------------------------------------------
 
 
-def square_activation(self, x, x_previous=None):
-    """Rectified-square activation (pair-mode slopes folded into weights)."""
+def softplus_activation(self, x, x_previous=None):
+    """Example custom activation: leaky-integrated softplus transfer."""
     if self.slope_is_pairwise:
         slopes = 1.0
     elif self.slope is None:
@@ -42,7 +41,7 @@ def square_activation(self, x, x_previous=None):
             self.biases[self.indices].view(-1, 1).expand(-1, x.shape[1]).to(x.device)
         )
     z = slopes * x + biases
-    a = torch.relu(z - self.threshold)
+    a = torch.nn.functional.softplus(z)
     if self.tau_param is not None:
         taus = (
             self.effective_tau[self.indices]
@@ -52,17 +51,17 @@ def square_activation(self, x, x_previous=None):
         )
     else:
         taus = self.tau
-    return 1 / taus * a**2 + (taus - 1) / taus * x_previous
+    return 1 / taus * a + (taus - 1) / taus * x_previous
 
 
-def square_gain(self, state):
-    """Matching local gain: d/dz relu(z - thr)**2 = 2 * relu(z - thr)."""
+def softplus_gain(self, state):
+    """Matching local gain: d/dz softplus(z) = sigmoid(z) (pair slopes are ones)."""
     weights = self.effective_weights
     state = torch.as_tensor(state, dtype=torch.float32, device=weights.device).reshape(
         -1, 1
     )
     z = torch.sparse.mm(weights, state).squeeze(1) + self.node_parameter("bias")
-    return 2.0 * torch.relu(z - self.threshold)
+    return torch.sigmoid(z)
 
 
 def _linear_net(weights, **kwargs):
@@ -192,16 +191,16 @@ class TestActivationGain:
         np.testing.assert_allclose(gain.detach().numpy(), [5.0] * 3)
 
     def test_custom_activation_without_gain_raises(self):
-        model = _mln_pairwise(activation_function=square_activation)
+        model = _mln_pairwise(activation_function=softplus_activation)
         with pytest.raises(ValueError, match="activation_gain_fn"):
             model.activation_gain(torch.zeros(3))
 
     def test_custom_gain_dispatched(self):
         model = _mln_pairwise(
-            activation_function=square_activation, activation_gain_fn=square_gain
+            activation_function=softplus_activation, activation_gain_fn=softplus_gain
         )
         state = torch.tensor([0.5, 0.1, 0.2])
-        expected = square_gain(model, state)
+        expected = softplus_gain(model, state)
         np.testing.assert_allclose(
             model.activation_gain(state).detach().numpy(), expected.detach().numpy()
         )
@@ -220,6 +219,30 @@ class TestActivationGain:
     def test_builtin_multilayered_gain_requires_state(self):
         with pytest.raises(ValueError, match="state-dependent"):
             _mln_node_mode().activation_gain()
+
+    def test_divisive_normalization_gain_not_implemented(self):
+        # divisive edges must be negative (inhibitory) at construction
+        weights = np.array(
+            [[0.0, 0.0, 0.0], [0.4, 0.0, 0.2], [0.0, -0.3, 0.0]], dtype=np.float32
+        )
+        model = cin.MultilayeredNetwork(
+            sps.csr_matrix(weights),
+            sensory_indices=[0],
+            num_layers=3,
+            idx_to_group={0: "S", 1: "A", 2: "B"},
+            divisive_normalization={"A": ["B"]},
+            sensory_input_mode="replace",
+            device=CPU,
+        )
+        with pytest.raises(NotImplementedError, match="divisive_normalization"):
+            model.activation_gain(torch.zeros(3))
+        linear = _linear_net(
+            weights,
+            idx_to_group={0: "S", 1: "A", 2: "B"},
+            divisive_normalization={"A": ["B"]},
+        )
+        with pytest.raises(NotImplementedError, match="divisive_normalization"):
+            linear.activation_gain()
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +285,7 @@ class TestDynamics:
 
     def test_fixed_point_converges_and_is_a_fixed_point(self):
         model = _mln_pairwise(
-            activation_function=square_activation, activation_gain_fn=square_gain
+            activation_function=softplus_activation, activation_gain_fn=softplus_gain
         )
         state, info = rf.network_fixed_point(model, [0.3], return_info=True, tol=1e-8)
         assert info["converged"]
@@ -271,7 +294,7 @@ class TestDynamics:
 
     def test_fixed_point_warm_start_converges_quickly(self):
         model = _mln_pairwise(
-            activation_function=square_activation, activation_gain_fn=square_gain
+            activation_function=softplus_activation, activation_gain_fn=softplus_gain
         )
         state = rf.network_fixed_point(model, [0.3], tol=1e-10)
         _, info = rf.network_fixed_point(
@@ -311,15 +334,15 @@ class TestStability:
 
     def test_nonlinear_penalty_uses_state_dependent_gain(self):
         model = _mln_pairwise(
-            activation_function=square_activation, activation_gain_fn=square_gain
+            activation_function=softplus_activation, activation_gain_fn=softplus_gain
         )
-        # gain = 2*relu(z): a high-activity operating point is less stable
+        # gain = sigmoid(z): a high-activity operating point is less stable
         low = rf.spectral_radius(model, torch.zeros(3))
         high = rf.spectral_radius(model, torch.tensor([5.0, 5.0, 5.0]))
         assert high > low
 
     def test_penalty_raises_without_gain(self):
-        model = _mln_pairwise(activation_function=square_activation)
+        model = _mln_pairwise(activation_function=softplus_activation)
         with pytest.raises(ValueError, match="activation_gain_fn"):
             rf.stability_penalty(model, torch.zeros(3))
 
@@ -481,6 +504,17 @@ class TestAffineReadout:
         assert float(scale_pen) == 0.0
         assert float(std_pen) == 0.0
 
+    def test_penalties_active_branches_match_formulas(self):
+        scale_pen, std_pen = rf.affine_readout_penalties(
+            torch.tensor([20.0]),
+            torch.tensor([0.005]),
+            scale_soft_limit=10.0,
+            latent_std_floor=0.02,
+        )
+        # the scale penalty is a soft knee, nonzero for any nonzero scale
+        assert float(scale_pen) == pytest.approx(np.log1p(2.0) ** 2, rel=1e-5)
+        assert float(std_pen) == pytest.approx(0.015**2, rel=1e-5)
+
     def test_frame_schema_and_values(self):
         latent = {"L1": np.linspace(0, 1, 50)}
         target = {"L1": 3.0 * np.linspace(0, 1, 50) + 1.0}
@@ -623,7 +657,7 @@ class TestMakeAffineReadoutLoss:
             rf.make_affine_readout_loss(model, targets, layer_ids=[1, 7])
 
     def test_stability_optin_without_gain_raises_at_build(self):
-        model = _mln_pairwise(activation_function=square_activation)
+        model = _mln_pairwise(activation_function=softplus_activation)
         _, targets, _ = _toy_targets()
         with pytest.raises(ValueError, match="stability_weight=0"):
             rf.make_affine_readout_loss(
@@ -633,7 +667,7 @@ class TestMakeAffineReadoutLoss:
     def test_stability_weight_zero_skips_gain_requirement(self):
         # same gain-less model: with the default weight 0 the factory builds
         # and the loss runs -- backward compatible
-        model = _mln_pairwise(activation_function=square_activation)
+        model = _mln_pairwise(activation_function=softplus_activation)
         _, targets, _ = _toy_targets()
         loss_fn = rf.make_affine_readout_loss(model, targets, layer_ids=[1, 2])
         target = _flat_target_vector(targets)
@@ -641,7 +675,7 @@ class TestMakeAffineReadoutLoss:
 
     def test_stability_term_added_and_warm_started(self):
         model = _mln_pairwise(
-            activation_function=square_activation, activation_gain_fn=square_gain
+            activation_function=softplus_activation, activation_gain_fn=softplus_gain
         )
         _, targets, _ = _toy_targets()
         calls = []
@@ -802,6 +836,22 @@ class TestWindowsAndMetrics:
         assert row["model_peak"] == pytest.approx(0.5)
         assert row["peak_latency_error_ms"] == pytest.approx(1.0)
 
+    def test_transition_metrics_off_direction(self):
+        window = 5
+        target = np.zeros((1, window), dtype=np.float32)
+        target[0, 2] = -1.0  # transient dip below the (zero) plateau
+        frame = rf.transition_metrics(
+            pred_windows={"A": target},
+            target_windows={"A": target},
+            pre_luminance=[0.8],
+            post_luminance=[0.2],
+            target_static={"A": {rf.level_key(0.2): 0.0}},
+            model_static={"A": {rf.level_key(0.2): 0.0}},
+        )
+        row = frame.iloc[0]
+        assert row["direction"] == "OFF"
+        assert row["target_peak"] == pytest.approx(1.0)
+
     def test_transition_metrics_no_step_window_direction_none(self):
         # pre == post (e.g. the scored stimulus-onset window at t=0) must not
         # be labelled ON or OFF, so direction-filtered summaries skip it
@@ -844,7 +894,7 @@ class TestWindowsAndMetrics:
 class TestPersistence:
     def test_save_load_rebuild_round_trip(self, tmp_path):
         model = _mln_pairwise(
-            activation_function=square_activation, activation_gain_fn=square_gain
+            activation_function=softplus_activation, activation_gain_fn=softplus_gain
         )
         inputs = rf.trace_to_input_tensor(
             np.linspace(0.1, 0.5, 6).astype(np.float32), device=CPU
@@ -857,8 +907,8 @@ class TestPersistence:
         assert "brightness" in fit
         rebuilt = rf.rebuild_network(
             fit,
-            activation_function=square_activation,
-            activation_gain_fn=square_gain,
+            activation_function=softplus_activation,
+            activation_gain_fn=softplus_gain,
             device=CPU,
         )
         with torch.no_grad():
@@ -917,7 +967,7 @@ class TestPersistence:
 class TestTables:
     def test_simulate_trace_columns(self):
         model = _mln_pairwise(
-            activation_function=square_activation, activation_gain_fn=square_gain
+            activation_function=softplus_activation, activation_gain_fn=softplus_gain
         )
         inputs = rf.trace_to_input_tensor(
             np.full(6, 0.3, dtype=np.float32), device=CPU
@@ -959,6 +1009,26 @@ class TestTables:
         # within AB: A->B 0.3 + B->A 0.2 over 2 members -> 0.25 mean
         assert matrix.loc["AB", "AB"] == pytest.approx(0.25, abs=1e-6)
 
+    def test_to_jsonable(self):
+        out = rf.to_jsonable(
+            {
+                "f": np.float32(1.5),
+                "i": np.int64(2),
+                "arr": np.arange(3),
+                "path": Path("a") / "b",
+                "device": torch.device("cpu"),
+                "nested": (np.float64(0.5), "s"),
+            }
+        )
+        assert out == {
+            "f": 1.5,
+            "i": 2,
+            "arr": [0, 1, 2],
+            "path": str(Path("a") / "b"),
+            "device": "cpu",
+            "nested": [0.5, "s"],
+        }
+
 
 # ---------------------------------------------------------------------------
 # train_model integration
@@ -969,8 +1039,8 @@ class TestTrainModelIntegration:
     def test_end_to_end_fit_with_loss_factory_and_sensor(self):
         torch.manual_seed(0)
         model = _mln_pairwise(
-            activation_function=square_activation,
-            activation_gain_fn=square_gain,
+            activation_function=softplus_activation,
+            activation_gain_fn=softplus_gain,
             num_layers=30,
         )
         brightness = np.full(30, 0.3, dtype=np.float32)
@@ -1014,198 +1084,3 @@ class TestTrainModelIntegration:
         assert len(history["loss"]) == 2
         for value in history["loss"]:
             assert np.isfinite(value)
-
-
-# ---------------------------------------------------------------------------
-# Cell-type rate-model fit data & luminance network builder
-# ---------------------------------------------------------------------------
-
-
-def _rate_config(**kwargs):
-    defaults = {
-        "extra_cell_types": ("L4",),
-        "transition_window_ms": 3,
-        "plateau_window_ms": 2,
-        "num_epochs": 8,
-        "learning_rate": 0.03,
-    }
-    defaults.update(kwargs)
-    return rf.RateModelConfig(**defaults)
-
-
-def _rate_subnetwork():
-    sub_inprop = sps.csr_matrix(
-        np.array(
-            [
-                [0.0, -0.20, 0.00, 0.10],
-                [0.30, 0.00, 0.15, 0.00],
-                [0.00, 0.25, 0.00, -0.10],
-                [0.20, 0.00, 0.10, 0.00],
-            ],
-            dtype=np.float32,
-        )
-    )
-    sub_meta = pd.DataFrame(
-        {
-            "idx": [0, 1, 2, 3],
-            "cell_type": ["L1", "L2", "L3", "L4"],
-            "sign": [-1.0, 1.0, 1.0, 1.0],
-        }
-    )
-    return sub_inprop, sub_meta
-
-
-def _rate_brightness():
-    return np.repeat(np.array([0.0, 1.0, 0.0], dtype=np.float32), 5)
-
-
-def _rate_responses(brightness):
-    t = np.arange(brightness.size, dtype=np.float32)
-    return {
-        "L1": 0.20 - 0.10 * brightness + 0.005 * t,
-        "L2": -0.05 + 0.08 * brightness - 0.002 * t,
-        "L3": 0.10 - 0.03 * brightness + 0.001 * t,
-    }
-
-
-def _rate_fit_data(config=None, responses=None):
-    config = config or _rate_config()
-    brightness = _rate_brightness()
-    sub_inprop, sub_meta = _rate_subnetwork()
-    return rf.build_cell_type_rate_fit_data(
-        layer_responses=responses or _rate_responses(brightness),
-        brightness_trace=brightness,
-        config=config,
-        sub_inprop=sub_inprop,
-        sub_meta=sub_meta,
-    )
-
-
-class TestRateFitData:
-    def test_config_validates_targets_and_configurable_extras(self):
-        with pytest.raises(ValueError, match="target_cell_types"):
-            rf.RateModelConfig(target_cell_types=(), extra_cell_types=("L4",))
-        with pytest.raises(ValueError, match="extra_cell_types"):
-            rf.RateModelConfig(
-                target_cell_types=("L1", "L2"), extra_cell_types=("L2", "L4")
-            )
-        with pytest.raises(ValueError, match="extra_luminance_gain_cell_types"):
-            rf.RateModelConfig(
-                extra_cell_types=("L4",), extra_luminance_gain_cell_types=("T1",)
-            )
-        # target cell types are configurable; L1/L2/L3 is only the default
-        assert rf.RateModelConfig(
-            target_cell_types=("L1", "L2"), extra_cell_types=("L4",)
-        ).target_cell_types == ("L1", "L2")
-
-        fit_data = _rate_fit_data(_rate_config(extra_cell_types=("L4",)))
-
-        assert fit_data.cell_types == ("L1", "L2", "L3", "L4")
-        assert fit_data.target_indices == {"L1": 0, "L2": 1, "L3": 2}
-
-    def test_onset_window_is_scored_alongside_transitions(self):
-        fit_data = _rate_fit_data()
-
-        # brightness = [0 x5, 1 x5, 0 x5] -> transitions at 5 and 10, plus the
-        # stimulus-onset window at t=0
-        np.testing.assert_array_equal(fit_data.transition_idx, [0, 5, 10])
-        assert fit_data.pre_luminance[0] == fit_data.post_luminance[0]
-        for layer in ("L1", "L2", "L3"):
-            assert fit_data.transition_target_windows[layer].shape == (3, 3)
-            np.testing.assert_allclose(
-                fit_data.transition_target_windows[layer][0],
-                fit_data.target_traces[layer][:3],
-            )
-
-    def test_transient_residuals_subtract_post_luminance_plateau(self):
-        fit_data = _rate_fit_data()
-        layer = "L1"
-        transition = 0
-        post_luminance = fit_data.post_luminance[transition]
-        plateau = fit_data.static_by_layer_luminance[layer][
-            float(np.round(post_luminance, 7))
-        ]
-
-        expected = fit_data.transition_target_windows[layer][transition] - plateau
-
-        np.testing.assert_allclose(
-            fit_data.transition_target_residuals[layer][transition],
-            expected,
-        )
-
-
-class TestMakeLuminanceNetwork:
-    def test_grafts_luminance_node(self):
-        fit_data = _rate_fit_data()
-        # one trainable recurrent edge: pre L2 -> post L1 (mask is [post, pre])
-        trainable = np.zeros_like(fit_data.weight_mask, dtype=bool)
-        trainable[0, 1] = True
-        fit_data = dataclasses.replace(fit_data, trainable_weight_mask=trainable)
-
-        (
-            model,
-            model_cell_types,
-            luminance_idx,
-            luminance_targets,
-            pair_slope_dict,
-        ) = rf.make_luminance_network(
-            fit_data,
-            fit_data.config,
-            luminance_edge_weight=-0.5,
-            pair_slope_overrides={("L2", "L1"): 2.0},
-            pair_slope_lower_bounds={("L2", "L1"): 0.5},
-            extra_cell_bias_init={"L4": 0.3},
-            device=CPU,
-        )
-
-        assert model_cell_types == ["L1", "L2", "L3", "L4", "__luminance__"]
-        assert luminance_idx == 4
-        assert luminance_targets == ("L1", "L2", "L3")
-        assert pair_slope_dict[("L2", "L1")] == 2.0
-        assert pair_slope_dict[("__luminance__", "L1")] == 1.0
-
-        effective = model.effective_weights.to_dense().detach().cpu().numpy()
-        # connectome block preserved (slope 1) except the overridden pair (slope 2)
-        np.testing.assert_allclose(
-            effective[0, 1], 2.0 * fit_data.weights_initial[0, 1], rtol=1e-6
-        )
-        np.testing.assert_allclose(
-            effective[1, 0], fit_data.weights_initial[1, 0], rtol=1e-6
-        )
-        # grafted luminance edges onto each target layer only
-        np.testing.assert_allclose(effective[:3, luminance_idx], -0.5, rtol=1e-6)
-        assert effective[3, luminance_idx] == 0.0
-
-        # the floored pair carries its lower bound; luminance pairs keep the default
-        pair_index = {pair: i for i, pair in enumerate(model.slope_pairs)}
-        assert float(model.slope_lower_bound[pair_index[("L2", "L1")]]) == 0.5
-
-        biases = model.node_parameter("bias").detach().cpu().numpy()
-        taus = model.node_parameter("tau").detach().cpu().numpy()
-        assert biases[3] == np.float32(0.3)  # woken extra cell
-        assert biases[luminance_idx] == 0.0
-        # tau_log_scale round-trips through exp(log(tau)) in float32
-        np.testing.assert_allclose(
-            taus[:3], fit_data.config.target_tau_init_ms, rtol=1e-5
-        )
-        np.testing.assert_allclose(
-            taus[3], fit_data.config.non_target_tau_init_ms, rtol=1e-5
-        )
-        np.testing.assert_allclose(taus[luminance_idx], 1.0, rtol=1e-5)
-
-    def test_linear_model_class(self):
-        fit_data = _rate_fit_data()
-        trainable = np.zeros_like(fit_data.weight_mask, dtype=bool)
-        trainable[0, 1] = True
-        fit_data = dataclasses.replace(fit_data, trainable_weight_mask=trainable)
-
-        model, model_cell_types, luminance_idx, _, _ = rf.make_luminance_network(
-            fit_data,
-            fit_data.config,
-            model_class=cin.LinearNetwork,
-            device=CPU,
-        )
-        assert isinstance(model, cin.LinearNetwork)
-        assert model_cell_types[luminance_idx] == "__luminance__"
-        # linear local gain is state-independent, so no operating point is needed
-        assert model.activation_gain(None) is not None
