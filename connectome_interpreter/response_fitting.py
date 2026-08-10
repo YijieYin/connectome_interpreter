@@ -23,7 +23,7 @@ Sections:
   (variable projection), its regularisers, and
   :func:`make_affine_readout_loss`, a ``train_model``-compatible loss factory.
 - **Windows & metrics** — transition-window scoring masks, long-format target
-  builders, window extraction, plateau/static and transition metrics.
+  builders, window extraction and plateau means per stimulus level.
 - **Persistence & tables** — :func:`save_fit` / :func:`load_fit` /
   :func:`rebuild_network` for a self-contained fitted-model round-trip, plus
   tidy parameter and trace tables.
@@ -72,8 +72,6 @@ __all__ = [
     "build_raw_window_targets",
     "extract_transition_windows",
     "plateau_means_by_luminance",
-    "static_metrics_from_trace",
-    "transition_metrics",
     "r2",
     # persistence & tables
     "save_fit",
@@ -1237,124 +1235,6 @@ def plateau_means_by_luminance(
         plateau = float(np.mean(trace[int(stop) - int(window_steps) : int(stop)]))
         values.setdefault(luminance, []).append(plateau)
     return {luminance: float(np.mean(rows)) for luminance, rows in values.items()}
-
-
-def static_metrics_from_trace(
-    traces,
-    brightness,
-    target_static: Mapping,
-    plateau_window_steps: int,
-    layers: Optional[Sequence] = None,
-) -> pd.DataFrame:
-    """Model-vs-target steady-state (plateau) table per layer and level.
-
-    Args:
-        traces: mapping/DataFrame of model traces by layer.
-        brightness (array-like): the stimulus trace (defines the blocks).
-        target_static (Mapping): ``{layer: {level: target plateau}}``.
-        plateau_window_steps (int): plateau window length in samples.
-        layers (sequence, optional): defaults to ``target_static`` keys.
-
-    Returns:
-        pd.DataFrame: columns ``layer, luminance, target_static, model_static,
-        static_error``.
-    """
-    layers = list(target_static) if layers is None else list(layers)
-    rows = []
-    for layer in layers:
-        model_by_luminance = plateau_means_by_luminance(
-            brightness, np.asarray(traces[layer]), plateau_window_steps
-        )
-        for luminance, target in sorted(target_static[layer].items()):
-            pred = model_by_luminance[level_key(luminance)]
-            rows.append(
-                {
-                    "layer": layer,
-                    "luminance": float(luminance),
-                    "target_static": float(target),
-                    "model_static": pred,
-                    "static_error": pred - float(target),
-                }
-            )
-    return pd.DataFrame(rows)
-
-
-def absolute_peak(values):
-    """``(|peak|, index)`` of the largest-magnitude sample of ``values``."""
-    values = np.asarray(values, dtype=np.float32)
-    idx = int(np.argmax(np.abs(values)))
-    return float(abs(values[idx])), idx
-
-
-def transition_metrics(
-    pred_windows: Mapping,
-    target_windows: Mapping,
-    pre_luminance,
-    post_luminance,
-    target_static: Mapping,
-    model_static: Mapping,
-    dt_ms: float = 1.0,
-    layers: Optional[Sequence] = None,
-) -> pd.DataFrame:
-    """Per-transition fit metrics: RMSEs, residual peaks and peak latencies.
-
-    The residual is each window minus its layer's post-level plateau, so the
-    peak measures the *transient* rather than the DC step.
-
-    Args:
-        pred_windows (Mapping): ``{layer: (n_transitions, window)}`` model
-            windows.
-        target_windows (Mapping): matching target windows.
-        pre_luminance, post_luminance (array-like): stimulus level before/after
-            each transition (defines the step direction ``"up"``/``"down"``; a
-            window with ``pre == post`` — e.g. the stimulus-onset window at
-            t=0 — gets direction ``"none"``).
-        target_static (Mapping): ``{layer: {level: target plateau}}``.
-        model_static (Mapping): ``{layer: {level: model plateau}}`` (e.g. from
-            :func:`plateau_means_by_luminance`).
-        dt_ms (float): sample step, for latencies in ms.
-        layers (sequence, optional): defaults to ``pred_windows`` keys.
-
-    Returns:
-        pd.DataFrame: one row per (transition, layer).
-    """
-    layers = list(pred_windows) if layers is None else list(layers)
-    rows = []
-    for transition_number, (pre, post) in enumerate(
-        zip(np.asarray(pre_luminance), np.asarray(post_luminance)), start=1
-    ):
-        direction = "up" if post > pre else ("down" if post < pre else "none")
-        for layer in layers:
-            target = np.asarray(target_windows[layer][transition_number - 1])
-            pred = np.asarray(pred_windows[layer][transition_number - 1])
-            target_plateau = target_static[layer][level_key(post)]
-            model_plateau = model_static[layer][level_key(post)]
-            target_residual = target - target_plateau
-            model_residual = pred - model_plateau
-            target_peak, target_latency = absolute_peak(target_residual)
-            model_peak, model_latency = absolute_peak(model_residual)
-            rows.append(
-                {
-                    "layer": layer,
-                    "transition": transition_number,
-                    "pre_luminance": float(pre),
-                    "post_luminance": float(post),
-                    "direction": direction,
-                    "raw_rmse": float(np.sqrt(np.mean((pred - target) ** 2))),
-                    "residual_rmse": float(
-                        np.sqrt(np.mean((model_residual - target_residual) ** 2))
-                    ),
-                    "target_peak": target_peak,
-                    "model_peak": model_peak,
-                    "peak_amplitude_error": model_peak - target_peak,
-                    "target_peak_latency_ms": float(target_latency * dt_ms),
-                    "model_peak_latency_ms": float(model_latency * dt_ms),
-                    "peak_latency_error_ms": float(
-                        (model_latency - target_latency) * dt_ms
-                    ),
-                }
-            )
-    return pd.DataFrame(rows)
 
 
 def r2(y, y_pred) -> float:

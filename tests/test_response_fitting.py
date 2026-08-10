@@ -836,66 +836,6 @@ class TestWindowsAndMetrics:
         with pytest.raises(ValueError, match="nonnegative"):
             rf.resolve_brightness_trace(brightness_trace=[-1.0, 0.0])
 
-    def test_static_metrics_from_trace(self):
-        brightness = np.repeat([0.2, 0.8], 10)
-        traces = pd.DataFrame({"A": np.repeat([1.0, 3.0], 10)})
-        target_static = {"A": {0.2: 1.5, 0.8: 3.0}}
-        frame = rf.static_metrics_from_trace(traces, brightness, target_static, 5)
-        assert len(frame) == 2
-        row = frame[frame["luminance"] == 0.2].iloc[0]
-        assert row["static_error"] == pytest.approx(1.0 - 1.5)
-
-    def test_transition_metrics_peaks_and_direction(self):
-        window = 5
-        target = np.zeros((1, window), dtype=np.float32)
-        target[0, 2] = 1.0  # transient peak of 1 above the (zero) plateau
-        pred = np.zeros((1, window), dtype=np.float32)
-        pred[0, 3] = 0.5
-        frame = rf.transition_metrics(
-            pred_windows={"A": pred},
-            target_windows={"A": target},
-            pre_luminance=[0.2],
-            post_luminance=[0.8],
-            target_static={"A": {rf.level_key(0.8): 0.0}},
-            model_static={"A": {rf.level_key(0.8): 0.0}},
-            dt_ms=1.0,
-        )
-        row = frame.iloc[0]
-        assert row["direction"] == "up"
-        assert row["target_peak"] == pytest.approx(1.0)
-        assert row["model_peak"] == pytest.approx(0.5)
-        assert row["peak_latency_error_ms"] == pytest.approx(1.0)
-
-    def test_transition_metrics_down_direction(self):
-        window = 5
-        target = np.zeros((1, window), dtype=np.float32)
-        target[0, 2] = -1.0  # transient dip below the (zero) plateau
-        frame = rf.transition_metrics(
-            pred_windows={"A": target},
-            target_windows={"A": target},
-            pre_luminance=[0.8],
-            post_luminance=[0.2],
-            target_static={"A": {rf.level_key(0.2): 0.0}},
-            model_static={"A": {rf.level_key(0.2): 0.0}},
-        )
-        row = frame.iloc[0]
-        assert row["direction"] == "down"
-        assert row["target_peak"] == pytest.approx(1.0)
-
-    def test_transition_metrics_no_step_window_direction_none(self):
-        # pre == post (e.g. the scored stimulus-onset window at t=0) must not
-        # be labelled up or down, so direction-filtered summaries skip it
-        window = np.zeros((1, 4), dtype=np.float32)
-        frame = rf.transition_metrics(
-            pred_windows={"A": window},
-            target_windows={"A": window},
-            pre_luminance=[0.2],
-            post_luminance=[0.2],
-            target_static={"A": {rf.level_key(0.2): 0.0}},
-            model_static={"A": {rf.level_key(0.2): 0.0}},
-        )
-        assert frame.iloc[0]["direction"] == "none"
-
     def test_r2(self):
         y = np.array([1.0, 2.0, 3.0])
         assert rf.r2(y, y) == pytest.approx(1.0)
