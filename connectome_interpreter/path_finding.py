@@ -1565,6 +1565,7 @@ def el_within_n_steps(
     avg_within_connected: bool = False,
     all_connections_between_groups: bool = False,
     quiet: bool = False,
+    percentile: Optional[float] = None,
 ):
     """
     Find paths within a specified number of steps in a directed graph, starting from
@@ -1597,8 +1598,8 @@ def el_within_n_steps(
         return_raw_el (bool, optional): If True, returns the raw edges before
             grouping. Defaults to False.
         combining_method (str, optional): Method to combine inputs (outprop=False)
-            or outputs (outprop=True). Can be 'sum', 'mean', or 'median'. Defaults to
-            'mean'.
+            or outputs (outprop=True). Can be 'sum', 'mean', 'median', or
+            'percentile'. Defaults to 'mean'.
         avg_within_connected (bool, optional): If True, the weight is calculated within
             the *connected* neurons of the same group. If False, the weight is
             calculated across *all* neurons of the same group. Defaults to False.
@@ -1609,6 +1610,8 @@ def el_within_n_steps(
             function will return L1->Tm3 connections for *all* L1 and Tm3 neurons.
             Defaults to False.
         quiet (bool, optional): If True, suppresses output messages. Defaults to False.
+        percentile (float, optional): Percentile to use when `combining_method` is
+            'percentile'. Must be between 0 and 100. Defaults to None.
 
     Returns:
         pd.DataFrame or tuple:
@@ -1636,6 +1639,7 @@ def el_within_n_steps(
                 post_group,
                 avg_within_connected=avg_within_connected,
                 combining_method=combining_method,
+                percentile=percentile,
             )
         paths = filter_paths(paths, threshold, quiet=quiet)
         if paths is not None:

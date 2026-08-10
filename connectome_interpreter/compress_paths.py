@@ -1856,6 +1856,7 @@ def conn_by_path_length_data(
     combining_method: str = "mean",
     wide: bool = False,
     chunk_size: int = 2000,
+    percentile: Optional[float] = None,
 ):
     """Calculates the connectivity from all of inidx (grouped by inidx_map) to outidx
     (grouped by outidx_map)  within `n` hops, aggregated by `combining_method`. If
@@ -1877,11 +1878,13 @@ def conn_by_path_length_data(
             intermediate neurons. If None, it will be inherited from one of inidx_map
             or outidx_map (whichever is not None).
         combining_method (str, optional): Method to combine inputs or outputs. Can be
-            'mean', 'median', or 'sum'. Defaults to 'mean'.
+            'mean', 'median', 'sum', or 'percentile'. Defaults to 'mean'.
         wide (bool, optional): Whether to return the result in wide format. If False,
             the result will be in long format. Defaults to False.
         chunk_size (int, optional): The chunk size to use when processing large
             datasets. Defaults to 2000.
+        percentile (float, optional): Percentile to use when `combining_method` is
+            'percentile'. Must be between 0 and 100. Defaults to None.
 
     Returns:
         List[pd.DataFrame] | pd.DataFrame:
@@ -1934,6 +1937,7 @@ def conn_by_path_length_data(
             outidx_map,
             intermediate_group=intermediate_group,
             combining_method=combining_method,
+            percentile=percentile,
         )
 
         if paths is not None and not paths.empty:
@@ -2036,6 +2040,7 @@ def conn_by_path_length(
     combining_method: str = "mean",
     width: int = 800,
     height: int = 400,
+    percentile: Optional[float] = None,
 ):
     """Plots the connectivity from all of inidx (grouped by inidx_map) to outidx
     (grouped by outidx_map)  within `n` hops, aggregated by `combining_method`. Either
@@ -2056,9 +2061,11 @@ def conn_by_path_length(
             intermediate neurons. If None, it will be inherited from one of inidx_map or
             outidx_map (whichever is not None).
         combining_method (str, optional): Method to combine inputs or outputs. Can be
-            'mean', 'median', or 'sum'. Defaults to 'mean'.
+            'mean', 'median', 'sum', or 'percentile'. Defaults to 'mean'.
         width (int, optional): The width of the plot. Defaults to 800.
         height (int, optional): The height of the plot. Defaults to 400.
+        percentile (float, optional): Percentile to use when `combining_method` is
+            'percentile'. Must be between 0 and 100. Defaults to None.
 
     Returns:
         None:
@@ -2095,6 +2102,7 @@ def conn_by_path_length(
         outidx_map=outidx_map,
         intermediate_group=intermediate_group,
         combining_method=combining_method,
+        percentile=percentile,
     )
 
     fig = px.line(
@@ -2125,6 +2133,7 @@ def conn_by_path_length_heatmap(
     cmap="viridis",
     annot=True,
     figsize=(30, 15),
+    percentile: Optional[float] = None,
 ):
     """Display the connectivity from all of inidx (grouped by inidx_map) to outidx
     (grouped by outidx_map)  within `n` hops, aggregated by `combining_method`.
@@ -2140,12 +2149,14 @@ def conn_by_path_length_heatmap(
         inidx_map (dict): Mapping from indices to presynaptic neuron groups. Only one of
             inidx_map and outidx_map should be specified.
         combining_method (str, optional): Method to combine inputs or outputs. Can be
-            'mean', 'median', or 'sum'. Defaults to 'mean'.
+            'mean', 'median', 'sum', or 'percentile'. Defaults to 'mean'.
         cmap (str, optional): The colormap to use for the heatmap. Defaults to 'viridis'.
         annot (bool, optional): Whether to annotate the heatmap with the values.
             Defaults to True.
         figsize (tuple, optional): The size of the figure to display. Defaults to
             (30, 15).
+        percentile (float, optional): Percentile to use when `combining_method` is
+            'percentile'. Must be between 0 and 100. Defaults to None.
 
     Returns:
         None:
@@ -2172,6 +2183,7 @@ def conn_by_path_length_heatmap(
         inidx_map=inidx_map,
         outidx_map=outidx_map,
         combining_method=combining_method,
+        percentile=percentile,
     )  # list of dataframes with columns: path_length, pre, post, weight
 
     if threshold != 0:
@@ -2229,6 +2241,7 @@ def signed_conn_by_path_length_data(
     combining_method: str = "mean",
     wide: bool = True,
     quiet: bool = False,
+    percentile: Optional[float] = None,
 ):
     """Calculates the signed connectivity from all of inidx to outidx within `n` hops,
     grouped by inidx_map and outidx_map, aggregated by `combining_method`. The sign of
@@ -2250,10 +2263,12 @@ def signed_conn_by_path_length_data(
         intermediate_map (dict, optional): Mapping from indices to intermediate neuron
             groups. Defaults to None.
         combining_method (str, optional): Method to combine inputs or outputs. Can be
-            'mean', 'median', or 'sum'. Defaults to 'mean'.
+            'mean', 'median', 'sum', or 'percentile'. Defaults to 'mean'.
         wide (bool, optional): Whether to return the result in wide format. If False,
             the result will be in long format. Defaults to True.
         quiet (bool, optional): If True, suppresses progress output. Defaults to False.
+        percentile (float, optional): Percentile to use when `combining_method` is
+            'percentile'. Must be between 0 and 100. Defaults to None.
 
     Returns:
         List[pd.DataFrame], List[pd.DataFrame]:
@@ -2281,6 +2296,7 @@ def signed_conn_by_path_length_data(
             outidx_map,
             intermediate_group=intermediate_map,
             combining_method=combining_method,
+            percentile=percentile,
         )
 
         if paths is None or paths.empty:
@@ -2751,6 +2767,7 @@ def effconn_without_loops(
     root: bool = False,
     remove_loop_after_grouping: bool = True,
     quiet: bool = False,
+    percentile: Optional[float] = None,
 ):
     """Calculate the effective connectivity from the paths DataFrame (which could be an
     output of `find_paths_of_length()`), from the 'pre' in the earliest layer, to the
@@ -2778,7 +2795,8 @@ def effconn_without_loops(
         wide (bool, optional): If True, returns the result in wide format. If False,
             returns in long format. Defaults to True.
         combining_method (str, optional): Method to combine inputs or outputs based on
-            groups. Can be 'mean', 'median', or 'sum'. Defaults to 'mean'.
+            groups. Can be 'mean', 'median', 'sum', or 'percentile'. Defaults to
+            'mean'.
         chunk_size (int, optional): Number of rows to process in each chunk when using
             GPU. Defaults to 2000.
         density_threshold (float, optional): Threshold for converting sparse matrices to
@@ -2793,6 +2811,8 @@ def effconn_without_loops(
         remove_loop_after_grouping (bool, optional): Whether to remove loops after
             grouping the paths. Defaults to True.
         quiet (bool, optional): Whether to suppress progress output. Defaults to False.
+        percentile (float, optional): Percentile to use when `combining_method` is
+            'percentile'. Must be between 0 and 100. Defaults to None.
 
     Returns:
         pd.DataFrame:
@@ -2819,6 +2839,7 @@ def effconn_without_loops(
             post_group,
             intermediate_group,
             combining_method=combining_method,
+            percentile=percentile,
         )
 
     # Calculate total effective connectivity (with loops)
@@ -2946,6 +2967,7 @@ def effconn_without_loops(
             post_group,
             intermediate_group,
             combining_method=combining_method,
+            percentile=percentile,
         )
         if wide:
             effconn_noloop = effconn_noloop_long.pivot(

@@ -11,6 +11,7 @@ from connectome_interpreter.path_finding import (
     find_shortest_paths,
     count_paths,
     group_paths,
+    el_within_n_steps,
 )
 
 import numpy as np
@@ -1065,6 +1066,32 @@ class TestCountPaths(unittest.TestCase):
         df = self.mk_df(edges)
         with self.assertRaises(ValueError):
             count_paths(df, 1, 2, loop_mode="invalid")
+
+
+class TestElWithinNSteps(unittest.TestCase):
+    def test_percentile_is_forwarded_to_group_paths(self):
+        matrix = sp.csr_matrix(
+            (
+                np.array([1.0, 2.0, 3.0, 4.0]),
+                (np.zeros(4, dtype=int), np.arange(1, 5)),
+            ),
+            shape=(5, 5),
+        )
+
+        result = el_within_n_steps(
+            matrix,
+            inidx=[0],
+            outidx=[1, 2, 3, 4],
+            n=1,
+            pre_group={0: "A"},
+            post_group={1: "B", 2: "B", 3: "B", 4: "B"},
+            combining_method="percentile",
+            percentile=75,
+            quiet=True,
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertAlmostEqual(result.iloc[0]["weight"], 3.25)
 
 
 class TestGroupPaths(unittest.TestCase):

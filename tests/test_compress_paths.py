@@ -3358,6 +3358,29 @@ class TestConnByPathLengthData(unittest.TestCase):
         direct = result[result["path_length"] == 1]
         self.assertGreater(len(direct), 0)
 
+    def test_combining_method_percentile(self):
+        """Test that percentile is forwarded to group_paths."""
+        matrix = csc_matrix(
+            (
+                np.array([1.0, 2.0, 3.0, 4.0]),
+                (np.zeros(4, dtype=int), np.arange(1, 5)),
+            ),
+            shape=(5, 5),
+        )
+
+        result = conn_by_path_length_data(
+            matrix,
+            inidx=[0],
+            outidx=[1, 2, 3, 4],
+            n=1,
+            outidx_map={1: "B", 2: "B", 3: "B", 4: "B"},
+            combining_method="percentile",
+            percentile=75,
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertAlmostEqual(result.iloc[0]["weight"], 3.25)
+
     def test_wide_format_single_map(self):
         """Test wide=True with single mapping."""
         outidx_map = {0: "A", 1: "A", 2: "B", 3: "B"}
