@@ -489,18 +489,38 @@ class _NetworkBase(nn.Module):
 
         pair_to_idx = {pair: i for i, pair in enumerate(pairs)}
 
+        # Edge -> pair lookup, vectorised because it runs over every edge of the
+        # connectome (tens of millions for a whole-brain dataset), not just the
+        # declared pairs. Each node gets an integer code for its group, offset by
+        # 1 so that groups appearing in no declared pair -- and nodes missing from
+        # idx_to_group -- land on code 0; a small (num_groups + 1)^2 table then
+        # maps all edges in one indexing operation.
+        group_code: dict = {}
+        for pre_group, post_group in pairs:
+            for group in (pre_group, post_group):
+                if group not in group_code:
+                    group_code[group] = len(group_code) + 1
+
+        node_code = torch.tensor(
+            [
+                group_code.get(idx_to_group.get(i), 0)
+                for i in range(self.all_weights.shape[0])
+            ],
+            dtype=torch.long,
+            device=device,
+        )
+        pair_table = torch.full(
+            (len(group_code) + 1, len(group_code) + 1),
+            -1,
+            dtype=torch.long,
+            device=device,
+        )
+        for (pre_group, post_group), pair_idx in pair_to_idx.items():
+            pair_table[group_code[pre_group], group_code[post_group]] = pair_idx
+
         def _edge_pair_map(indices):
             post_idxs, pre_idxs = indices
-            mapping = torch.full(
-                (post_idxs.numel(),), -1, dtype=torch.long, device=device
-            )
-            for edge_i, (post_idx, pre_idx) in enumerate(zip(post_idxs, pre_idxs)):
-                pair_idx = pair_to_idx.get(
-                    (idx_to_group.get(int(pre_idx)), idx_to_group.get(int(post_idx)))
-                )
-                if pair_idx is not None:
-                    mapping[edge_i] = pair_idx
-            return mapping
+            return pair_table[node_code[pre_idxs], node_code[post_idxs]]
 
         self.slope_pairs = tuple(pairs)
         self.slope_edge_indices = _edge_pair_map(self.all_weights._indices())
@@ -820,12 +840,18 @@ class _NetworkBase(nn.Module):
             ].to(values.dtype)
         new_values = values * multipliers
 
+        # all_weights is coalesced at construction and only its values change
+        # here, so the result is coalesced by construction. Declaring that is
+        # worth ~0.7s per forward call on a whole-brain connectome, which an
+        # actual .coalesce() would spend re-sorting indices that are already
+        # sorted. (Requires torch >= 2.1 for the is_coalesced argument.)
         return torch.sparse_coo_tensor(
             indices,
             new_values,
             size=self.all_weights.shape,
             device=values.device,
-        ).coalesce()
+            is_coalesced=True,
+        )
 
     @property
     def effective_tau(self):
@@ -837,6 +863,10 @@ class _NetworkBase(nn.Module):
         return torch.clamp(self.tau_param, min=1.0)  # tau < 1 is physically meaningless
 
     def _apply_sensory_input(self, state: torch.Tensor, input_at_layer: torch.Tensor):
+        # Each call retains one (num_neurons, batch) clone in the autograd graph.
+        # "add" makes one call per layer, as the un-refactored code always did;
+        # "replace" makes two, roughly doubling this cost -- ~4.5 MB per layer at
+        # 139k neurons and batch 8, so ~3 GB extra over a 750-layer rollout.
         state = state.clone()
         if self.sensory_input_mode == "add":
             state[self.sensory_indices, :] = (
@@ -2101,8 +2131,10 @@ def train_model(
             column holds ``group_id`` values, and each group's prediction is the mean
             activation over its member nodes (``outputs[:, members, :].mean(dim=1)``)
             before the loss is computed. Works for both ``LinearNetwork`` and
-            ``MultilayeredNetwork``. Defaults to None (per-node targets, legacy
-            behavior).
+            ``MultilayeredNetwork``. Cost scales with the number of groups passed
+            here, not with the number of groups in the connectome: the reduction is
+            one indexing kernel per group per forward pass. Defaults to None
+            (per-node targets, legacy behavior).
         extra_parameters (list of torch.nn.Parameter, optional): Additional
             trainable parameters that live outside ``model`` (e.g. a luminance
             log-offset epsilon used by ``input_transform``). They are added to the
@@ -2121,8 +2153,10 @@ def train_model(
             e.g. a causal sensor/indicator convolution along the time axis (see
             ``sensor_kernel.make_sensor_output_transform``) so the fit compares a
             forward-modelled measurement, not the raw latent, to the data. Must
-            preserve the shape and be differentiable wrt ``outputs``. Defaults to
-            None (outputs used as given).
+            preserve the shape and be differentiable wrt ``outputs``. Note this
+            retains a second copy of the full output in the autograd graph: at 139k
+            neurons, batch 8 and 750 layers that is ~3 GB on top of the output
+            itself. Defaults to None (outputs used as given).
 
     Returns:
         tuple: ``(model, history, train_inputs, val_inputs, train_targets,
