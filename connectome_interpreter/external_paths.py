@@ -224,6 +224,7 @@ def layered_el(
     flow_steps: int = 20,
     flow_thre: float = 0.1,
     flow: pd.DataFrame | None = None,
+    percentile: Optional[float] = None,
 ):
     """
     Similar to `el_within_n_steps` but using filter_paths_to_cumsum and layers based
@@ -244,12 +245,15 @@ def layered_el(
         thre_step_min (float, optional): The minimum threshold for the weight of the
             direct connection between pre and post. Defaults to 0.0.
         combining_method (str, optional): Method to combine inputs (outprop=False) or
-            outputs (outprop=True). Can be 'sum', 'mean', or 'median'. Defaults to 'mean'.
+            outputs (outprop=True). Can be 'sum', 'mean', 'median', or 'percentile'.
+            Defaults to 'mean'.
         flow_steps (int): Number of steps for flow calculation. Defaults to 20.
         flow_thre (float): Threshold for flow calculation. Defaults to 0.1.
         flow (pd.DataFrame, optional): DataFrame containing the flow hitting time.
             If provided, it should have columns 'cell_group' and 'hitting_time'.
             If None, the flow hitting time is computed from `inprop` and `idx_to_group`.
+        percentile (float, optional): Percentile to use when `combining_method` is
+            'percentile'. Must be between 0 and 100. Defaults to None.
 
     Returns:
         tuple:
@@ -279,6 +283,7 @@ def layered_el(
             idx_to_group,
             idx_to_group,
             combining_method=combining_method,
+            percentile=percentile,
         )
         if paths is None or paths.shape[0] == 0:
             continue
