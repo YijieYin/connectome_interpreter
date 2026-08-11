@@ -3,6 +3,7 @@ import inspect
 import random
 import warnings
 from collections import defaultdict
+from functools import partial
 from typing import List, Tuple, Optional, Sequence, Mapping
 import os
 
@@ -499,6 +500,38 @@ def to_nparray(input_data: arrayable, unique: bool = True) -> npt.NDArray:
         return np.unique(cleaned_array)
     else:
         return cleaned_array
+
+
+def _combining_method_to_agg(combining_method: str, percentile: Optional[float] = None):
+    """Validate `combining_method` and turn it into an aggregation for pandas' `.agg()`.
+
+    'mean', 'median' and 'sum' are names pandas understands, and are returned
+    unchanged. 'percentile' additionally requires `percentile`, and is returned as a
+    callable computing that percentile.
+
+    Args:
+        combining_method (str): One of 'mean', 'median', 'sum' or 'percentile'.
+        percentile (float, optional): Percentile to use when `combining_method` is
+            'percentile'. Must be between 0 and 100. Defaults to None.
+
+    Returns:
+        str | Callable:
+            Something that can be passed to `.agg()`.
+    """
+    assert combining_method in ["mean", "median", "sum", "percentile"], (
+        "The combining_method should be either 'mean', 'median', 'sum' or "
+        f"'percentile'. Currently it is {combining_method}."
+    )
+    if combining_method != "percentile":
+        return combining_method
+
+    assert (
+        percentile is not None
+    ), "The percentile must be provided when combining_method is 'percentile'."
+    assert (
+        0 <= percentile <= 100
+    ), f"The percentile should be between 0 and 100. Currently it is {percentile}."
+    return partial(np.percentile, q=percentile)
 
 
 def get_ngl_link(

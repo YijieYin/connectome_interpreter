@@ -22,6 +22,7 @@ from scipy.sparse import csr_matrix, issparse, csc_matrix, coo_matrix, spmatrix,
 from tqdm import tqdm
 
 from .utils import (
+    _combining_method_to_agg,
     dynamic_representation,
     tensor_to_csc,
     to_nparray,
@@ -1053,6 +1054,7 @@ def connectivity_summary(
     outprop: bool = False,
     combining_method: str = "mean",
     return_long: bool = False,
+    percentile: Optional[float] = None,
 ):
     """
     Generates a summary of connectivity from `inidx` to `outidx`, grouped by `inidx_map`
@@ -1094,10 +1096,12 @@ def connectivity_summary(
             False (default), get the summed input proportion across all senders for
             each average recipient.
         combining_method (str, optional): Method to combine inputs (outprop=False)
-            or outputs (outprop=True). Can be 'sum', 'mean', or 'median'.
-            Defaults to 'mean'.
+            or outputs (outprop=True). Can be 'sum', 'mean', 'median', or
+            'percentile'. Defaults to 'mean'.
         return_long (bool, optional): Whether to return the connectivity summary in long
             format (in which case display no longer works). Defaults to False.
+        percentile (float, optional): Percentile to use when `combining_method` is
+            'percentile'. Must be between 0 and 100. Defaults to None.
 
     Returns:
         pd.DataFrame:
@@ -1112,7 +1116,7 @@ def connectivity_summary(
     # ---------------------------------------------------------------------#
     # Sanity checks & defaults
     # ---------------------------------------------------------------------#
-    assert combining_method in {"mean", "median", "sum"}
+    aggregation_method = _combining_method_to_agg(combining_method, percentile)
     inidx = to_nparray(inidx)
     outidx = to_nparray(outidx)
 
@@ -1214,7 +1218,7 @@ def connectivity_summary(
         # )
         result = per_post_neuron.groupby(["pre_group", "post_group"], sort=False)[
             "weight"
-        ].agg(combining_method)
+        ].agg(aggregation_method)
     else:
         # OUTPUT-centred: average neuron in *pre* group
         # output proportion from an average source to a target type
@@ -1236,7 +1240,7 @@ def connectivity_summary(
 
         result = per_pre_neuron.groupby(["pre_group", "post_group"], sort=False)[
             "weight"
-        ].agg(combining_method)
+        ].agg(aggregation_method)
 
     if not return_long:
         result = result.unstack(fill_value=0)
@@ -1327,6 +1331,7 @@ def result_summary(
     include_undefined_groups: bool = False,
     outprop: bool = False,
     combining_method: str = "mean",
+    percentile: Optional[float] = None,
 ):
     """Generates a summary of connections between different types of neurons,
     represented by their input and output indexes. The function calculates the total
@@ -1337,8 +1342,8 @@ def result_summary(
     submatrix, which makes it faster on small subsets, whereas `connectivity_summary()`
     operates on a sparse edge list and is faster and lighter on large subsets.
 
-    Note on averaging: for `combining_method='mean'`/`'median'`, the average is
-    taken over *all* members of each group as defined by `inidx_map`/
+    Note on averaging: for `combining_method='mean'`/`'median'`/`'percentile'`, the
+    average is taken over *all* members of each group as defined by `inidx_map`/
     `outidx_map`, including members that are absent from `inidx`/`outidx`
     (absent members contribute 0). This matches `connectivity_summary()`.
 
@@ -1378,8 +1383,10 @@ def result_summary(
             False (default), get the summed input proportion across all senders for
             each average recipient.
         combining_method (str, optional): Method to combine inputs (outprop=False)
-            or outputs (outprop=True). Can be 'sum', 'mean', or 'median'.
-            Defaults to 'mean'.
+            or outputs (outprop=True). Can be 'sum', 'mean', 'median', or
+            'percentile'. Defaults to 'mean'.
+        percentile (float, optional): Percentile to use when `combining_method` is
+            'percentile'. Must be between 0 and 100. Defaults to None.
 
     Returns:
         pd.DataFrame:
@@ -1391,10 +1398,7 @@ def result_summary(
         If display_output is True, the function will display a styled version
         of the resulting dataframe.
     """
-    assert combining_method in ["mean", "median", "sum"], (
-        "The combining_method should be either 'mean', 'median', or 'sum'. "
-        f"Currently it is {combining_method}."
-    )
+    aggregation_method = _combining_method_to_agg(combining_method, percentile)
 
     if inidx_map is None:
         # for an edgelist, the neuron ids are the ones appearing in it
@@ -1489,12 +1493,7 @@ def result_summary(
         # Average across columns and transpose back
         # averaging across columns of the same type:
         # on average, a neuron of that type receives x% input from a presynaptic type
-        if combining_method == "sum":
-            result_df = summed_df.T.groupby(level=0).sum().T
-        elif combining_method == "mean":
-            result_df = summed_df.T.groupby(level=0).mean().T
-        elif combining_method == "median":
-            result_df = summed_df.T.groupby(level=0).median().T
+        result_df = summed_df.T.groupby(level=0).agg(aggregation_method).T
     else:
         # calculate the output proportion from an average source neuron to a target type
         # so first sum across columns
@@ -1504,12 +1503,7 @@ def result_summary(
         summed_df = _expand_to_full(summed_df, axis=0, full_sizes=full_pre)
 
         # then average across rows
-        if combining_method == "sum":
-            result_df = summed_df.groupby(summed_df.index).sum()
-        elif combining_method == "mean":
-            result_df = summed_df.groupby(summed_df.index).mean()
-        elif combining_method == "median":
-            result_df = summed_df.groupby(summed_df.index).median()
+        result_df = summed_df.groupby(summed_df.index).agg(aggregation_method)
 
     if pre_in_column:
         result_df = result_df.T

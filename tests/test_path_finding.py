@@ -1093,6 +1093,47 @@ class TestElWithinNSteps(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertAlmostEqual(result.iloc[0]["weight"], 3.25)
 
+    def test_all_connections_between_groups(self):
+        """With all_connections_between_groups, the weight covers every neuron of
+        the connected groups, not just those reached by the paths found."""
+        matrix = sp.csr_matrix(
+            (
+                np.array([1.0, 2.0, 3.0, 4.0]),
+                (np.zeros(4, dtype=int), np.arange(1, 5)),
+            ),
+            shape=(5, 5),
+        )
+        kwargs = dict(
+            inidx=[0],
+            # only two of the four members of group B
+            outidx=[1, 2],
+            n=1,
+            pre_group={0: "A"},
+            post_group={1: "B", 2: "B", 3: "B", 4: "B"},
+            quiet=True,
+        )
+
+        # paths only reach neurons 1 and 2: mean over all of B = (1 + 2) / 4
+        partial_el = el_within_n_steps(matrix, **kwargs)
+        self.assertAlmostEqual(partial_el.iloc[0]["weight"], 0.75)
+
+        # all of B is taken into account: (1 + 2 + 3 + 4) / 4
+        full_el = el_within_n_steps(
+            matrix, all_connections_between_groups=True, **kwargs
+        )
+        self.assertAlmostEqual(full_el.iloc[0]["weight"], 2.5)
+
+        # combining_method and percentile apply here too: 75th percentile of
+        # (1, 2, 3, 4)
+        full_el_percentile = el_within_n_steps(
+            matrix,
+            all_connections_between_groups=True,
+            combining_method="percentile",
+            percentile=75,
+            **kwargs,
+        )
+        self.assertAlmostEqual(full_el_percentile.iloc[0]["weight"], 3.25)
+
 
 class TestGroupPaths(unittest.TestCase):
     # ------------------------------------------------------------------ helpers

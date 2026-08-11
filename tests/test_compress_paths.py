@@ -1105,6 +1105,49 @@ class TestResultSummary(unittest.TestCase):
             mean_result.loc["A", "A"], median_result.loc["A", "A"], places=3
         )
 
+    def test_percentile_combining_method(self):
+        """The 50th percentile is the median, and percentiles are taken across the
+        neurons of each group."""
+        for func in (result_summary, connectivity_summary):
+            with self.subTest(func=func.__name__):
+                kwargs = dict(
+                    inidx_map=self.inidx_map,
+                    outidx_map=self.outidx_map,
+                    display_output=False,
+                )
+                median_result = func(
+                    self.test_matrix,
+                    self.all_indices,
+                    self.all_indices,
+                    combining_method="median",
+                    **kwargs,
+                )
+                p50 = func(
+                    self.test_matrix,
+                    self.all_indices,
+                    self.all_indices,
+                    combining_method="percentile",
+                    percentile=50,
+                    **kwargs,
+                )
+                pd.testing.assert_frame_equal(p50, median_result)
+
+                p75 = func(
+                    self.test_matrix,
+                    self.all_indices,
+                    self.all_indices,
+                    combining_method="percentile",
+                    percentile=75,
+                    **kwargs,
+                )
+                # total input to each type-A neuron from type A:
+                # neuron 0: 0.15 + 0.8, neuron 1: 0.1 + 0.2, neuron 2: 0.9 + 0.6
+                self.assertAlmostEqual(
+                    p75.loc["A", "A"],
+                    np.percentile([0.95, 0.3, 1.5], 75),
+                    places=5,
+                )
+
     def test_invalid_combining_method(self):
         """Test that invalid combining method raises assertion error."""
         with self.assertRaises(AssertionError):
@@ -1117,6 +1160,22 @@ class TestResultSummary(unittest.TestCase):
                 combining_method="invalid_method",
                 display_output=False,
             )
+
+    def test_percentile_without_value(self):
+        """'percentile' without a percentile, or out of range, raises."""
+        for percentile in (None, 101):
+            with self.subTest(percentile=percentile):
+                with self.assertRaises(AssertionError):
+                    result_summary(
+                        self.test_matrix,
+                        self.all_indices,
+                        self.all_indices,
+                        self.inidx_map,
+                        self.outidx_map,
+                        combining_method="percentile",
+                        percentile=percentile,
+                        display_output=False,
+                    )
 
     def test_outprop_parameter(self):
         """Test outprop parameter (output proportion calculation)."""
@@ -4050,7 +4109,8 @@ class TestResultSummaryConnectivityEquivalence(unittest.TestCase):
         )
 
     def test_equivalence_full_grid(self):
-        for cm in ("mean", "median", "sum"):
+        # percentile is only read when combining_method is 'percentile'
+        for cm in ("mean", "median", "sum", "percentile"):
             for outprop in (False, True):
                 for pic in (False, True):
                     with self.subTest(
@@ -4060,6 +4120,7 @@ class TestResultSummaryConnectivityEquivalence(unittest.TestCase):
                             INIDX,
                             OUTIDX,
                             combining_method=cm,
+                            percentile=75,
                             outprop=outprop,
                             pre_in_column=pic,
                         )
@@ -4068,10 +4129,10 @@ class TestResultSummaryConnectivityEquivalence(unittest.TestCase):
     def test_equivalence_on_subset(self):
         """The case that previously diverged: outidx is a strict subset, so the
         averaging denominators differ between present-only and full-group."""
-        for cm in ("mean", "median", "sum"):
+        for cm in ("mean", "median", "sum", "percentile"):
             with self.subTest(combining_method=cm):
                 rs, cs = self._both(
-                    INIDX, np.array([0, 2, 3]), combining_method=cm
+                    INIDX, np.array([0, 2, 3]), combining_method=cm, percentile=75
                 )
                 self._assert_equal(rs, cs)
 
