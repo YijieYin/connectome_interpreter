@@ -9,6 +9,12 @@ import pandas as pd
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 
+# Fixed origin shift between eyemap-archive p,q numbering and this package's own
+# p,q numbering (verified against Zhao2024/eyemap_mcns_f20240701: archive_p + 20 ==
+# our p, archive_q + 18 == our q, exact match across all 841 shared points).
+_EYEMAP_ARCHIVE_P_SHIFT = 20
+_EYEMAP_ARCHIVE_Q_SHIFT = 18
+
 DATA_SOURCES: dict[str, str] = {
     "DoOR_adult": "data/DoOR/processed_door_adult.csv",
     "DoOR_adult_sfr_subtracted": "data/DoOR/processed_door_adult_sfr_subtracted.csv",
@@ -397,9 +403,9 @@ def hex_heatmap(
     # load all hex coordinates
     if eyemap_path is not None:
         eyemap = _load_local_eyemap(eyemap_path, required_cols=("p", "q"))
-        background_hex = pd.DataFrame(
-            {"x": eyemap["p"] - eyemap["q"], "y": eyemap["p"] + eyemap["q"]}
-        )
+        p = eyemap["p"] + _EYEMAP_ARCHIVE_P_SHIFT
+        q = eyemap["q"] + _EYEMAP_ARCHIVE_Q_SHIFT
+        background_hex = pd.DataFrame({"x": p - q, "y": p + q})
     elif dataset == "mcns_right":
         background_hex = load_dataset("Nern2024")
     elif dataset == "fafb_right":
@@ -826,6 +832,9 @@ def plot_mollweide_projection(
     # Load eyemap data and convert coordinates
     if eyemap_path is not None:
         ucl_hex = _load_local_eyemap(eyemap_path, required_cols=("p", "q", "x", "y", "z"))
+        ucl_hex = ucl_hex.copy()
+        ucl_hex["p"] = ucl_hex["p"] + _EYEMAP_ARCHIVE_P_SHIFT
+        ucl_hex["q"] = ucl_hex["q"] + _EYEMAP_ARCHIVE_Q_SHIFT
     else:
         ucl_hex = load_dataset(dataset)
     rtp2 = cart2sph(ucl_hex[["x", "y", "z"]].values)
