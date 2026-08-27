@@ -1,6 +1,7 @@
 import io
 import pkgutil
 import os
+from pathlib import Path
 from typing import Optional, Union
 
 import numpy as np
@@ -66,6 +67,34 @@ def load_dataset(dataset: str) -> pd.DataFrame:
         ) from exc
 
     return pd.read_csv(io.BytesIO(data), index_col=0)
+
+
+def _load_local_eyemap(eyemap_path: str, required_cols: tuple) -> pd.DataFrame:
+    """
+    Load a user-supplied local eyemap CSV, in place of a bundled ``dataset``.
+
+    Args:
+        eyemap_path: Path to a local eyemap CSV file. Files downloaded via
+            https://artxz.github.io/eyemap-archive/ already conform to the expected
+            schema (columns ``p,q,x,y,z[,theta,phi,rootid]``).
+        required_cols: Column names that must be present in the CSV.
+
+    Returns:
+        pd.DataFrame: The loaded eyemap table.
+    """
+    path = Path(eyemap_path)
+    if not path.exists():
+        raise FileNotFoundError(f"eyemap_path {path} does not exist.")
+
+    df = pd.read_csv(path)
+    missing = set(required_cols) - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"eyemap file {path} is missing required column(s): {sorted(missing)}. "
+            f"Expected columns: {required_cols}. Files downloaded from "
+            "https://artxz.github.io/eyemap-archive/ already conform to this schema."
+        )
+    return df
 
 
 def map_to_experiment(df, dataset=None, custom_experiment=None):
@@ -143,6 +172,7 @@ def hex_heatmap(
     global_min: Optional[float] = None,
     global_max: Optional[float] = None,
     dataset: Optional[str] = "mcns_right",
+    eyemap_path: Optional[str] = None,
     value_name: str = "weight",
     colorbar: bool = True,
     title: Optional[str] = None,
@@ -195,6 +225,11 @@ def hex_heatmap(
 
                 - 'mcns_right': columnar coordinates of individual cells from columnar cell types: L1, L2, L3, L5, Mi1, Mi4, Mi9, C2, C3, Tm1, Tm2, Tm4, Tm9, Tm20, T1, within the medulla of the right optic lobe, from Nern et al. 2024.
                 - 'fafb_right': columnar coordinates of individual cells from columnar cell types, in the right optic lobe of FAFB, from Matsliah et al. 2024.
+
+        eyemap_path (Optional[str]): Path to a local eyemap CSV with at least ``p``
+            and ``q`` columns (e.g. as downloaded from
+            https://artxz.github.io/eyemap-archive/). When given, this takes
+            precedence over ``dataset`` for the background hexagon lattice.
         title (Optional[str]): Title for the plot. If None, no title is displayed.
 
     Returns:
@@ -288,7 +323,9 @@ def hex_heatmap(
         "papercolor": "rgba(255,255,255,255)",
     }
 
-    if dataset == "mcns_right":
+    if eyemap_path is not None:
+        markersize = 18
+    elif dataset == "mcns_right":
         markersize = 18
     elif dataset == "fafb_right":
         markersize = 20
@@ -358,7 +395,12 @@ def hex_heatmap(
     symbol_number = 15
 
     # load all hex coordinates
-    if dataset == "mcns_right":
+    if eyemap_path is not None:
+        eyemap = _load_local_eyemap(eyemap_path, required_cols=("p", "q"))
+        background_hex = pd.DataFrame(
+            {"x": eyemap["p"] - eyemap["q"], "y": eyemap["p"] + eyemap["q"]}
+        )
+    elif dataset == "mcns_right":
         background_hex = load_dataset("Nern2024")
     elif dataset == "fafb_right":
         background_hex = load_dataset("Matsliah2024")
@@ -610,6 +652,7 @@ def plot_mollweide_projection(
     global_min: Optional[float] = None,
     global_max: Optional[float] = None,
     dataset: str = "Zhao2024",
+    eyemap_path: Optional[str] = None,
     marker_size: int = 8,
     value_name: str = "weight",
     colorbar: bool = True,
@@ -635,6 +678,10 @@ def plot_mollweide_projection(
 
             - 'Zhao2024': mapping from hexagonal coordinates to 3D coordinates, update from Zhao et al. 2022 (https://www.biorxiv.org/content/10.1101/2022.12.14.520178v1).
 
+        eyemap_path (Optional[str]): Path to a local eyemap CSV with ``p,q,x,y,z``
+            columns (e.g. as downloaded from
+            https://artxz.github.io/eyemap-archive/). When given, this takes
+            precedence over ``dataset``.
         marker_size (int): Size of markers in the plot.
 
     Returns:
@@ -777,7 +824,10 @@ def plot_mollweide_projection(
         global_max = vals.max()
 
     # Load eyemap data and convert coordinates
-    ucl_hex = load_dataset(dataset)
+    if eyemap_path is not None:
+        ucl_hex = _load_local_eyemap(eyemap_path, required_cols=("p", "q", "x", "y", "z"))
+    else:
+        ucl_hex = load_dataset(dataset)
     rtp2 = cart2sph(ucl_hex[["x", "y", "z"]].values)
     xy = sph2Mollweide(rtp2[:, 1:3])
     xy[:, 0] = -xy[:, 0]  # flip x axis
