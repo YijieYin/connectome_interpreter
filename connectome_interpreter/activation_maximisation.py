@@ -2124,7 +2124,9 @@ def train_model(
             torch.Tensor, target: torch.Tensor) -> torch.Tensor returning a scalar loss.
         initial_state (torch.Tensor, optional): Initial full-network state for each
             batch. Shape can be (nodes,), (batch, nodes), or (nodes, batch). Sensory
-            nodes are still overwritten by the first input sample.
+            nodes are still overwritten by the first input sample. When 2-D, it is
+            split alongside ``inputs`` (same batch axis) into per-stimulus train and
+            validation states.
         target_node_groups (dict, optional): Fit group (e.g. cell-type) averages
             instead of individual nodes. Maps ``group_id -> sequence of member node
             indices``. When provided, the ``targets`` DataFrame's ``neuron_idx``
@@ -2338,6 +2340,18 @@ def train_model(
             val_indices,
         ) = train_test_split(inputs, targets, train_fraction)
 
+        # Per-stimulus initial states are split alongside the inputs so each half
+        # keeps the states belonging to its own batch entries.
+        train_initial_state = initial_state
+        val_initial_state = initial_state
+        if initial_state is not None and torch.as_tensor(initial_state).dim() == 2:
+            st = torch.as_tensor(initial_state)
+            axis = 0 if st.shape[0] == inputs.shape[0] else 1
+            train_idx_t = torch.as_tensor(train_indices, device=st.device)
+            val_idx_t = torch.as_tensor(val_indices, device=st.device)
+            train_initial_state = st.index_select(axis, train_idx_t)
+            val_initial_state = st.index_select(axis, val_idx_t)
+
         batch_idx = torch.tensor(
             train_targets["batch"].astype(int).values,
             dtype=torch.long,
@@ -2397,7 +2411,7 @@ def train_model(
                 if input_transform is None
                 else input_transform(train_inputs),
                 checkpoint_steps=checkpoint_steps,
-                initial_state=initial_state,
+                initial_state=train_initial_state,
             )  # shape: (train_num, num_neurons, num_layers)
             if output_transform is not None:
                 outputs = output_transform(outputs)
@@ -2486,7 +2500,7 @@ def train_model(
                         val_inputs
                         if input_transform is None
                         else input_transform(val_inputs),
-                        initial_state=initial_state,
+                        initial_state=val_initial_state,
                     )
                     if output_transform is not None:
                         val_outputs = output_transform(val_outputs)
