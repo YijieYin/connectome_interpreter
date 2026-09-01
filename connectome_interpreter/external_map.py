@@ -9,12 +9,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 
-# Fixed origin shift between eyemap-archive p,q numbering and this package's own
-# p,q numbering (verified against Zhao2024/eyemap_mcns_f20240701: archive_p + 20 ==
-# our p, archive_q + 18 == our q, exact match across all 841 shared points).
-_EYEMAP_ARCHIVE_P_SHIFT = 20
-_EYEMAP_ARCHIVE_Q_SHIFT = 18
-
 DATA_SOURCES: dict[str, str] = {
     "DoOR_adult": "data/DoOR/processed_door_adult.csv",
     "DoOR_adult_sfr_subtracted": "data/DoOR/processed_door_adult_sfr_subtracted.csv",
@@ -402,10 +396,11 @@ def hex_heatmap(
 
     # load all hex coordinates
     if eyemap_path is not None:
-        eyemap = _load_local_eyemap(eyemap_path, required_cols=("p", "q"))
-        p = eyemap["p"] + _EYEMAP_ARCHIVE_P_SHIFT
-        q = eyemap["q"] + _EYEMAP_ARCHIVE_Q_SHIFT
-        background_hex = pd.DataFrame({"x": p - q, "y": p + q})
+        eyemap = _load_local_eyemap(eyemap_path, required_cols=("hex1", "hex2"))
+        background_hex = pd.DataFrame(
+            {"x": eyemap["hex2"] - eyemap["hex1"], 
+             "y": eyemap["hex2"] + eyemap["hex1"]}
+            )
     elif dataset == "mcns_right":
         background_hex = load_dataset("Nern2024")
     elif dataset == "fafb_right":
@@ -831,18 +826,15 @@ def plot_mollweide_projection(
 
     # Load eyemap data and convert coordinates
     if eyemap_path is not None:
-        ucl_hex = _load_local_eyemap(eyemap_path, required_cols=("p", "q", "x", "y", "z"))
-        ucl_hex = ucl_hex.copy()
-        ucl_hex["p"] = ucl_hex["p"] + _EYEMAP_ARCHIVE_P_SHIFT
-        ucl_hex["q"] = ucl_hex["q"] + _EYEMAP_ARCHIVE_Q_SHIFT
+        ucl_hex = _load_local_eyemap(eyemap_path, required_cols=("hex1", "hex2", "x", "y", "z"))
     else:
         ucl_hex = load_dataset(dataset)
     rtp2 = cart2sph(ucl_hex[["x", "y", "z"]].values)
     xy = sph2Mollweide(rtp2[:, 1:3])
     xy[:, 0] = -xy[:, 0]  # flip x axis
-    xypq_moll = np.concatenate((xy, ucl_hex[["p", "q"]].values), axis=1)
-    xypq_moll = pd.DataFrame(xypq_moll, columns=["x", "y", "p", "q"])
-    xypq_moll[["p", "q"]] = xypq_moll[["p", "q"]].astype(int)
+    xypq_moll = np.concatenate((xy, ucl_hex[["hex2", "hex1"]].values), axis=1)
+    xypq_moll = pd.DataFrame(xypq_moll, columns=["x", "y", "hex2", "hex1"])
+    xypq_moll[["hex2", "hex1"]] = xypq_moll[["hex2", "hex1"]].astype(int)
 
     # Convert data coordinates to Mollweide
     hex1_id = (coord_array[:, 1] - coord_array[:, 0]) / 2
@@ -851,7 +843,7 @@ def plot_mollweide_projection(
     coord_df = pd.DataFrame({"hex1_id": hex1_id, "hex2_id": hex2_id}, index=data.index)
 
     merged_coords = coord_df.merge(
-        xypq_moll, left_on=["hex1_id", "hex2_id"], right_on=["q", "p"], how="left"
+        xypq_moll, left_on=["hex1_id", "hex2_id"], right_on=["hex1", "hex2"], how="left"
     )
 
     x_mollweide = merged_coords["x"].values
