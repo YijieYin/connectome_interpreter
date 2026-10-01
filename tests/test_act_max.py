@@ -774,6 +774,55 @@ class TestTrainModelEnhanced(unittest.TestCase):
         self.assertTrue(len(history["loss"]) > 0)
         self.assertIsInstance(history["loss"][0], float)
 
+    def test_per_stimulus_initial_state_is_split_with_inputs(self):
+        """A 2-D initial_state is subset by train/val indices, not shared whole."""
+        from connectome_interpreter.activation_maximisation import train_model
+
+        inputs = torch.rand(4, 2, 2).to(self.device)
+        targets = pd.DataFrame(
+            [
+                {"batch": 0, "neuron_idx": 2, "value": 0.5},
+                {"batch": 1, "neuron_idx": 3, "value": 0.3},
+                {"batch": 2, "neuron_idx": 4, "value": 0.7},
+                {"batch": 3, "neuron_idx": 5, "value": 0.4},
+            ]
+        )
+        initial_state = torch.arange(4 * 6, dtype=torch.float32).reshape(4, 6)
+        initial_state = initial_state.to(self.device)
+
+        captured = []
+        original_forward = self.model.forward
+
+        def spy_forward(*args, **kwargs):
+            captured.append(kwargs["initial_state"])
+            return original_forward(*args, **kwargs)
+
+        self.model.forward = spy_forward
+        try:
+            train_model(
+                self.model,
+                inputs,
+                targets,
+                num_epochs=1,
+                wandb=False,
+                train_fraction=0.5,
+                seed=0,
+                initial_state=initial_state,
+            )
+        finally:
+            del self.model.forward
+
+        self.assertEqual(len(captured), 2)
+        train_state, val_state = captured
+        self.assertEqual(train_state.shape[0], 2)
+        self.assertEqual(val_state.shape[0], 2)
+        # every row handed to the model must be one of the original per-stimulus
+        # rows, and together they must cover all four without repeats.
+        all_rows = torch.cat([train_state, val_state], dim=0)
+        for row in all_rows:
+            self.assertTrue(any(torch.equal(row, orig) for orig in initial_state))
+        self.assertFalse(torch.equal(train_state[0], train_state[1]))
+
     def test_backward_compatible_targets(self):
         """Test training with old format targets (no layer column)"""
         from connectome_interpreter.activation_maximisation import train_model

@@ -1,7 +1,6 @@
 # Standard library imports
 import itertools
 from dataclasses import dataclass
-from functools import partial
 from typing import Dict, List, Union, Tuple, Optional, Generator
 from collections import defaultdict
 
@@ -16,6 +15,7 @@ from tqdm import tqdm
 from scipy.sparse.csgraph import shortest_path
 
 from .utils import (
+    _combining_method_to_agg,
     arrayable,
     check_consecutive_layers,
     count_keys_per_value,
@@ -1001,24 +1001,7 @@ def group_paths(
     if paths is None or paths.shape[0] == 0:
         return paths
 
-    assert combining_method in ["mean", "sum", "median", "percentile"], (
-        "The combining_method should be either 'mean', 'sum', 'median' or "
-        "'percentile'. "
-        f"Currently it is {combining_method}."
-    )
-    if combining_method == "percentile":
-        assert (
-            percentile is not None
-        ), "The percentile must be provided when combining_method is 'percentile'."
-        assert (
-            0 <= percentile <= 100
-        ), f"The percentile should be between 0 and 100. Currently it is {percentile}."
-
-    aggregation_method = (
-        partial(np.percentile, q=percentile)
-        if combining_method == "percentile"
-        else combining_method
-    )
+    aggregation_method = _combining_method_to_agg(combining_method, percentile)
 
     # (new) auto-fill missing keys so every node has a group
     all_nodes = set(paths["pre"]).union(set(paths["post"]))
@@ -1565,6 +1548,7 @@ def el_within_n_steps(
     avg_within_connected: bool = False,
     all_connections_between_groups: bool = False,
     quiet: bool = False,
+    percentile: Optional[float] = None,
 ):
     """
     Find paths within a specified number of steps in a directed graph, starting from
@@ -1597,8 +1581,8 @@ def el_within_n_steps(
         return_raw_el (bool, optional): If True, returns the raw edges before
             grouping. Defaults to False.
         combining_method (str, optional): Method to combine inputs (outprop=False)
-            or outputs (outprop=True). Can be 'sum', 'mean', or 'median'. Defaults to
-            'mean'.
+            or outputs (outprop=True). Can be 'sum', 'mean', 'median', or
+            'percentile'. Defaults to 'mean'.
         avg_within_connected (bool, optional): If True, the weight is calculated within
             the *connected* neurons of the same group. If False, the weight is
             calculated across *all* neurons of the same group. Defaults to False.
@@ -1609,6 +1593,8 @@ def el_within_n_steps(
             function will return L1->Tm3 connections for *all* L1 and Tm3 neurons.
             Defaults to False.
         quiet (bool, optional): If True, suppresses output messages. Defaults to False.
+        percentile (float, optional): Percentile to use when `combining_method` is
+            'percentile'. Must be between 0 and 100. Defaults to None.
 
     Returns:
         pd.DataFrame or tuple:
@@ -1636,6 +1622,7 @@ def el_within_n_steps(
                 post_group,
                 avg_within_connected=avg_within_connected,
                 combining_method=combining_method,
+                percentile=percentile,
             )
         paths = filter_paths(paths, threshold, quiet=quiet)
         if paths is not None:
@@ -1646,11 +1633,14 @@ def el_within_n_steps(
     el = all_paths.groupby(["pre", "post"])["weight"].max().reset_index()
 
     if all_connections_between_groups:
-        from .compress_paths import result_summary
+        from .compress_paths import connectivity_summary
 
-        new_inidx = [idx for idx, grp in pre_group.items() if grp in el.pre]
-        new_outidx = [idx for idx, grp in post_group.items() if grp in el.post]
-        mat = result_summary(
+        # `pre_group`/`post_group` map single neurons to groups, so compare the group
+        # names against the group names in the edgelist
+        pre_in_el, post_in_el = set(el.pre), set(el.post)
+        new_inidx = [idx for idx, grp in pre_group.items() if str(grp) in pre_in_el]
+        new_outidx = [idx for idx, grp in post_group.items() if str(grp) in post_in_el]
+        mat = connectivity_summary(
             inprop,
             new_inidx,
             new_outidx,
@@ -1658,6 +1648,8 @@ def el_within_n_steps(
             post_group,
             display_threshold=0,
             display_output=False,
+            combining_method=combining_method,
+            percentile=percentile,
         )
         # make longer
         mat_long = mat.melt(ignore_index=False).reset_index()
