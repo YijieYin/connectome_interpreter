@@ -1,12 +1,3 @@
-"""Tests for connectome_interpreter.response_fitting.
-
-Covers the dynamics and stability helpers, the model-carried activation
-gain, the ExponentialSensor observation model, the affine-readout loss
-factory, the window/metric helpers and the save/load/rebuild round-trip.
-"""
-
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import pytest

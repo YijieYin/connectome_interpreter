@@ -1,51 +1,8 @@
-"""Tools for fitting network models to measured response time series.
-
-Everything here operates on a :class:`~connectome_interpreter.activation_maximisation.MultilayeredNetwork`
-/ :class:`~connectome_interpreter.activation_maximisation.LinearNetwork`, or on
-generic (stimulus trace, response trace, transition-window) data. Nothing in
-this module knows which nonlinearity a model uses: state-dependent local gains
-are read through ``model.activation_gain`` (see the ``activation_gain_fn``
-constructor argument), so the same stability tools serve linear and nonlinear
-fits.
-
-Sections:
-
-- **Dynamics** — single steps, iterative fixed points, and differentiable
-  linear and nonlinear steady states.
-- **Stability** — spectral radius of the free-node update Jacobian and a
-  differentiable penalty.
-- **Sensor** — :class:`ExponentialSensor`, a fixed causal indicator kernel
-  (e.g. GCaMP6f) applied identically in training (torch) and diagnostics
-  (numpy).
-- **Affine readout & loss** — closed-form per-channel scale/offset readout
-  (variable projection) and :func:`make_affine_readout_loss`, a
-  ``train_model``-compatible loss factory.
-- **Windows & metrics** — transition-window scoring masks, long-format target
-  builders and window extraction.
-- **Persistence** — :func:`save_fit` / :func:`load_fit` /
-  :func:`rebuild_network` for a self-contained fitted-model round-trip, plus
-  trace and pair-slope tables.
-
-Large networks (more than 256 nodes) switch to sparse routines. Linear and
-nonlinear models are supported equally except for the differentiable steady
-state:
-
-- :func:`network_step`, :func:`network_fixed_point`: any size.
-- :func:`linear_network_steady_state`: any size, differentiable (sparse LU
-  above 256 nodes).
-- :func:`nonlinear_network_steady_state`: at most 256 nodes; raises above.
-  Use :func:`network_fixed_point` (no gradient) there.
-- :func:`stability_penalty`: exact spectral radius up to 256 nodes, a
-  conservative Gershgorin upper bound above — stricter at the same margin.
-- :func:`spectral_radius`: exact up to 256 nodes, ARPACK above.
-- :func:`free_update_matrix`: dense, at most 256 nodes; raises above.
-"""
-
-from __future__ import annotations
-
+# Standard library imports
 from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence, Union
 
+# Third-party package imports
 import numpy as np
 import pandas as pd
 import torch
@@ -86,14 +43,18 @@ __all__ = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Dynamics
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------------
+# dynamics
+# ------------------------------------------------------------------
 
 
 def _free_and_sensory_indices(model):
-    """``(free_idx, sensory_idx)`` long tensors: the clamped input nodes
-    (``model.sensory_indices``) and everything else."""
+    """
+    Split the nodes into free (non-sensory) and sensory indices.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: ``(free_idx, sensory_idx)``.
+    """
     n_nodes = model.all_weights.shape[0]
     device = model.all_weights.device
     sensory_idx = model.sensory_indices.detach().long().to(device)
@@ -104,8 +65,10 @@ def _free_and_sensory_indices(model):
 
 
 def _as_sensory_values(model, sensory_values):
-    """``sensory_values`` as a flat float32 tensor on the model's device,
-    checked against ``model.sensory_indices``."""
+    """
+    Convert sensory values to a flat float32 tensor on the model's device, and
+    check that there is one value per sensory node.
+    """
     sensory_values = torch.as_tensor(
         sensory_values, dtype=torch.float32, device=model.all_weights.device
     ).reshape(-1)
@@ -115,23 +78,23 @@ def _as_sensory_values(model, sensory_values):
 
 
 def network_step(model, state, sensory_values):
-    """One discrete-time step of the network with clamped sensory nodes.
+    """
+    One time step of the network, with the sensory nodes clamped.
 
-    Applies the model's installed activation (built-in or custom) plus its
-    ``output_rectify`` / ``output_clamp_max`` post-processing where present, so
-    the step matches ``model.forward`` for a single timestep.
+    Uses the model's activation (built-in or custom), followed by
+    ``output_rectify`` / ``output_clamp_max`` where set, so that the step
+    matches one time step of ``model.forward``.
 
     Args:
-        model: the network. Must run with ``sensory_input_mode="replace"``
-            (raises otherwise: in ``"add"`` mode the sensory nodes remain
-            dynamical and a clamped step would misrepresent the dynamics).
-        state (array-like or torch.Tensor): full-network state, shape
-            ``(n_nodes,)``.
-        sensory_values (array-like or torch.Tensor): values for the sensory
+        model (MultilayeredNetwork or LinearNetwork): The network. Must use
+            ``sensory_input_mode="replace"``.
+        state (array-like or torch.Tensor): State of all nodes, shape
+            (n_nodes,).
+        sensory_values (array-like or torch.Tensor): Values of the sensory
             nodes, in the order of ``model.sensory_indices``.
 
     Returns:
-        torch.Tensor: the next state, shape ``(n_nodes,)``.
+        torch.Tensor: The next state, shape (n_nodes,).
     """
     if model.sensory_input_mode != "replace":
         raise ValueError("network_step assumes sensory_input_mode='replace'.")
@@ -161,26 +124,27 @@ def network_fixed_point(
     tol: float = 1e-4,
     return_info: bool = False,
 ):
-    """Iterate :func:`network_step` to a fixed point for constant sensory input.
-
-    Warm-startable: pass the previous fixed point as ``initial_state`` to
-    converge in a few steps when the parameters have only moved slightly (e.g.
-    between optimizer steps). Runs under ``torch.no_grad()`` — the returned
-    state carries no graph.
+    """
+    Iterate ``network_step()`` with constant sensory input until the state stops
+    changing. Runs without gradients.
 
     Args:
-        model: the network (``sensory_input_mode="replace"``).
-        sensory_values (array-like): constant sensory drive, in the order of
+        model (MultilayeredNetwork or LinearNetwork): The network, with
+            ``sensory_input_mode="replace"``.
+        sensory_values (array-like): Constant sensory input, in the order of
             ``model.sensory_indices``.
-        initial_state (array-like, optional): starting state; zeros if None.
-        max_steps (int): iteration cap.
-        min_steps (int): minimum iterations before the tolerance may stop.
-        tol (float): max-abs state change below which iteration stops.
-        return_info (bool): also return an info dict.
+        initial_state (array-like, optional): Starting state, e.g. the previous
+            fixed point, which makes convergence fast when the parameters have
+            changed only slightly. Defaults to zeros.
+        max_steps (int, optional): Maximum number of steps. Defaults to 2000.
+        min_steps (int, optional): Minimum number of steps. Defaults to 20.
+        tol (float, optional): Stop when the largest absolute change of the
+            state is below this. Defaults to 1e-4.
+        return_info (bool, optional): Also return a dict with ``iterations``,
+            ``residual`` and ``converged``. Defaults to False.
 
     Returns:
-        torch.Tensor, or ``(state, info)`` when ``return_info`` — ``info`` has
-        ``"iterations"``, ``"residual"``, ``"converged"``.
+        torch.Tensor: The fixed point, or ``(state, info)`` if ``return_info``.
     """
     device = model.all_weights.device
     sensory_values = _as_sensory_values(model, sensory_values)
@@ -215,8 +179,10 @@ def network_fixed_point(
 
 
 def _effective_weights_to_scipy(model):
-    """``model.effective_weights`` as a scipy CSR matrix (post in rows, pre in
-    cols), float64. Used by the sparse (large-network) routines."""
+    """
+    ``model.effective_weights`` as a float64 scipy CSR matrix (post in rows,
+    pre in columns).
+    """
     weights = model.effective_weights.coalesce()
     idx = weights.indices().detach().cpu().numpy()
     vals = weights.values().detach().cpu().numpy().astype(np.float64, copy=False)
@@ -227,19 +193,16 @@ def _effective_weights_to_scipy(model):
 def _steady_state_sparse_solve(
     model, sensory_values, free_idx, sensory_idx, slopes, biases
 ):
-    """Sparse LU solve of the free-node linear steady state (float64, no grad).
+    """
+    Solve the linear steady state of the free nodes with a sparse LU
+    factorisation (float64, no gradient).
 
     Solves ``S x_f = slope_f * (W_fs s) + bias_f`` with
-    ``S = I - diag(slope_f) W_ff`` via a scipy ``splu`` factorisation, and
-    returns both the free-node solution and the factorisation itself. ``S`` is
-    the free-block ``(I - df/dx)`` of the linear map ``f(x) = slope * (W x) + b``
-    (whose Jacobian is ``diag(slope_f) W_ff``), so the same factorisation serves
-    the IFT adjoint's transposed solve in
-    :class:`_SparseLinearSteadyStateAdjoint`.
+    ``S = I - diag(slope_f) W_ff``. The factorisation is returned too, so that
+    the backward pass can reuse it.
 
     Returns:
-        tuple[np.ndarray, scipy.sparse.linalg.SuperLU]: ``(x_free, lu)``, both
-        float64/CPU.
+        tuple[np.ndarray, scipy.sparse.linalg.SuperLU]: ``(x_free, lu)``.
     """
     from scipy.sparse import linalg as spla
 
@@ -264,13 +227,14 @@ def _steady_state_sparse_solve(
 
 
 class _FreeBlockAdjoint(torch.autograd.Function):
-    """Implicit-function-theorem adjoint for an equilibrium ``x* = f(x*)``.
+    """
+    Gradient of an equilibrium ``x* = f(x*)`` by the implicit function theorem.
 
-    Forward is the identity. Backward replaces the free-block gradient ``g`` by
-    ``solve_T(g) = (I - M)^-T g``, with ``M`` the free-block Jacobian ``df/dx``
-    at ``x*``; everything else passes through. Applied to one differentiable
-    evaluation of ``f`` at the detached ``x*``, this turns ``df/dtheta`` into
-    the total derivative ``dx*/dtheta``.
+    The forward pass is the identity. The backward pass replaces the gradient
+    ``g`` on the free nodes by ``solve_T(g) = (I - M)^-T g``, where ``M`` is the
+    Jacobian ``df/dx`` on the free nodes at ``x*``. Applied to one
+    differentiable evaluation of ``f`` at the (detached) ``x*``, this gives the
+    gradient of ``x*`` with respect to the model parameters.
     """
 
     @staticmethod
@@ -290,26 +254,20 @@ class _FreeBlockAdjoint(torch.autograd.Function):
 def _linear_steady_state_sparse_diff(
     model, sensory_values, free_idx, sensory_idx, slopes, biases, state
 ):
-    """Differentiable sparse linear steady state (above the dense limit).
-
-    Forward: the float64 ``splu`` solve (no grad). Backward: one differentiable
-    application of ``f(x) = slope * (W_eff x) + bias`` at the detached ``x*``
-    supplies ``df/dtheta``, and :class:`_FreeBlockAdjoint` applies
-    ``S^-T`` by a transposed solve reusing the forward factorisation — the
-    same gradient as the dense path, without densifying ``W``. The
-    equilibrium does not depend on tau, so tau gets no gradient.
+    """
+    Differentiable linear steady state for large networks, without
+    densifying the weights. The backward pass reuses the LU factorisation of
+    the forward solve.
     """
     x_free_np, lu = _steady_state_sparse_solve(
         model, sensory_values, free_idx, sensory_idx, slopes, biases
     )
     device = model.all_weights.device
-    # x* with sensory nodes clamped; detached, so theta is the only grad path.
     x_star = state.clone()
     x_star[free_idx] = torch.as_tensor(x_free_np, dtype=torch.float32, device=device)
 
-    # Differentiable linear free-map at the (constant) solution: the free rows
-    # equal f(x*) = x* in value but carry df/dtheta (through effective_weights
-    # for pair slopes/weights, and directly for node slopes and biases).
+    # One differentiable evaluation of the linear map at the solution: equal to
+    # x* in value, but carries the gradient with respect to the parameters.
     weighted = torch.sparse.mm(
         model.effective_weights, x_star.reshape(-1, 1)
     ).reshape(-1)
@@ -326,29 +284,25 @@ def _linear_steady_state_sparse_diff(
 
 
 def linear_network_steady_state(model, sensory_values):
-    """Closed-form steady state of a linear network given clamped sensory inputs.
+    """
+    Steady state of a linear network with the sensory nodes clamped, computed
+    in closed form. Differentiable with respect to the model parameters.
 
-    Solves the fixed point of the linear update with per-node slopes and biases,
-    treating ``model.sensory_indices`` as clamped to ``sensory_values``. Assumes
-    the linear (identity) activation regime. The fixed point is independent of
-    ``tau``, so ``tau`` is not used here.
+    The steady state does not depend on ``tau``.
 
     Args:
-        model (LinearNetwork): the network.
-        sensory_values (array-like or torch.Tensor): values for the sensory
+        model (LinearNetwork): The network.
+        sensory_values (array-like or torch.Tensor): Values of the sensory
             nodes, in the order of ``model.sensory_indices``.
 
     Returns:
-        torch.Tensor: the steady-state activity over all nodes.
+        torch.Tensor: The steady state of all nodes.
 
     Note:
-        Treating the sensory nodes as clamped is only exact when the model runs
-        with ``sensory_input_mode="replace"``; in ``"add"`` mode the sensory
-        nodes remain dynamical and this is an approximation.
-        Differentiable at any size: networks with at most 256 nodes use a
-        dense solve (autograd through ``torch.linalg.solve``), larger ones a
-        sparse LU solve (scipy ``splu``, CPU/float64) whose gradient is the
-        implicit-function-theorem adjoint reusing the same factorisation.
+        Exact only with ``sensory_input_mode="replace"``; in ``"add"`` mode the
+        sensory nodes are not clamped and this is an approximation. Networks
+        with up to 256 nodes use a dense solve; larger networks use a sparse
+        LU solve (scipy ``splu``, on the CPU).
     """
     free_idx, sensory_idx = _free_and_sensory_indices(model)
     device = model.all_weights.device
@@ -382,14 +336,11 @@ def linear_network_steady_state(model, sensory_values):
 def _newton_fixed_point_dense(
     model, sensory_values, free_idx, sensory_idx, initial_state, fp_tol
 ):
-    """Float64 Newton solve of the free-node fixed point of :func:`network_step`.
-
-    Uses MINPACK's ``hybrd`` (Powell's hybrid method, ``scipy.optimize.root``
-    method ``"hybr"``) with the analytic Jacobian ``free_update_matrix - I``.
-    The residual is evaluated through the model's own float32 forward
-    machinery, so the achievable residual floor is ~1e-7; the returned state
-    is verified to be a fixed point of :func:`network_step` to ``fp_tol`` and
-    the solve raises otherwise. Runs under the caller's ``no_grad``.
+    """
+    Solve for the fixed point of ``network_step()`` with Newton's method
+    (``scipy.optimize.root``, method ``"hybr"``), using the Jacobian from
+    ``free_update_matrix()``. Raises if the result is not a fixed point to
+    within ``fp_tol``.
     """
     from scipy import optimize
 
@@ -443,64 +394,39 @@ def _newton_fixed_point_dense(
 def nonlinear_network_steady_state(
     model, sensory_values, initial_state=None, fp_tol: float = 1e-5
 ):
-    """Differentiable equilibrium of a nonlinear network with clamped inputs.
+    """
+    Steady state of a nonlinear network with the sensory nodes clamped.
+    Differentiable with respect to the model parameters.
 
-    Solves the fixed point of :func:`network_step` for constant
-    ``sensory_values`` and returns it as a tensor whose gradient with respect
-    to the model parameters is the exact total derivative given by the
-    implicit function theorem — the nonlinear analog of
-    :func:`linear_network_steady_state`, for use as a per-epoch
-    ``initial_state`` via
+    The fixed point of ``network_step()`` is found with Newton's method,
+    without gradients. The gradient is then obtained from the implicit
+    function theorem: one differentiable ``network_step()`` at the solution,
+    followed by a linear solve with the Jacobian at the solution in the
+    backward pass. This is the nonlinear counterpart of
+    ``linear_network_steady_state()``, e.g. for
     ``make_initial_state_fn(..., detach=False, warm_start_kw="initial_state")``.
 
-    Mechanics (the standard fixed-point differentiation recipe, as in Deep
-    Equilibrium Models or SciML's ``SteadyStateAdjoint``; solver internals are
-    never differentiated):
-
-    - **forward**: float64 Newton (MINPACK ``hybrd`` via
-      ``scipy.optimize.root``) on the free-node block, with the analytic
-      Jacobian from :func:`free_update_matrix`; verified to be a fixed point
-      of :func:`network_step` to ``fp_tol``, raising otherwise.
-    - **backward**: one differentiable application of :func:`network_step` at
-      the (detached) solution provides ``∂f/∂θ`` through the model's own
-      forward machinery, and the incoming gradient is premultiplied by
-      ``(I - M)^-T`` (dense float64 solve) where ``M`` is the free-node
-      update Jacobian at the solution.
-
-    The local gain inside ``M`` comes from ``model.activation_gain`` — a model
-    with a custom ``activation_function`` and no ``activation_gain_fn``
-    raises, exactly as :func:`stability_penalty` does.
-
     Args:
-        model: the network (``sensory_input_mode="replace"``), with at most
-            256 nodes — there is no sparse backend. For larger networks use
-            :func:`network_fixed_point` (no gradient).
-        sensory_values (array-like): constant sensory drive, in the order of
+        model (MultilayeredNetwork or LinearNetwork): The network, with
+            ``sensory_input_mode="replace"`` and at most 256 nodes. For larger
+            networks, use ``network_fixed_point()`` (no gradient).
+        sensory_values (array-like): Constant sensory input, in the order of
             ``model.sensory_indices``.
-        initial_state (array-like, optional): warm start for the Newton
-            solve, e.g. the previous epoch's equilibrium.
-        fp_tol (float): max-abs ``network_step`` residual accepted at the
-            solution.
+        initial_state (array-like, optional): Starting point for the Newton
+            solve, e.g. the previous epoch's steady state. Defaults to None
+            (zeros).
+        fp_tol (float, optional): Largest accepted change of the state under
+            one ``network_step()`` at the solution. Defaults to 1e-5.
 
     Returns:
-        torch.Tensor: the equilibrium over all nodes (float32, sensory nodes
-        clamped), carrying the implicit-gradient graph when gradients are
-        enabled. Its value equals one ``network_step`` application at the
-        Newton solution, i.e. it matches the exact fixed point to
-        ``<= fp_tol``.
+        torch.Tensor: The steady state of all nodes.
 
     Note:
-        The IFT is applied to the step map itself (Jacobian ``M`` from
-        :func:`free_update_matrix`) rather than to the tau-free equilibrium
-        condition ``activation(...) - x = 0``: the two defining equations
-        differ only by the invertible row scaling ``diag(1/tau)``, which
-        cancels in the implicit derivative, so the gradients are identical
-        at the fixed point. The step map is used because it reuses the
-        model's own forward and the stability code's Jacobian.
-        The equilibrium does not involve ``tau`` (the leak cancels at a
-        fixed point), so the tau gradient is zero up to the solve residual.
-        Conditioning: the adjoint solve amplifies by ``(1 - rho(M))^-1``,
-        which grows as the spectral radius approaches 1.
+        The Jacobian needs the derivative of the activation, so a model with a
+        custom ``activation_function`` must also have an ``activation_gain_fn``.
+        The steady state does not depend on ``tau``, so the gradient with
+        respect to ``tau`` is zero. The backward solve becomes ill-conditioned
+        as the spectral radius of the Jacobian approaches 1.
     """
     free_idx, sensory_idx = _free_and_sensory_indices(model)
     device = model.all_weights.device
@@ -529,41 +455,33 @@ def nonlinear_network_steady_state(
     def solve_T(g):
         return torch.linalg.solve(system_transposed, g.to(system_transposed))
 
-    # One differentiable application at the (constant) solution supplies
-    # ∂f/∂θ; the adjoint correction turns its gradient into the IFT total
-    # derivative. x_star carries no graph, so θ is the only gradient path.
+    # x_star has no graph, so the parameters are the only gradient path
     stepped = network_step(model, x_star, sensory_values)
     return _FreeBlockAdjoint.apply(stepped, solve_T, free_idx)
 
 
 def make_initial_state_fn(solver, detach: bool = True, warm_start_kw: Optional[str] = None):
-    """Wrap a state solver into a per-epoch ``initial_state`` callable.
-
-    ``train_model`` accepts a callable ``initial_state``; it is invoked once at
-    the start of every epoch, after the previous step + projections, so the
-    rollout's t=0 state tracks the evolving model instead of freezing the
-    *initial* model's equilibrium for all epochs. (A fixed t=0 state goes
-    stale as the parameters move, and a slow hidden time constant lets the fit
-    exploit the stale transient.)
+    """
+    Wrap a steady-state solver into a callable for
+    ``train_model(initial_state=...)``, which calls it at the start of every
+    epoch. The initial state then follows the model as it trains, instead of
+    staying at the steady state of the initial model.
 
     Args:
-        solver: ``fn(model, **kwargs) -> (n_nodes,) state tensor``, e.g.
-            ``functools.partial(linear_network_steady_state, sensory_values=u0)``
-            or a tolerance-bound :func:`network_fixed_point` partial.
-        detach (bool): detach the returned state from the autograd graph
-            (default). The loss then treats the t=0 state as a constant each
-            epoch — the finite-horizon truncation of the fully self-consistent
-            gradient. ``False`` lets gradients flow through a differentiable
-            solver (:func:`linear_network_steady_state`,
-            :func:`nonlinear_network_steady_state`); it has no effect on
-            solvers that run under ``no_grad`` (:func:`network_fixed_point`).
-        warm_start_kw (str, optional): name of the solver's starting-iterate
-            keyword (``"initial_state"`` for :func:`network_fixed_point`).
-            When set, each call passes the previous epoch's (detached) result
-            so an iterative solver warm-starts. None for closed-form solvers.
+        solver (callable): ``fn(model, **kwargs) -> state``, e.g.
+            ``functools.partial(linear_network_steady_state, sensory_values=u0)``.
+        detach (bool, optional): Detach the returned state from the autograd
+            graph, so the initial state is treated as a constant in each epoch.
+            Set to False to let gradients flow through a differentiable solver
+            (``linear_network_steady_state()``,
+            ``nonlinear_network_steady_state()``). Defaults to True.
+        warm_start_kw (str, optional): Name of the solver's keyword for a
+            starting state (``"initial_state"`` for ``network_fixed_point()``
+            and ``nonlinear_network_steady_state()``). If given, each call
+            starts from the previous epoch's result. Defaults to None.
 
     Returns:
-        callable: ``fn(model) -> state``, for ``train_model(initial_state=...)``.
+        callable: ``fn(model) -> state``.
     """
     cache = {"state": None}
 
@@ -578,43 +496,36 @@ def make_initial_state_fn(solver, detach: bool = True, warm_start_kw: Optional[s
     return initial_state_fn
 
 
-# ---------------------------------------------------------------------------
-# Stability
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------------
+# stability
+# ------------------------------------------------------------------
 
-# Networks with at most this many nodes use exact dense routines (closed-form
-# solve and full eigendecomposition); larger networks switch to sparse routines.
-# The binding cost is the dense eigendecomposition in stability_penalty
-# (O(n^3), evaluated every training step). On CPU that is ~20 ms at n=256 but
-# ~240 ms at n=800, so 256 keeps the exact penalty wherever it is still cheap
-# and hands off to the sparse Gershgorin bound only for substantially larger
-# models. It sits comfortably above any cell-type model and well below neuron
-# scale.
+# Up to this many nodes, the steady-state and stability functions use exact
+# dense computations; above it, sparse ones. The dense eigendecomposition in
+# stability_penalty runs every training step and takes ~20 ms at 256 nodes but
+# ~240 ms at 800 nodes (CPU).
 _DENSE_NODE_LIMIT = 256
 
 
 def free_update_matrix(model, state=None):
-    """One-step update Jacobian restricted to the free (non-sensory) nodes.
-
-    Builds ``diag((tau - 1) / tau) + (gain / tau) * W`` — where ``gain`` is the
-    model's per-node local gain at ``state`` (``model.activation_gain``) — and
-    restricts it to the free-node block. Its spectral radius governs
-    discrete-time stability of the linearised network.
+    """
+    Jacobian of one network step, restricted to the free (non-sensory) nodes:
+    ``diag((tau - 1) / tau) + (gain / tau) * W``, where ``gain`` is the local
+    gain of the activation at ``state`` (``model.activation_gain``). The network
+    is stable around ``state`` if the spectral radius of this matrix is below 1.
 
     Args:
-        model: the network.
-        state (torch.Tensor, optional): operating point. Required whenever the
-            model's gain is state-dependent (custom activations, the built-in
-            ``MultilayeredNetwork`` activation); a ``LinearNetwork`` needs none.
+        model (MultilayeredNetwork or LinearNetwork): The network, with at most
+            256 nodes.
+        state (torch.Tensor, optional): State at which to linearise. Needed if
+            the gain depends on the state (``MultilayeredNetwork``, custom
+            activations), not for a ``LinearNetwork``. Defaults to None.
 
     Returns:
-        torch.Tensor: square update matrix over the free nodes (possibly
-        ``(0, 0)`` if there are no free nodes).
+        torch.Tensor: Square matrix over the free nodes.
 
     Note:
-        Restricting to the free-node block is the correct linearisation only
-        when the sensory nodes are clamped (``sensory_input_mode="replace"``).
-        Dense, so limited to networks with at most 256 nodes (raises above).
+        Assumes clamped sensory nodes (``sensory_input_mode="replace"``).
     """
     n_nodes = model.all_weights.shape[0]
     if n_nodes > _DENSE_NODE_LIMIT:
@@ -633,13 +544,10 @@ def free_update_matrix(model, state=None):
 
 
 def _gershgorin_spectral_radius_bound(model, free_idx, gain):
-    """Differentiable Gershgorin upper bound on the free-block spectral radius.
-
-    Every eigenvalue of the free-node update matrix ``M`` lies within a disc
-    centred at ``M_ii`` of radius ``sum_{j!=i} |M_ij|``, so
-    ``max_i (|M_ii| + sum_{j!=i} |M_ij|)`` upper-bounds the spectral radius.
-    Computed from the sparse edge list (no densification), so it scales to
-    neuron-sized networks and stays differentiable w.r.t. weights/gain/tau.
+    """
+    Upper bound on the spectral radius of the update matrix ``M`` from the
+    Gershgorin circle theorem: ``max_i (|M_ii| + sum_{j != i} |M_ij|)``.
+    Computed from the sparse weights and differentiable.
     """
     weights = model.effective_weights.coalesce()
     idx = weights.indices()
@@ -649,16 +557,16 @@ def _gershgorin_spectral_radius_bound(model, free_idx, gain):
     device = vals.device
 
     taus = model.node_parameter("tau")
-    scale = gain / taus  # per-row (post-synaptic) factor on W
+    scale = gain / taus  # per post-synaptic node
 
     free_mask = torch.zeros(n, dtype=torch.bool, device=device)
     free_mask[free_idx] = True
     edge_free = free_mask[post] & free_mask[pre]
     post_f = post[edge_free]
-    m_vals = scale[post_f] * vals[edge_free]  # M_ij contributions from W
+    m_vals = scale[post_f] * vals[edge_free]
     diag_edge = post_f == pre[edge_free]
 
-    leak = (taus - 1.0) / taus  # diagonal contribution of the leak term
+    leak = (taus - 1.0) / taus
     diag_from_w = torch.zeros(n, dtype=m_vals.dtype, device=device)
     if torch.any(diag_edge):
         diag_from_w = diag_from_w.index_add(0, post_f[diag_edge], m_vals[diag_edge])
@@ -676,7 +584,9 @@ def _gershgorin_spectral_radius_bound(model, free_idx, gain):
 
 
 def _spectral_radius_sparse(model, free_idx, gain):
-    """Spectral radius of the free-node update matrix via ARPACK (float, no grad)."""
+    """
+    Spectral radius of the update matrix of a large network, via ARPACK.
+    """
     from scipy.sparse import linalg as spla
 
     weights = _effective_weights_to_scipy(model)
@@ -696,35 +606,27 @@ def _spectral_radius_sparse(model, free_idx, gain):
 
 
 def stability_penalty(model, state=None, margin: float = 1e-4):
-    """Differentiable penalty pushing the free-node spectral radius below 1.
-
-    Returns ``relu(rho - (1 - margin)) ** 2``. Zero when the network is
-    comfortably stable; positive (and gradient-bearing) otherwise. Suitable as
-    an additive term in a ``train_model`` ``activation_loss_fn`` (see
-    :func:`make_affine_readout_loss`).
-
-    The local gain comes from ``model.activation_gain(state)``: a model with a
-    custom ``activation_function`` and no ``activation_gain_fn`` **raises**
-    rather than silently penalising the wrong Jacobian.
+    """
+    Differentiable penalty ``relu(rho - (1 - margin)) ** 2`` on the spectral
+    radius ``rho`` of ``free_update_matrix()``. It is zero for a stable network
+    and can be added to a ``train_model`` loss (see
+    ``make_affine_readout_loss()``).
 
     Args:
-        model: the network.
-        state (torch.Tensor, optional): operating point for state-dependent
-            gains; a ``LinearNetwork`` needs none.
-        margin (float): stability margin below 1.
+        model (MultilayeredNetwork or LinearNetwork): The network.
+        state (torch.Tensor, optional): State at which to linearise; see
+            ``free_update_matrix()``. Defaults to None.
+        margin (float, optional): Required distance of ``rho`` below 1.
+            Defaults to 1e-4.
 
     Returns:
-        torch.Tensor: scalar penalty.
+        torch.Tensor: Scalar penalty.
 
     Note:
-        For networks with at most 256 nodes, ``rho`` is the
-        exact spectral radius of :func:`free_update_matrix` (dense
-        eigendecomposition). For larger networks, ``rho`` is a sparse,
-        differentiable **Gershgorin upper bound** on the spectral radius. The
-        bound is conservative, so switching to the sparse regime penalises more
-        aggressively than the exact version at the same ``margin``/loss weight.
-        Both regimes assume clamped sensory nodes
-        (``sensory_input_mode="replace"``).
+        Up to 256 nodes, ``rho`` is the exact spectral radius. Above that, it is
+        the Gershgorin upper bound, which is conservative, so the penalty is
+        stricter than the exact one. A model with a custom
+        ``activation_function`` must also have an ``activation_gain_fn``.
     """
     free_idx, _ = _free_and_sensory_indices(model)
     if free_idx.numel() == 0:
@@ -740,26 +642,21 @@ def stability_penalty(model, state=None, margin: float = 1e-4):
 
 
 def spectral_radius(model, state=None):
-    """Spectral radius of the free-node update matrix, as a Python float.
-
-    No-grad diagnostic counterpart to :func:`stability_penalty`. A value below
-    1 indicates a stable discrete-time linearisation at ``state``.
+    """
+    Spectral radius of ``free_update_matrix()``, without gradients. Below 1
+    means the network is stable around ``state``.
 
     Args:
-        model: the network.
-        state (torch.Tensor, optional): operating point for state-dependent
-            gains; a ``LinearNetwork`` needs none.
+        model (MultilayeredNetwork or LinearNetwork): The network.
+        state (torch.Tensor, optional): State at which to linearise; see
+            ``free_update_matrix()``. Defaults to None.
 
     Returns:
-        float: the spectral radius (0.0 if there are no free nodes).
+        float: The spectral radius (0.0 if there are no free nodes).
 
     Note:
-        Networks with at most 256 nodes use a dense
-        eigendecomposition; larger ones use ARPACK
-        (``scipy.sparse.linalg.eigs``) to get the dominant eigenvalue without
-        densifying. Unlike :func:`stability_penalty`, this returns the true
-        spectral radius in both regimes (no Gershgorin bound). Assumes clamped
-        sensory nodes (``sensory_input_mode="replace"``).
+        Up to 256 nodes this uses a dense eigendecomposition, above that ARPACK
+        (``scipy.sparse.linalg.eigs``). Both are exact.
     """
     with torch.no_grad():
         free_idx, _ = _free_and_sensory_indices(model)
@@ -772,50 +669,37 @@ def spectral_radius(model, state=None):
         return float(torch.abs(torch.linalg.eigvals(update)).max().detach().cpu())
 
 
-# ---------------------------------------------------------------------------
-# Sensor (forward observation model)
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------------
+# sensor
+# ------------------------------------------------------------------
 
-# GCaMP6f fluorescence decay time constant (ms). Reasonable literature range
-# ~200-500 ms (Chen et al. 2013 report a single-AP decay half-time ~140-200 ms
-# -> tau ~200-300 ms). 300 ms is a middle-of-the-road default; it is one
-# constant to change and can be swept.
+# GCaMP6f decay time constant in ms (literature range ~200-500 ms)
 GCAMP6F_TAU_MS = 300.0
-_SENSOR_SUPPORT_TAU = 6.0  # truncate the kernel at this many tau (exp(-6) ~ 0.25%)
+_SENSOR_SUPPORT_TAU = 6.0  # kernel length, in multiples of tau
 
 
 class ExponentialSensor:
-    """Fixed linear indicator forward model: a causal single-exponential kernel.
+    """
+    Calcium indicator model: convolves activity with a causal exponential
+    kernel ``exp(-t / tau)``, normalised to sum to 1.
 
-    Forward observation model for fitting a rate model to *raw* (un-
-    deconvolved) indicator data such as calcium dF/F. Instead of deconvolving
-    the data (ill-posed for graded cells), the model's latent activity is
-    convolved with a fixed kernel before comparison — so the recovered rate-
-    model time constants are the neural ones, not neural-convolved-with-sensor.
+    Fitting the model's activity convolved with this kernel to recorded
+    fluorescence avoids deconvolving the data, and keeps the fitted time
+    constants those of the neurons rather than of the indicator. Because the
+    kernel sums to 1, steady levels pass through unchanged.
 
-    The kernel is a sum-normalised causal single exponential (first-order
-    buffering/extrusion), ``k(t) = exp(-t / tau) / Z``. Because ``sum(k) = 1``
-    the DC gain is 1: sustained/plateau levels pass through unchanged and only
-    transient kinetics are low-passed. It is linear time-invariant: it reshapes
-    and delays transients but manufactures no increment/decrement amplitude
-    asymmetry (that would need a static nonlinearity).
-
-    Two entry points share one convolution:
-
-    - :meth:`output_transform` — torch, differentiable; pass the bound method
-      to ``train_model(output_transform=sensor.output_transform)``.
-    - :meth:`apply` — numpy, for post-fit diagnostics.
-
-    For recordings without an indicator (e.g. voltage), use no output
-    transform rather than an identity sensor.
+    Use ``output_transform()`` in training
+    (``train_model(output_transform=sensor.output_transform)``) and ``apply()``
+    on numpy traces; both compute the same convolution.
 
     Args:
-        tau_ms (float): decay time constant in **milliseconds** (matching
-            ``dt_ms``, model ``tau`` and window lengths elsewhere in a fit).
-            Defaults to ``GCAMP6F_TAU_MS`` (300 ms). Do **not** co-fit this
-            with the rate model's own time constants — they are degenerate.
-        dt_ms (float): sampling step of the traces, in ms.
-        support_tau (float): kernel truncation, in multiples of ``tau_ms``.
+        tau_ms (float, optional): Decay time constant in ms. Should not be
+            fitted together with the model's own time constants, since the two
+            are not separately identifiable. Defaults to ``GCAMP6F_TAU_MS``.
+        dt_ms (float, optional): Sampling interval of the traces in ms.
+            Defaults to 1.0.
+        support_tau (float, optional): Kernel length, in multiples of
+            ``tau_ms``. Defaults to 6.
     """
 
     def __init__(
@@ -833,34 +717,42 @@ class ExponentialSensor:
         self.kernel = (kernel / kernel.sum()).astype(np.float32)
         self.tau_ms = float(tau_ms)
         self.dt_ms = float(dt_ms)
-        # F.conv1d is cross-correlation, so flip the kernel to get true
-        # convolution y[t] = sum_k kernel[k] * x[t-k].
+        # F.conv1d computes a cross-correlation, so flip the kernel
         self._weight = torch.as_tensor(self.kernel[::-1].copy()).view(1, 1, -1)
 
     def _convolve(self, x: torch.Tensor) -> torch.Tensor:
-        """Causal, replicate-padded convolution of ``(batch, neurons, T)``."""
+        """
+        Causal convolution along the last axis of a (batch, neurons, T) tensor,
+        padding the start with the first value.
+        """
         b, n, t = x.shape
         weight = self._weight.to(device=x.device, dtype=x.dtype)
         x = F.pad(x.reshape(b * n, 1, t), (weight.shape[-1] - 1, 0), mode="replicate")
         return F.conv1d(x, weight).reshape(b, n, t)
 
     def output_transform(self, outputs: torch.Tensor) -> torch.Tensor:
-        """Causal sensor convolution along the time axis (torch path).
+        """
+        Apply the sensor to model outputs. Differentiable.
 
-        ``outputs`` is ``(batch, neurons, T)``; each node's time series is
-        convolved with the fixed kernel, causally, replicate-padded at the
-        start (the sensor starts from the initial steady state — no start-up
-        ramp). Differentiable w.r.t. ``outputs``; the kernel carries no
-        gradient. Shape-preserving, as ``train_model`` requires.
+        Args:
+            outputs (torch.Tensor): Shape (batch, neurons, T).
+
+        Returns:
+            torch.Tensor: Same shape as ``outputs``.
         """
         if outputs.dim() != 3:
             raise ValueError("output_transform expects (batch, neurons, T).")
         return self._convolve(outputs)
 
     def apply(self, trace):
-        """The same convolution on a numpy trace (float64).
+        """
+        Apply the sensor to a numpy trace.
 
-        ``trace`` is ``(T,)`` or ``(n, T)``; returns the same shape.
+        Args:
+            trace (array-like): Shape (T,) or (n, T).
+
+        Returns:
+            numpy.ndarray: Same shape as ``trace``, float64.
         """
         trace = np.asarray(trace, dtype=np.float64)
         if trace.ndim not in (1, 2):
@@ -869,34 +761,32 @@ class ExponentialSensor:
         return self._convolve(x).reshape(trace.shape).numpy()
 
 
-# ---------------------------------------------------------------------------
-# Affine readout & loss factory
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------------
+# affine readout & loss
+# ------------------------------------------------------------------
 
 
 def affine_readout_solve(latent, target, ridge: float = 1e-4):
-    """Closed-form nonnegative scale + offset for one readout channel.
-
-    Variable projection: minimises ``||scale * latent + offset - target||^2``
-    with a small ridge on the scale (numerical only), then rectifies the scale
-    to be nonnegative. ``scale`` and ``offset`` are differentiable w.r.t.
-    ``latent``, so gradients reach the dynamics that produced it.
+    """
+    Least-squares scale and offset mapping ``latent`` to ``target``, with the
+    scale constrained to be nonnegative. Differentiable with respect to
+    ``latent``.
 
     Args:
-        latent (torch.Tensor): 1-D latent samples for this channel.
-        target (torch.Tensor): 1-D target samples, same length.
-        ridge (float): Tikhonov term on the scale solve.
+        latent (torch.Tensor): 1-D model output for one channel.
+        target (torch.Tensor): 1-D target, same length.
+        ridge (float, optional): Small regulariser on the scale, for numerical
+            stability. Defaults to 1e-4.
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor]: ``(scale, offset)`` as 0-dim
-        tensors.
+        tuple[torch.Tensor, torch.Tensor]: ``(scale, offset)``.
     """
     lm = latent.mean()
     tm = target.mean()
     lc = latent - lm
     tc = target - tm
     scale = (lc * tc).mean() / (lc.pow(2).mean() + ridge)
-    scale = torch.relu(scale)  # nonnegative scale
+    scale = torch.relu(scale)
     offset = tm - scale * lm
     return scale, offset
 
@@ -907,17 +797,11 @@ def _affine_readout_penalties(
     scale_soft_limit: float = 10.0,
     latent_std_floor: float = 0.02,
 ):
-    """Readout-scale soft-limit and latent-std-floor penalties (means over channels).
-
-    The scale penalty ``mean(log1p(|s| / scale_soft_limit) ** 2)`` discourages
-    the readout from amplifying a vanishing latent; the std penalty
-    ``mean(relu(latent_std_floor - std) ** 2)`` keeps the latent itself alive.
-
-    Args:
-        scales (torch.Tensor): 1-D, one readout scale per channel.
-        latent_stds (torch.Tensor): 1-D, one latent std per channel.
-        scale_soft_limit (float): knee of the scale penalty.
-        latent_std_floor (float): floor below which latent std is penalised.
+    """
+    Penalties that stop the readout from compensating for a vanishing model
+    output: ``mean(log1p(|scale| / scale_soft_limit) ** 2)`` on the readout
+    scales, and ``mean(relu(latent_std_floor - std) ** 2)`` on the standard
+    deviation of the model output.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: ``(scale_penalty, std_penalty)``.
@@ -934,24 +818,25 @@ def affine_readout_frame(
     ridge: float = 1e-4,
     window_indices: Optional[Sequence] = None,
 ):
-    """Solve the closed-form readout per channel on final latent windows.
+    """
+    Fit the readout (``affine_readout_solve()``) for each channel of a fitted
+    model.
 
     Args:
-        latent_windows (Mapping): ``{layer: array}`` of latent samples (any
-            shape; flattened).
-        target_windows (Mapping): ``{layer: array}`` of matching targets.
-        layers (sequence, optional): channel order; defaults to
-            ``latent_windows`` keys.
-        ridge (float): passed to :func:`affine_readout_solve`.
-        window_indices (sequence, optional): subset of window rows (first
-            axis of each layer's array) to solve on — e.g. the train windows
-            of a train/test split, so the readout never sees held-out
-            windows. Default: all rows.
+        latent_windows (Mapping): ``{layer: array}`` of model outputs.
+        target_windows (Mapping): ``{layer: array}`` of targets, same shapes.
+        layers (sequence, optional): Channels to fit, in order. Defaults to the
+            keys of ``latent_windows``.
+        ridge (float, optional): See ``affine_readout_solve()``. Defaults to
+            1e-4.
+        window_indices (sequence, optional): Rows (first axis) to fit on, e.g.
+            only the training windows. Defaults to all rows.
 
     Returns:
-        tuple[pd.DataFrame, dict]: the readout-parameters table (columns
-        ``layer, readout_offset, readout_scale, latent_mean, target_mean,
-        latent_std, target_std``) and ``{layer: (scale, offset)}`` floats.
+        tuple[pd.DataFrame, dict]: A table with columns ``layer``,
+        ``readout_offset``, ``readout_scale``, ``latent_mean``,
+        ``target_mean``, ``latent_std`` and ``target_std``, and a dict
+        ``{layer: (scale, offset)}``.
     """
     layers = list(latent_windows) if layers is None else list(layers)
     if window_indices is not None:
@@ -1004,58 +889,53 @@ def make_affine_readout_loss(
     stability_state_fn: Optional[Callable] = None,
     normalize_by_target_var: bool = False,
 ) -> Callable:
-    """Build a ``train_model`` ``activation_loss_fn``: affine-readout MSE
-    (+ optional stability penalty + readout regularisers).
+    """
+    Build a loss for ``train_model(activation_loss_fn=...)`` that compares the
+    model to the targets up to a scale and offset per channel.
 
-    Per readout channel, the closed-form nonnegative scale + offset
-    (:func:`affine_readout_solve`) is applied to the model's (flattened)
-    prediction before the MSE, so the dynamics are fitted up to an affine
-    calibration per channel.
-
-    ``train_model`` flattens the targets in its train/test-split row order,
-    which is a deterministic pure function of the ``targets`` frame; this
-    factory replicates that order to build per-channel masks. Single-batch
-    targets only (``batch == 0`` throughout).
+    In every evaluation, each channel's model output is mapped to the target
+    with ``affine_readout_solve()`` before computing the mean squared error, so
+    the model does not need to match the units of the data. Penalties on the
+    readout stop it from compensating for a vanishing model output, and a
+    stability penalty can be added. Only single-batch targets (``batch == 0``)
+    are supported.
 
     Args:
-        model: the network being fitted (used for the stability term).
-        targets (pd.DataFrame): the same frame passed to ``train_model``
-            (columns ``batch, neuron_idx, layer, value``).
-        layer_ids (sequence of int): the ``neuron_idx`` value of each readout
-            channel, in channel order — model row indices for per-node targets,
-            group ids when fitting with ``target_node_groups``.
-        expected_layer_windows (Mapping, optional): ``{layer_id: array}`` of
-            the target windows from the data source. When given, the first loss
-            evaluation asserts each channel's flattened targets reproduce that
-            array's mean/std — a cheap end-to-end check that the replicated
-            ordering is right.
-        ridge, scale_soft_limit, latent_std_floor, scale_reg_weight,
-        std_reg_weight: readout solve/penalty parameters, see
-            :func:`affine_readout_solve` / :func:`_affine_readout_penalties`.
-        stability_weight (float): weight of :func:`stability_penalty` in the
-            loss. Defaults to ``0.0`` — stability is explicit opt-in. A
-            positive value with a model whose local gain is unavailable (custom
-            activation, no ``activation_gain_fn``) raises **here**, at build
-            time, rather than silently fitting without the constraint.
-        stability_margin (float): margin passed to :func:`stability_penalty`.
-        stability_state_fn (callable, optional): ``fn(previous_state) ->
-            state`` returning the operating point to linearise at, called once
-            per loss evaluation with the previous returned state (None on the
-            first call) so a fixed-point solver can warm-start. Omit for
-            state-independent gains (``LinearNetwork``).
-        normalize_by_target_var (bool): when True, each channel's MSE is
-            weighted by ``mean(target_var) / target_var(channel)`` before
-            averaging — inverse-variance channel weighting, so a channel's
-            contribution measures its *relative* misfit (proportional to
-            ``1 - R^2``) rather than its raw amplitude, and small-amplitude
-            channels are no longer under-served. The ``mean(target_var)``
-            factor keeps the overall loss on the same scale as the
-            unnormalized version (equal-variance channels reproduce it
-            exactly), so the penalty weights and loss histories stay
-            comparable. Variances come from the targets of each evaluation.
+        model (MultilayeredNetwork or LinearNetwork): The network being fitted.
+        targets (pd.DataFrame): The targets passed to ``train_model``, with
+            columns ``batch``, ``neuron_idx``, ``layer`` and ``value``.
+        layer_ids (sequence of int): The ``neuron_idx`` of each channel: node
+            indices, or group ids when fitting with ``target_node_groups``.
+        expected_layer_windows (Mapping, optional): ``{layer_id: array}`` of the
+            target windows. If given, the first evaluation checks that each
+            channel's targets have the same mean and standard deviation, which
+            confirms that the channels are matched up correctly. Defaults to
+            None.
+        ridge (float, optional): See ``affine_readout_solve()``. Defaults to
+            1e-4.
+        scale_soft_limit (float, optional): Readout scale above which the
+            scale penalty grows quickly. Defaults to 10.0.
+        latent_std_floor (float, optional): Standard deviation of the model
+            output below which it is penalised. Defaults to 0.02.
+        scale_reg_weight (float, optional): Weight of the scale penalty.
+            Defaults to 1e-2.
+        std_reg_weight (float, optional): Weight of the standard-deviation
+            penalty. Defaults to 30.0.
+        stability_weight (float, optional): Weight of ``stability_penalty()``.
+            Defaults to 0.0 (no stability penalty).
+        stability_margin (float, optional): ``margin`` of
+            ``stability_penalty()``. Defaults to 1e-4.
+        stability_state_fn (callable, optional): ``fn(previous_state) -> state``
+            giving the state at which to linearise for the stability penalty.
+            It receives its previous result (None on the first call), e.g. to
+            warm-start ``network_fixed_point()``. Not needed for a
+            ``LinearNetwork``. Defaults to None.
+        normalize_by_target_var (bool, optional): Weight each channel's error by
+            ``mean(target_var) / target_var``, so that channels with small
+            amplitude count as much as large ones. Defaults to False.
 
     Returns:
-        callable: ``loss_fn(pred, target) -> scalar torch.Tensor``.
+        callable: ``loss_fn(pred, target)`` returning a scalar tensor.
     """
     layer_ids = [int(i) for i in layer_ids]
     batches = sorted(set(targets["batch"].tolist()))
@@ -1071,7 +951,6 @@ def make_affine_readout_loss(
         and model.custom_activation_function is not None
         and model.custom_activation_gain_fn is None
     ):
-        # Checked here so the error comes at build time, not on the first step.
         raise ValueError(
             "stability_weight > 0 requires the model's local gain, but this "
             "model has a custom activation_function and no activation_gain_fn. "
@@ -1079,10 +958,8 @@ def make_affine_readout_loss(
             "stability_weight=0 to fit without the stability penalty."
         )
 
-    # Replicate train_model's flat target order: filter to the batch, then
-    # sort_values("batch") (not stable on the all-equal key, but deterministic),
-    # and group by neuron_idx with boolean masks instead of assuming contiguous
-    # blocks. Within-channel order is irrelevant to per-channel reductions.
+    # train_model flattens the targets in this order; the masks pick out each
+    # channel's entries
     order = targets[targets["batch"].isin([0])].copy()
     order.loc[:, ["batch"]] = pd.Categorical(order["batch"], categories=[0])
     order = order.sort_values(by="batch")
@@ -1135,7 +1012,7 @@ def make_affine_readout_loss(
             weights = tvars.mean() / tvars
             loss = (weights * torch.stack(mses)).mean()
         else:
-            loss = torch.stack(mses).mean()  # equal-sized channels -> global MSE
+            loss = torch.stack(mses).mean()
         scale_penalty, std_penalty = _affine_readout_penalties(
             torch.stack(scales),
             torch.stack(latent_stds),
@@ -1159,26 +1036,28 @@ def make_affine_readout_loss(
     return loss_fn
 
 
-# ---------------------------------------------------------------------------
-# Windows & metrics
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------------
+# windows & metrics
+# ------------------------------------------------------------------
 
 
 def score_mask_for_transition_windows(
     n_samples: int, transition_idx, window_steps: int
 ) -> np.ndarray:
-    """Boolean mask selecting the scored post-transition windows of a trace.
+    """
+    Boolean mask of the samples in the windows that follow each transition.
 
     Args:
-        n_samples (int): trace length in samples.
-        transition_idx (array-like of int): start sample of each window.
-        window_steps (int): window length in samples.
+        n_samples (int): Length of the trace.
+        transition_idx (array-like of int): First sample of each window.
+        window_steps (int): Length of each window.
 
     Returns:
-        np.ndarray: boolean mask of length ``n_samples``.
+        np.ndarray: Boolean mask of length ``n_samples``.
 
     Raises:
-        ValueError: if a window runs past the trace end or windows overlap.
+        ValueError: If a window extends past the end of the trace, or windows
+            overlap.
     """
     transition_idx = np.asarray(transition_idx, dtype=np.int64)
     n_samples = int(n_samples)
@@ -1202,27 +1081,25 @@ def build_raw_window_targets(
     node_index: Mapping,
     layers: Optional[Sequence] = None,
 ) -> pd.DataFrame:
-    """Long-format ``train_model`` targets over post-transition windows.
-
-    One row per (channel, scored sample): columns ``batch`` (always 0),
-    ``neuron_idx``, ``layer`` (the timestep) and ``value``.
+    """
+    Targets for ``train_model`` from the windows that follow each transition,
+    with one row per channel and sample.
 
     Args:
-        target_traces (Mapping): ``{layer: 1-D target trace}``.
-        transition_idx (array-like of int): start sample of each window.
-        window_steps (int): window length in samples.
-        node_index (Mapping): ``{layer: neuron_idx}`` — the model row index for
-            per-node targets, or the group id when fitting with
-            ``target_node_groups``. One signature serves both conventions.
-        layers (sequence, optional): channel order; defaults to
-            ``target_traces`` keys.
+        target_traces (Mapping): ``{layer: 1-D trace}``.
+        transition_idx (array-like of int): First sample of each window.
+        window_steps (int): Length of each window.
+        node_index (Mapping): ``{layer: neuron_idx}``: the node index, or the
+            group id when fitting with ``target_node_groups``.
+        layers (sequence, optional): Channels to include, in order. Defaults to
+            the keys of ``target_traces``.
 
     Returns:
-        pd.DataFrame: the targets frame.
+        pd.DataFrame: Columns ``batch`` (always 0), ``neuron_idx``, ``layer``
+        (the time step) and ``value``.
     """
     layers = list(target_traces) if layers is None else list(layers)
     starts = np.asarray(transition_idx, dtype=np.int64)
-    # sample indices of all windows, in window order
     steps = (starts[:, None] + np.arange(int(window_steps))).reshape(-1)
     frames = []
     for layer in layers:
@@ -1250,18 +1127,20 @@ def extract_transition_windows(
     window_steps: int,
     layers: Optional[Sequence] = None,
 ):
-    """Stack per-transition windows out of continuous traces.
+    """
+    Cut the windows that follow each transition out of one or more traces.
 
     Args:
-        traces: a single 1-D trace, or a mapping/DataFrame of them by layer.
-        transition_idx (array-like of int): start sample of each window.
-        window_steps (int): window length in samples.
-        layers (sequence, optional): with mapping input, the layers to extract
-            (defaults to all keys/columns).
+        traces (array-like, Mapping or pd.DataFrame): A single 1-D trace, or
+            several by layer.
+        transition_idx (array-like of int): First sample of each window.
+        window_steps (int): Length of each window.
+        layers (sequence, optional): Layers to extract, for Mapping or
+            DataFrame input. Defaults to all.
 
     Returns:
-        np.ndarray ``(n_transitions, window_steps)`` for a single trace, or
-        ``{layer: array}`` for mapping input.
+        np.ndarray or dict: Array of shape (n_transitions, window_steps) for a
+        single trace, otherwise ``{layer: array}``.
     """
     n_steps = int(window_steps)
     idx = np.asarray(transition_idx, dtype=np.int64)
@@ -1284,7 +1163,9 @@ def extract_transition_windows(
 
 
 def r2(y, y_pred) -> float:
-    """Coefficient of determination of ``y_pred`` against ``y``."""
+    """
+    Coefficient of determination (R²) of ``y_pred`` for ``y``.
+    """
     y = np.asarray(y, dtype=np.float64).ravel()
     y_pred = np.asarray(y_pred, dtype=np.float64).ravel()
     ss_res = float(np.sum((y - y_pred) ** 2))
@@ -1292,20 +1173,23 @@ def r2(y, y_pred) -> float:
     return 1.0 - ss_res / ss_tot
 
 
-# ---------------------------------------------------------------------------
-# Persistence
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------------
+# persistence
+# ------------------------------------------------------------------
 
 _MODEL_KEY_PREFIX = "model_"
 
 
 def _model_arrays(model) -> dict:
-    """A model's rebuildable state as flat numpy arrays (``model_*`` keys)."""
+    """
+    Everything ``rebuild_network()`` needs, as numpy arrays with ``model_`` keys.
+    """
+
     def np32(tensor):
         return tensor.detach().cpu().numpy().astype(np.float32)
 
     def optional_float(value):
-        # None is stored as inf (npz has no None)
+        # npz cannot store None, so store inf
         return np.asarray(np.inf if value is None else float(value), dtype=np.float32)
 
     weights = model.effective_weights.coalesce()
@@ -1342,23 +1226,19 @@ def _model_arrays(model) -> dict:
 
 
 def save_fit(path, model=None, arrays: Optional[Mapping] = None) -> None:
-    """Save a fitted model (and any run data) to one compressed ``.npz``.
+    """
+    Save a fitted model, and any other arrays, to a compressed ``.npz`` file.
 
-    The model section stores everything :func:`rebuild_network` needs to
-    re-simulate the fit — the **effective** weights (pair-mode gains folded
-    in), per-node bias/tau/slope, sensory indices, threshold and the forward
-    flags. Custom activation functions cannot be serialised; pass them again
-    at rebuild time.
+    The model is stored with its effective weights and per-node parameters, so
+    ``rebuild_network()`` can recreate it. Custom activation functions cannot be
+    saved; pass them again to ``rebuild_network()``.
 
     Args:
-        path: destination ``.npz`` path.
-        model (optional): the fitted network to store.
-        arrays (Mapping, optional): additional arrays to store alongside
-            (traces, windows, readout parameters, ...). Keys must not start
-            with ``"model_"`` (reserved for the model section).
-
-    Raises:
-        ValueError: on a reserved-key collision.
+        path (str or Path): Output file.
+        model (MultilayeredNetwork or LinearNetwork, optional): The fitted
+            network. Defaults to None.
+        arrays (Mapping, optional): Other arrays to save, e.g. traces or readout
+            parameters. Keys must not start with ``"model_"``. Defaults to None.
     """
     data = {}
     if model is not None:
@@ -1375,7 +1255,9 @@ def save_fit(path, model=None, arrays: Optional[Mapping] = None) -> None:
 
 
 def load_fit(path) -> dict:
-    """Load a :func:`save_fit` file back into a plain ``{key: array}`` dict."""
+    """
+    Load a file written by ``save_fit()`` into a dict of arrays.
+    """
     with np.load(path, allow_pickle=False) as npz:
         return {key: npz[key] for key in npz.files}
 
@@ -1386,23 +1268,23 @@ def rebuild_network(
     activation_gain_fn: Optional[Callable] = None,
     device=None,
 ):
-    """Reconstruct a runnable network from a :func:`save_fit` file.
-
-    The rebuilt model carries the saved **effective** weights and exact
-    per-node bias/tau/slope values (each node its own parameter group, biases
-    signed via ``bias_transform="identity"``), so its forward pass reproduces
-    the saved fit — for custom-activation fits, pass the same
-    ``activation_function`` (and its ``activation_gain_fn``) again, since
-    callables cannot be serialised.
+    """
+    Recreate a fitted network saved with ``save_fit()``. The rebuilt network
+    gives the same output as the saved one; every node becomes its own
+    parameter group.
 
     Args:
-        fit: the dict from :func:`load_fit`, or a path to the ``.npz``.
-        activation_function (callable, optional): custom activation to install.
-        activation_gain_fn (callable, optional): its matching local gain.
-        device (torch.device, optional): device for the rebuilt model.
+        fit (dict, str or Path): The output of ``load_fit()``, or the path to
+            the file.
+        activation_function (callable, optional): The custom activation used in
+            the fit, if any. Defaults to None.
+        activation_gain_fn (callable, optional): Its local gain, if any.
+            Defaults to None.
+        device (torch.device, optional): Device for the network. Defaults to
+            None.
 
     Returns:
-        MultilayeredNetwork or LinearNetwork.
+        MultilayeredNetwork or LinearNetwork: The rebuilt network.
     """
     if isinstance(fit, (str, Path)):
         fit = load_fit(fit)
@@ -1414,7 +1296,6 @@ def rebuild_network(
     weights = sparse.coo_matrix(
         (np.asarray(fit["model_weights_values"]), (idx[0], idx[1])), shape=shape
     ).tocsr()
-    # each node becomes its own parameter group
     node_names = [f"n{i}" for i in range(shape[0])]
 
     def per_node(key):
@@ -1455,17 +1336,19 @@ def rebuild_network(
 def simulate_trace(
     model, inputs: torch.Tensor, node_columns: Mapping, initial_state=None
 ) -> pd.DataFrame:
-    """Run the model over ``inputs`` and return a tidy per-timestep DataFrame.
+    """
+    Run the model on ``inputs`` and return selected nodes as a DataFrame.
 
     Args:
-        model: the network.
-        inputs (torch.Tensor): ``(1, num_sensory, T)`` input tensor.
-        node_columns (Mapping): ``{column name: node index or sequence of node
-            indices}``; sequences are averaged (e.g. a cell type's members).
-        initial_state (optional): passed through to ``model.forward``.
+        model (MultilayeredNetwork or LinearNetwork): The network.
+        inputs (torch.Tensor): Input of shape (1, num_sensory, T).
+        node_columns (Mapping): ``{column name: node index or list of node
+            indices}``. Lists are averaged, e.g. over the neurons of a cell type.
+        initial_state (optional): Passed to ``model.forward``. Defaults to None.
 
     Returns:
-        pd.DataFrame: ``T`` rows, one column per ``node_columns`` entry.
+        pd.DataFrame: One row per time step, one column per entry of
+        ``node_columns``.
     """
     with torch.no_grad():
         output = model(inputs, checkpoint_steps=0, initial_state=initial_state)
@@ -1483,10 +1366,10 @@ def simulate_trace(
 
 
 def pair_slope_table(model) -> pd.DataFrame:
-    """Raw and bound-clamped per-(pre, post) slope gains as a DataFrame.
-
-    With ``w_eff = m * w`` the effective per-connection gain simply *is* the
-    clamped slope. Empty frame for node-mode models.
+    """
+    The per-connection slopes of a model with pairwise slopes: columns ``pre``,
+    ``post``, ``pair_slope`` (raw) and ``effective_pair_slope`` (after clamping
+    to the bounds). Empty for models with per-node slopes.
     """
     if not model.slope_is_pairwise:
         return pd.DataFrame(
