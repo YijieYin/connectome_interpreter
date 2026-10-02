@@ -10,7 +10,13 @@ import torch.nn.functional as F
 from scipy import optimize, sparse
 from scipy.sparse import linalg as spla
 
-from .activation_maximisation import LinearNetwork, MultilayeredNetwork
+from .activation_maximisation import (
+    LinearNetwork,
+    MultilayeredNetwork,
+    _targets_for_batches,
+    get_neuron_activation,
+)
+from .utils import pytorch_sparse_to_scipy
 
 # Up to this many nodes, the steady-state and stability functions use exact
 # dense computations; above it, sparse ones. The dense eigendecomposition in
@@ -27,18 +33,11 @@ _MODEL_KEY_PREFIX = "model_"
 
 def _free_and_sensory_indices(model):
     """
-    Split the nodes into free (non-sensory) and sensory indices.
-
-    Returns:
-        tuple[torch.Tensor, torch.Tensor]: ``(free_idx, sensory_idx)``.
+    ``(model.free_indices, sensory indices)``, both on the model's device.
     """
-    n_nodes = model.all_weights.shape[0]
     device = model.all_weights.device
-    sensory_idx = model.sensory_indices.detach().long().to(device)
-    sensory_mask = torch.zeros(n_nodes, dtype=torch.bool, device=device)
-    sensory_mask[sensory_idx] = True
-    free_idx = torch.arange(n_nodes, device=device)[~sensory_mask]
-    return free_idx, sensory_idx
+    sensory_idx = model.sensory_indices.detach().to(device=device, dtype=torch.long)
+    return model.free_indices, sensory_idx
 
 
 def _as_sensory_values(model, sensory_values):
@@ -52,21 +51,6 @@ def _as_sensory_values(model, sensory_values):
     if sensory_values.numel() != model.sensory_indices.numel():
         raise ValueError("sensory_values length must match model.sensory_indices.")
     return sensory_values
-
-
-def _post_step(model, y):
-    """
-    The elementwise operations ``MultilayeredNetwork.forward`` applies to the
-    state after the activation: ``output_rectify`` and ``output_clamp_max``
-    where set. A ``LinearNetwork`` has neither, so ``y`` is returned as is.
-    """
-    if getattr(model, "output_rectify", False):
-        y = torch.relu(y - model.threshold) + model.threshold * (
-            y >= model.threshold
-        ).to(y.dtype)
-    if getattr(model, "output_clamp_max", None) is not None:
-        y = torch.clamp(y, max=model.output_clamp_max)
-    return y
 
 
 def network_step(model, state, sensory_values):
@@ -104,12 +88,11 @@ def _clamped_step(model, state, sensory_values):
     state = torch.as_tensor(state, dtype=torch.float32, device=device).reshape(-1, 1)
     sensory_values = _as_sensory_values(model, sensory_values).reshape(-1, 1)
 
-    x = torch.sparse.mm(model.effective_weights, state)
-    x = model.activation_function(x, x_previous=state)
-    # forward (replace mode) clamps the sensory nodes before and after the
+    x = model._activation_step(state, model.effective_weights)
+    # forward (replace mode) writes the sensory input before and after the
     # output ops; the ops are elementwise, so clamping once at the end is the
     # same for the free nodes
-    x = _post_step(model, x).clone()
+    x = model._output_ops(x).clone()
     x[model.sensory_indices.to(device), :] = sensory_values
     return x.reshape(-1)
 
@@ -225,7 +208,7 @@ def _step_linearisation(model, state, create_graph: bool = False):
     With ``u = W x`` (``W`` the effective weights), one step is
     ``z = post(act(u, x))``, where ``act`` is the model's activation (built-in
     or custom, including the leaky integration) and ``post`` its output
-    rectification / clamp (``_post_step()``). Both act on each node
+    rectification / clamp (``model._output_ops``). Both act on each node
     separately, so the Jacobian of the step factorises into per-node terms::
 
         dz_i / dx_j = mask_i * (d_prev_i * delta_ij + d_u_i * W_ij)
@@ -306,24 +289,12 @@ def _step_linearisation(model, state, create_graph: bool = False):
         # derivative of the output rectification / clamp at this operating
         # point: 0 where it is active, else 1
         y_leaf = y.detach().requires_grad_(True)
-        z = _post_step(model, y_leaf)
+        z = model._output_ops(y_leaf)
         if z is y_leaf:
             mask = torch.ones_like(y_leaf)
         else:
             (mask,) = torch.autograd.grad(z, y_leaf, torch.ones_like(z))
     return d_u.reshape(-1), d_prev.reshape(-1), mask.reshape(-1)
-
-
-def _effective_weights_to_scipy(model):
-    """
-    ``model.effective_weights`` as a float64 scipy CSR matrix (post in rows,
-    pre in columns).
-    """
-    weights = model.effective_weights.coalesce()
-    idx = weights.indices().detach().cpu().numpy()
-    vals = weights.values().detach().cpu().numpy().astype(np.float64, copy=False)
-    n = weights.shape[0]
-    return sparse.coo_matrix((vals, (idx[0], idx[1])), shape=(n, n)).tocsr()
 
 
 def _sparse_update_matrix(model, free_idx, state):
@@ -336,7 +307,8 @@ def _sparse_update_matrix(model, free_idx, state):
         for t in _step_linearisation(model, state)
     )
     free = free_idx.detach().cpu().numpy()
-    weights_ff = _effective_weights_to_scipy(model)[free][:, free]
+    weights = pytorch_sparse_to_scipy(model.effective_weights.coalesce())
+    weights_ff = weights.astype(np.float64)[free][:, free]
     update = sparse.diags(mask[free] * d_prev[free]) + (
         sparse.diags(mask[free] * d_u[free]) @ weights_ff
     )
@@ -1062,11 +1034,9 @@ def make_affine_readout_loss(
                 "network_fixed_point(model, u0, initial_state=previous)."
             )
 
-    # train_model flattens the targets in this order; the masks pick out each
-    # channel's entries
-    order = targets[targets["batch"].isin([0])].copy()
-    order.loc[:, ["batch"]] = pd.Categorical(order["batch"], categories=[0])
-    order = order.sort_values(by="batch")
+    # the masks pick out each channel's entries in the order train_model
+    # flattens the targets
+    order = _targets_for_batches(targets, [0])
     flat_neuron_idx = order["neuron_idx"].to_numpy().astype(int)
     masks = [torch.as_tensor(flat_neuron_idx == lid) for lid in layer_ids]
     for lid, mask in zip(layer_ids, masks):
@@ -1221,21 +1191,18 @@ def build_raw_window_targets(
     layers = list(target_traces) if layers is None else list(layers)
     starts, n_steps = _window_starts(transition_idx, window_steps)
     steps = (starts[:, None] + np.arange(n_steps)).reshape(-1)
-    frames = []
-    for layer in layers:
-        trace = np.asarray(target_traces[layer], dtype=np.float32)
-        if steps.size and steps.max() >= trace.size:
-            raise ValueError("A target window exceeds the trace length.")
-        frames.append(
-            pd.DataFrame(
-                {
-                    "batch": 0,
-                    "neuron_idx": int(node_index[layer]),
-                    "layer": steps,
-                    "value": trace[steps].astype(np.float64),
-                }
-            )
+    windows = extract_transition_windows(target_traces, starts, n_steps, layers=layers)
+    frames = [
+        pd.DataFrame(
+            {
+                "batch": 0,
+                "neuron_idx": int(node_index[layer]),
+                "layer": steps,
+                "value": windows[layer].reshape(-1).astype(np.float64),
+            }
         )
+        for layer in layers
+    ]
     if not frames:
         return pd.DataFrame(columns=["batch", "neuron_idx", "layer", "value"])
     return pd.concat(frames, ignore_index=True)
@@ -1472,10 +1439,14 @@ def simulate_trace(
     columns = {}
     for name, selector in node_columns.items():
         if isinstance(selector, (int, np.integer)):
-            columns[name] = values[int(selector), :]
+            members = [int(selector)]
         else:
-            members = np.asarray(list(selector), dtype=int)
-            columns[name] = values[members, :].mean(axis=0)
+            members = [int(member) for member in selector]
+        # one group per column: get_neuron_activation averages its members
+        frame = get_neuron_activation(
+            values, members, idx_to_group={member: name for member in members}
+        )
+        columns[name] = frame.drop(columns="group").to_numpy()[0]
     return pd.DataFrame(columns)
 
 

@@ -624,9 +624,7 @@ class _NetworkBase(nn.Module):
 
         # Sensory rows are exempt: their state is written by the input, not by
         # their incoming weights, so a cap on those weights is meaningless.
-        is_sensory = torch.zeros(n, dtype=torch.bool, device=device)
-        if self.sensory_indices.numel() > 0:
-            is_sensory[self.sensory_indices.to(device=device, dtype=torch.long)] = True
+        is_sensory = self.sensory_mask.to(device)
         capped_edge = ~is_sensory[post_idx]
 
         frozen_row_l1 = torch.zeros(n, dtype=values.dtype, device=device).index_add(
@@ -938,6 +936,22 @@ class _NetworkBase(nn.Module):
             return self.effective_tau[self.indices]
         raise ValueError(f"Unknown parameter name: {name!r}")
 
+    @property
+    def sensory_mask(self) -> torch.Tensor:
+        """Boolean mask over all nodes, True for the sensory nodes."""
+        mask = torch.zeros(
+            self.all_weights.shape[0], dtype=torch.bool, device=self.all_weights.device
+        )
+        if self.sensory_indices.numel() > 0:
+            mask[self.sensory_indices.to(device=mask.device, dtype=torch.long)] = True
+        return mask
+
+    @property
+    def free_indices(self) -> torch.Tensor:
+        """Indices of the free (non-sensory) nodes, whose state the dynamics
+        determine; the state of the sensory nodes is written by the input."""
+        return torch.nonzero(~self.sensory_mask).flatten()
+
     def _apply_sensory_input(self, state: torch.Tensor, input_at_layer: torch.Tensor):
         # Each call retains one (num_neurons, batch) clone in the autograd graph.
         # "add" makes one call per layer, as the un-refactored code always did;
@@ -1067,6 +1081,306 @@ class _NetworkBase(nn.Module):
         )
         per_post = torch.zeros_like(slopes).index_add_(0, post_idxs, per_edge)
         return torch.clamp(slopes * (1 + per_post), min=0.0)
+
+    def _output_ops(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Elementwise operations applied to the state of a layer after the
+        sensory input has been written in. The base class applies none;
+        ``MultilayeredNetwork`` applies ``output_rectify`` and
+        ``output_clamp_max``. Returns ``x`` itself when nothing is applied, so
+        that ``_step`` can skip re-writing the sensory input.
+        """
+        return x
+
+    def _sensory_input_for_layer(self, inputs: torch.Tensor, layer: int):
+        """
+        The sensory input written into the state after ``layer``, shape
+        (num_sensory, batch), or None when none is written (the last layer in
+        ``"add"`` mode).
+        """
+        if not self._should_apply_sensory_after_layer(layer):
+            return None
+        return self._sensory_input_after_layer(inputs, layer)
+
+    def _activation_step(
+        self,
+        x_previous: torch.Tensor,
+        weights: torch.Tensor,
+        slopes_full=None,
+        biases_full=None,
+        taus_full=None,
+    ) -> torch.Tensor:
+        """
+        The state after one time step, before any sensory input is written in:
+        ``activation_function(weights @ x_previous, x_previous)``.
+        """
+        x = torch.sparse.mm(weights, x_previous)
+        return self.activation_function(
+            x,
+            x_previous=x_previous,
+            slopes_full=slopes_full,
+            biases_full=biases_full,
+            taus_full=taus_full,
+        )
+
+    def _step(
+        self,
+        x_previous: torch.Tensor,
+        weights: torch.Tensor,
+        sensory_input: Optional[torch.Tensor],
+        slopes_full=None,
+        biases_full=None,
+        taus_full=None,
+    ) -> torch.Tensor:
+        """
+        One time step of the network, shared by ``forward`` and by the solvers
+        in ``response_fitting``: the activation step, then, if
+        ``sensory_input`` is given, the sensory input written into the state
+        (added or replaced, per ``sensory_input_mode``), the output operations
+        (``_output_ops``), and in ``"replace"`` mode the sensory input written
+        in again so that the output operations do not alter it.
+
+        Args:
+            x_previous (torch.Tensor): State of all nodes, shape (num_neurons,
+                batch).
+            weights (torch.Tensor): ``effective_weights``, passed in so that a
+                forward pass computes it once.
+            sensory_input (torch.Tensor, optional): Shape (num_sensory, batch),
+                or None to write no sensory input.
+            slopes_full, biases_full, taus_full: Pre-expanded per-node
+                parameters, see ``activation_function``.
+
+        Returns:
+            torch.Tensor: The next state, shape (num_neurons, batch).
+        """
+        x = self._activation_step(
+            x_previous, weights, slopes_full, biases_full, taus_full
+        )
+        if sensory_input is not None:
+            x = self._apply_sensory_input(x, sensory_input)
+            y = self._output_ops(x)
+            if y is not x and self.sensory_input_mode == "replace":
+                y = self._apply_sensory_input(y, sensory_input)
+            x = y
+        return x
+
+    def _forward_chunk(
+        self,
+        x,
+        start_layer,
+        end_layer,
+        inputs,
+        slopes_full,
+        biases_full,
+        taus_full,
+        weights,
+    ):
+        """Run a chunk of timesteps. For use with gradient checkpointing.
+
+        Returns:
+            Flat tuple (x_final, *per_layer_xs). Each per_layer_x is the raw
+            timestep activation with shape (neurons, batch) — NOT transposed.
+            Transposing (or stacking) here would make the per-layer tensors
+            siblings of a shared parent, breaking the parent→child edge that
+            autograd.grad needs to walk layer-wise.
+        """
+        chunk_acts = []
+        for alayer in range(start_layer, end_layer):
+            x = self._step(
+                x,
+                weights,
+                self._sensory_input_for_layer(inputs, alayer),
+                slopes_full,
+                biases_full,
+                taus_full,
+            )
+            chunk_acts.append(x)  # <-- no .t()
+        return (x, *chunk_acts)
+
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        manipulate: Optional[
+            Union[
+                Dict[int, Dict[Union[int, str], float]],
+                Dict[int, Dict[int, Dict[Union[int, str], float]]],
+            ]
+        ] = None,
+        checkpoint_steps: int = 0,
+        return_layer_list: bool = False,
+        initial_state: Optional[torch.Tensor] = None,
+    ):
+        """
+        Args:
+            return_layer_list (bool): If True, return List[Tensor] of length
+                num_layers, each shape (neurons, batch), on GPU with grad_fn
+                preserved. Required for layer-wise gradient attribution via
+                torch.autograd.grad — stacking/transposing makes per-layer
+                tensors siblings of a shared parent, which breaks the graph
+                path autograd.grad needs. When True, self.activations is not
+                populated.
+        """
+        if isinstance(inputs, np.ndarray):
+            inputs = torch.tensor(inputs, device=self.all_weights.device)
+        elif isinstance(inputs, torch.Tensor):
+            inputs = inputs.to(self.all_weights.device)
+
+        # Handle 2D inputs by expanding to 3D
+        if inputs.dim() == 2:
+            inputs = inputs.unsqueeze(0)  # Add batch dimension
+            single_input = True
+        else:
+            single_input = False
+
+        if manipulate is not None:
+            # check if manipulate is per-batch
+            if not all(
+                isinstance(act_dict, dict)
+                for _, this_batch in manipulate.items()
+                for _, act_dict in this_batch.items()
+            ):
+                batch_manipulate = manipulate.copy()
+                # add batch dimension
+                manipulate = dict.fromkeys(range(inputs.shape[0]), batch_manipulate)
+
+            if self.idx_to_group is None:
+                manipulate_idx = {
+                    b: {
+                        layer: {int(c): a for c, a in act_dict.items()}
+                        for layer, act_dict in this_batch.items()
+                    }
+                    for b, this_batch in manipulate.items()
+                }
+            else:
+                # convert group names to indices
+                manipulate_idx = {}
+                for b, this_batch in manipulate.items():
+                    manipulate_idx[b] = {}
+                    for layer, act_dict in this_batch.items():
+                        manipulate_idx[b][layer] = {
+                            idx: act_dict[grp]
+                            for idx, grp in self.idx_to_group.items()
+                            if grp in act_dict
+                        }
+
+        if self.slope_is_pairwise:
+            # pair-mode gain is in effective_weights; activation uses unit slope
+            slopes_full = None
+            biases_full = (
+                self.biases[self.indices].view(-1, 1)
+                if self.biases is not None
+                else None
+            )
+        elif self.slope is not None:
+            slopes_full = self.effective_slope[self.indices].view(-1, 1)
+            biases_full = self.biases[self.indices].view(-1, 1)
+        else:
+            slopes_full = None
+            biases_full = None
+
+        if self.tau_param is not None:
+            taus_full = self.effective_tau[self.indices].view(-1, 1)
+        else:
+            taus_full = None
+        weights = self.effective_weights
+
+        req_grad = inputs.requires_grad
+        _needs_grad = req_grad or any(
+            p.requires_grad for p in self.parameters() if p is not None
+        )
+
+        use_ckpt = checkpoint_steps > 0 and _needs_grad and manipulate is None
+
+        full_input = self._initial_full_input(inputs, initial_state, req_grad)
+
+        def step(x, layer):
+            return self._step(
+                x,
+                weights,
+                self._sensory_input_for_layer(inputs, layer),
+                slopes_full,
+                biases_full,
+                taus_full,
+            )
+
+        def manipulate_layer(x, layer):
+            # overwrite the manipulated nodes' state after the step
+            if manipulate is None:
+                return x
+            x = x.clone()
+            for b, _ in manipulate.items():
+                if layer in manipulate_idx[b]:
+                    for neuron_idx, target_act in manipulate_idx[b][layer].items():
+                        x[neuron_idx, b] = target_act
+            return x
+
+        # ---- Layer 0 ----
+        x = manipulate_layer(step(full_input, 0), 0)
+
+        # ---- Remaining layers ----
+        if return_layer_list:
+            per_layer_acts = [x]  # <-- no .t()
+
+            if use_ckpt:
+                for chunk_start in range(1, self.num_layers, checkpoint_steps):
+                    chunk_end = min(chunk_start + checkpoint_steps, self.num_layers)
+                    result = torch_checkpoint(
+                        self._forward_chunk,
+                        x,
+                        chunk_start,
+                        chunk_end,
+                        inputs,
+                        slopes_full,
+                        biases_full,
+                        taus_full,
+                        weights,
+                        use_reentrant=False,
+                    )
+                    x = result[0]
+                    per_layer_acts.extend(result[1:])
+            else:
+                for alayer in range(1, self.num_layers):
+                    x = manipulate_layer(step(x, alayer), alayer)
+                    per_layer_acts.append(x)  # <-- no .t()
+
+            del inputs, x
+            torch.cuda.empty_cache()
+            return per_layer_acts
+
+        # ---- default (stacked) path ----
+        if use_ckpt:
+            act_chunks = [x.t().unsqueeze(-1)]
+            for chunk_start in range(1, self.num_layers, checkpoint_steps):
+                chunk_end = min(chunk_start + checkpoint_steps, self.num_layers)
+                result = torch_checkpoint(
+                    self._forward_chunk,
+                    x,
+                    chunk_start,
+                    chunk_end,
+                    inputs,
+                    slopes_full,
+                    biases_full,
+                    taus_full,
+                    weights,
+                    use_reentrant=False,
+                )
+                x = result[0]
+                # result[1:] are (neurons, batch) — transpose each and stack along time
+                act_chunks.append(torch.stack([cx.t() for cx in result[1:]], dim=-1))
+            self.activations = torch.cat(act_chunks, dim=-1).cpu()
+        else:
+            acts = [x.t().cpu()]
+            for alayer in range(1, self.num_layers):
+                x = manipulate_layer(step(x, alayer), alayer)
+                acts.append(x.t().cpu())
+            self.activations = torch.stack(acts, dim=-1)
+
+        del inputs, x
+        torch.cuda.empty_cache()
+
+        if single_input:
+            self.activations = self.activations.squeeze(0)
+        return self.activations
 
 
 class LinearNetwork(_NetworkBase):
@@ -1281,271 +1595,6 @@ class LinearNetwork(_NetworkBase):
 
         return x
 
-    def _forward_chunk(
-        self,
-        x,
-        start_layer,
-        end_layer,
-        inputs,
-        slopes_full,
-        biases_full,
-        taus_full,
-        weights,
-    ):
-        """Run a chunk of timesteps. For use with gradient checkpointing.
-
-        Returns:
-            Flat tuple (x_final, *per_layer_xs). Each per_layer_x is the raw
-            timestep activation with shape (neurons, batch) — NOT transposed.
-            Transposing (or stacking) here would make the per-layer tensors
-            siblings of a shared parent, breaking the parent→child edge that
-            autograd.grad needs to walk layer-wise.
-        """
-        chunk_acts = []
-        for alayer in range(start_layer, end_layer):
-            x_previous = x
-            x = torch.sparse.mm(weights, x)
-            x = self.activation_function(
-                x,
-                x_previous=x_previous,
-                slopes_full=slopes_full,
-                biases_full=biases_full,
-                taus_full=taus_full,
-            )
-            if self._should_apply_sensory_after_layer(alayer):
-                x = self._apply_sensory_input(
-                    x,
-                    self._sensory_input_after_layer(inputs, alayer),
-                )
-            chunk_acts.append(x)  # <-- no .t()
-        return (x, *chunk_acts)
-
-    def forward(
-        self,
-        inputs: torch.Tensor,
-        manipulate: Optional[
-            Union[
-                Dict[int, Dict[Union[int, str], float]],
-                Dict[int, Dict[int, Dict[Union[int, str], float]]],
-            ]
-        ] = None,
-        checkpoint_steps: int = 0,
-        return_layer_list: bool = False,
-        initial_state: Optional[torch.Tensor] = None,
-    ):
-        """
-        Args:
-            return_layer_list (bool): If True, return List[Tensor] of length
-                num_layers, each shape (neurons, batch), on GPU with grad_fn
-                preserved. Required for layer-wise gradient attribution via
-                torch.autograd.grad — stacking/transposing makes per-layer
-                tensors siblings of a shared parent, which breaks the graph
-                path autograd.grad needs. When True, self.activations is not
-                populated.
-        """
-        if isinstance(inputs, np.ndarray):
-            inputs = torch.tensor(inputs, device=self.all_weights.device)
-        elif isinstance(inputs, torch.Tensor):
-            inputs = inputs.to(self.all_weights.device)
-
-        # Handle 2D inputs by expanding to 3D
-        if inputs.dim() == 2:
-            inputs = inputs.unsqueeze(0)  # Add batch dimension
-            single_input = True
-        else:
-            single_input = False
-
-        if manipulate is not None:
-            # check if manipulate is per-batch
-            if not all(
-                isinstance(act_dict, dict)
-                for _, this_batch in manipulate.items()
-                for _, act_dict in this_batch.items()
-            ):
-                batch_manipulate = manipulate.copy()
-                # add batch dimension
-                manipulate = dict.fromkeys(range(inputs.shape[0]), batch_manipulate)
-
-            if self.idx_to_group is None:
-                manipulate_idx = {
-                    b: {
-                        layer: {int(c): a for c, a in act_dict.items()}
-                        for layer, act_dict in this_batch.items()
-                    }
-                    for b, this_batch in manipulate.items()
-                }
-            else:
-                # convert group names to indices
-                manipulate_idx = {}
-                for b, this_batch in manipulate.items():
-                    manipulate_idx[b] = {}
-                    for layer, act_dict in this_batch.items():
-                        manipulate_idx[b][layer] = {
-                            idx: act_dict[grp]
-                            for idx, grp in self.idx_to_group.items()
-                            if grp in act_dict
-                        }
-
-        if self.slope_is_pairwise:
-            # pair-mode gain is in effective_weights; activation uses unit slope
-            slopes_full = None
-            biases_full = (
-                self.biases[self.indices].view(-1, 1)
-                if self.biases is not None
-                else None
-            )
-        elif self.slope is not None:
-            slopes_full = self.effective_slope[self.indices].view(-1, 1)
-            biases_full = self.biases[self.indices].view(-1, 1)
-        else:
-            slopes_full = None
-            biases_full = None
-
-        if self.tau_param is not None:
-            taus_full = self.effective_tau[self.indices].view(-1, 1)
-        else:
-            taus_full = None
-        weights = self.effective_weights
-
-        req_grad = inputs.requires_grad
-        _needs_grad = req_grad or any(
-            p.requires_grad for p in self.parameters() if p is not None
-        )
-
-        use_ckpt = checkpoint_steps > 0 and _needs_grad and manipulate is None
-
-        full_input = self._initial_full_input(inputs, initial_state, req_grad)
-
-        # ---- Layer 0 ----
-        x = torch.sparse.mm(weights, full_input)
-        x = self.activation_function(
-            x,
-            x_previous=full_input,
-            slopes_full=slopes_full,
-            biases_full=biases_full,
-            taus_full=taus_full,
-        )
-
-        if self._should_apply_sensory_after_layer(0):
-            x = self._apply_sensory_input(
-                x,
-                self._sensory_input_after_layer(inputs, 0),
-            )
-
-        if manipulate is not None:
-            x = x.clone()
-            for b, _ in manipulate.items():
-                if 0 in manipulate_idx[b]:
-                    for neuron_idx, target_act in manipulate_idx[b][0].items():
-                        x[neuron_idx, b] = target_act
-
-        # ---- Remaining layers ----
-        if return_layer_list:
-            per_layer_acts = [x]  # <-- no .t()
-
-            if use_ckpt:
-                for chunk_start in range(1, self.num_layers, checkpoint_steps):
-                    chunk_end = min(chunk_start + checkpoint_steps, self.num_layers)
-                    result = torch_checkpoint(
-                        self._forward_chunk,
-                        x,
-                        chunk_start,
-                        chunk_end,
-                        inputs,
-                        slopes_full,
-                        biases_full,
-                        taus_full,
-                        weights,
-                        use_reentrant=False,
-                    )
-                    x = result[0]
-                    per_layer_acts.extend(result[1:])
-            else:
-                for alayer in range(1, self.num_layers):
-                    x_previous = x.clone()
-                    x = torch.sparse.mm(weights, x)
-                    x = self.activation_function(
-                        x,
-                        x_previous=x_previous,
-                        slopes_full=slopes_full,
-                        biases_full=biases_full,
-                        taus_full=taus_full,
-                    )
-                    if self._should_apply_sensory_after_layer(alayer):
-                        x = self._apply_sensory_input(
-                            x,
-                            self._sensory_input_after_layer(inputs, alayer),
-                        )
-                    if manipulate is not None:
-                        x = x.clone()
-                        for b, _ in manipulate.items():
-                            if alayer in manipulate_idx[b]:
-                                for neuron_idx, target_act in manipulate_idx[b][
-                                    alayer
-                                ].items():
-                                    x[neuron_idx, b] = target_act
-                    per_layer_acts.append(x)  # <-- no .t()
-
-            del inputs, x
-            torch.cuda.empty_cache()
-            return per_layer_acts
-
-        # ---- default (stacked) path ----
-        if use_ckpt:
-            act_chunks = [x.t().unsqueeze(-1)]
-            for chunk_start in range(1, self.num_layers, checkpoint_steps):
-                chunk_end = min(chunk_start + checkpoint_steps, self.num_layers)
-                result = torch_checkpoint(
-                    self._forward_chunk,
-                    x,
-                    chunk_start,
-                    chunk_end,
-                    inputs,
-                    slopes_full,
-                    biases_full,
-                    taus_full,
-                    weights,
-                    use_reentrant=False,
-                )
-                x = result[0]
-                # result[1:] are (neurons, batch) — transpose each and stack along time
-                act_chunks.append(torch.stack([cx.t() for cx in result[1:]], dim=-1))
-            self.activations = torch.cat(act_chunks, dim=-1).cpu()
-        else:
-            acts = [x.t().cpu()]
-            for alayer in range(1, self.num_layers):
-                x_previous = x.clone()
-                x = torch.sparse.mm(weights, x)
-                x = self.activation_function(
-                    x,
-                    x_previous=x_previous,
-                    slopes_full=slopes_full,
-                    biases_full=biases_full,
-                    taus_full=taus_full,
-                )
-                if self._should_apply_sensory_after_layer(alayer):
-                    x = self._apply_sensory_input(
-                        x,
-                        self._sensory_input_after_layer(inputs, alayer),
-                    )
-                if manipulate is not None:
-                    x = x.clone()
-                    for b, _ in manipulate.items():
-                        if alayer in manipulate_idx[b]:
-                            for neuron_idx, target_act in manipulate_idx[b][
-                                alayer
-                            ].items():
-                                x[neuron_idx, b] = target_act
-                acts.append(x.t().cpu())
-            self.activations = torch.stack(acts, dim=-1)
-
-        del inputs, x
-        torch.cuda.empty_cache()
-
-        if single_input:
-            self.activations = self.activations.squeeze(0)
-        return self.activations
-
 
 class MultilayeredNetwork(_NetworkBase):
     """
@@ -1702,6 +1751,21 @@ class MultilayeredNetwork(_NetworkBase):
         self.output_clamp_max = output_clamp_max
         self.output_rectify = output_rectify
 
+    def _output_ops(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        ``output_rectify`` (hard floor at ``threshold``) and
+        ``output_clamp_max`` applied to the state of a layer; see the class
+        docstring. Returns ``x`` itself when both are off.
+        """
+        if self.output_rectify:
+            # torch.where(x >= thr, x, 0) would swallow NaN; this propagates it
+            x = torch.relu(x - self.threshold) + self.threshold * (
+                x >= self.threshold
+            ).to(x.dtype)
+        if self.output_clamp_max is not None:
+            x = torch.clamp(x, max=self.output_clamp_max)
+        return x
+
     def activation_function(
         self,
         x: torch.Tensor,
@@ -1792,323 +1856,6 @@ class MultilayeredNetwork(_NetworkBase):
 
         return x
 
-    def _forward_chunk(
-        self,
-        x,
-        start_layer,
-        end_layer,
-        inputs,
-        slopes_full,
-        biases_full,
-        taus_full,
-        weights,
-    ):
-        """Returns flat tuple (x_final, *per_layer_xs), each (neurons, batch)."""
-        chunk_acts = []
-        for alayer in range(start_layer, end_layer):
-            x_previous = x
-            x = torch.sparse.mm(weights, x)
-            x = self.activation_function(
-                x,
-                x_previous=x_previous,
-                slopes_full=slopes_full,
-                biases_full=biases_full,
-                taus_full=taus_full,
-            )
-            if self._should_apply_sensory_after_layer(alayer):
-                x = self._apply_sensory_input(
-                    x,
-                    self._sensory_input_after_layer(inputs, alayer),
-                )
-                # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
-                # this propagates NaN honesty
-                if self.output_rectify:
-                    x = torch.relu(x - self.threshold) + self.threshold * (
-                        x >= self.threshold
-                    ).to(x.dtype)
-                x = (
-                    x
-                    if self.output_clamp_max is None
-                    else torch.clamp(x, max=self.output_clamp_max)
-                )
-                if self.sensory_input_mode == "replace":
-                    x = self._apply_sensory_input(
-                        x,
-                        self._sensory_input_after_layer(inputs, alayer),
-                    )
-            chunk_acts.append(x)
-        return (x, *chunk_acts)
-
-    def forward(
-        self,
-        inputs: torch.Tensor,
-        manipulate: Optional[
-            Union[
-                Dict[int, Dict[Union[int, str], float]],
-                Dict[int, Dict[int, Dict[Union[int, str], float]]],
-            ]
-        ] = None,
-        checkpoint_steps: int = 0,
-        return_layer_list: bool = False,
-        initial_state: Optional[torch.Tensor] = None,
-    ):
-        """
-        Args:
-            return_layer_list (bool): If True, return List[Tensor] of length
-                num_layers, each shape (neurons, batch), on GPU with grad_fn
-                preserved. Required for layer-wise gradient attribution via
-                torch.autograd.grad — stacking/transposing makes per-layer
-                tensors siblings of a shared parent, which breaks the graph
-                path autograd.grad needs. When True, self.activations is not
-                populated.
-        """
-        if isinstance(inputs, np.ndarray):
-            inputs = torch.tensor(inputs, device=self.all_weights.device)
-        elif isinstance(inputs, torch.Tensor):
-            inputs = inputs.to(self.all_weights.device)
-
-        if inputs.dim() == 2:
-            inputs = inputs.unsqueeze(0)
-            single_input = True
-        else:
-            single_input = False
-
-        if manipulate is not None:
-            if not all(
-                isinstance(act_dict, dict)
-                for _, this_batch in manipulate.items()
-                for _, act_dict in this_batch.items()
-            ):
-                batch_manipulate = manipulate.copy()
-                manipulate = dict.fromkeys(range(inputs.shape[0]), batch_manipulate)
-
-            if self.idx_to_group is None:
-                manipulate_idx = {
-                    b: {
-                        layer: {int(c): a for c, a in act_dict.items()}
-                        for layer, act_dict in this_batch.items()
-                    }
-                    for b, this_batch in manipulate.items()
-                }
-            else:
-                manipulate_idx = {}
-                for b, this_batch in manipulate.items():
-                    manipulate_idx[b] = {}
-                    for layer, act_dict in this_batch.items():
-                        manipulate_idx[b][layer] = {
-                            idx: act_dict[grp]
-                            for idx, grp in self.idx_to_group.items()
-                            if grp in act_dict
-                        }
-
-        if self.slope_is_pairwise:
-            # pair-mode gain is in effective_weights; activation uses unit slope
-            slopes_full = None
-            biases_full = (
-                self.biases[self.indices].view(-1, 1)
-                if self.biases is not None
-                else None
-            )
-        elif self.slope is not None:
-            slopes_full = self.effective_slope[self.indices].view(-1, 1)
-            biases_full = self.biases[self.indices].view(-1, 1)
-        else:
-            slopes_full = None
-            biases_full = None
-
-        if self.tau_param is not None:
-            taus_full = self.effective_tau[self.indices].view(-1, 1)
-        else:
-            taus_full = None
-        weights = self.effective_weights
-
-        req_grad = inputs.requires_grad
-        _needs_grad = req_grad or any(
-            p.requires_grad for p in self.parameters() if p is not None
-        )
-
-        use_ckpt = checkpoint_steps > 0 and _needs_grad and manipulate is None
-
-        full_input = self._initial_full_input(inputs, initial_state, req_grad)
-
-        # ---- Layer 0 ----
-        x = torch.sparse.mm(weights, full_input)
-        x = self.activation_function(
-            x,
-            x_previous=full_input,
-            slopes_full=slopes_full,
-            biases_full=biases_full,
-            taus_full=taus_full,
-        )
-
-        if self._should_apply_sensory_after_layer(0):
-            x = self._apply_sensory_input(
-                x,
-                self._sensory_input_after_layer(inputs, 0),
-            )
-            # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
-            # this propagates NaN honesty
-            if self.output_rectify:
-                x = torch.relu(x - self.threshold) + self.threshold * (
-                    x >= self.threshold
-                ).to(x.dtype)
-            x = (
-                x
-                if self.output_clamp_max is None
-                else torch.clamp(x, max=self.output_clamp_max)
-            )
-            if self.sensory_input_mode == "replace":
-                x = self._apply_sensory_input(
-                    x,
-                    self._sensory_input_after_layer(inputs, 0),
-                )
-
-        if manipulate is not None:
-            x = x.clone()
-            for b, _ in manipulate.items():
-                if 0 in manipulate_idx[b]:
-                    for neuron_idx, target_act in manipulate_idx[b][0].items():
-                        x[neuron_idx, b] = target_act
-
-        # ---- Remaining layers ----
-        if return_layer_list:
-            per_layer_acts = [x]
-
-            if use_ckpt:
-                for chunk_start in range(1, self.num_layers, checkpoint_steps):
-                    chunk_end = min(chunk_start + checkpoint_steps, self.num_layers)
-                    result = torch_checkpoint(
-                        self._forward_chunk,
-                        x,
-                        chunk_start,
-                        chunk_end,
-                        inputs,
-                        slopes_full,
-                        biases_full,
-                        taus_full,
-                        weights,
-                        use_reentrant=False,
-                    )
-                    x = result[0]
-                    per_layer_acts.extend(result[1:])
-            else:
-                for alayer in range(1, self.num_layers):
-                    x_previous = x.clone()
-                    x = torch.sparse.mm(weights, x)
-                    x = self.activation_function(
-                        x,
-                        x_previous=x_previous,
-                        slopes_full=slopes_full,
-                        biases_full=biases_full,
-                        taus_full=taus_full,
-                    )
-                    if self._should_apply_sensory_after_layer(alayer):
-                        x = self._apply_sensory_input(
-                            x,
-                            self._sensory_input_after_layer(inputs, alayer),
-                        )
-                        # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
-                        # this propagates NaN honesty
-                        if self.output_rectify:
-                            x = torch.relu(x - self.threshold) + self.threshold * (
-                                x >= self.threshold
-                            ).to(x.dtype)
-                        x = (
-                            x
-                            if self.output_clamp_max is None
-                            else torch.clamp(x, max=self.output_clamp_max)
-                        )
-                        if self.sensory_input_mode == "replace":
-                            x = self._apply_sensory_input(
-                                x,
-                                self._sensory_input_after_layer(inputs, alayer),
-                            )
-                    if manipulate is not None:
-                        x = x.clone()
-                        for b, _ in manipulate.items():
-                            if alayer in manipulate_idx[b]:
-                                for neuron_idx, target_act in manipulate_idx[b][
-                                    alayer
-                                ].items():
-                                    x[neuron_idx, b] = target_act
-                    per_layer_acts.append(x)
-
-            del inputs, x
-            torch.cuda.empty_cache()
-            return per_layer_acts
-
-        # ---- default (stacked) path ----
-        if use_ckpt:
-            act_chunks = [x.t().unsqueeze(-1)]
-            for chunk_start in range(1, self.num_layers, checkpoint_steps):
-                chunk_end = min(chunk_start + checkpoint_steps, self.num_layers)
-                result = torch_checkpoint(
-                    self._forward_chunk,
-                    x,
-                    chunk_start,
-                    chunk_end,
-                    inputs,
-                    slopes_full,
-                    biases_full,
-                    taus_full,
-                    weights,
-                    use_reentrant=False,
-                )
-                x = result[0]
-                # result[1:] are (neurons, batch) — transpose each and stack along time
-                act_chunks.append(torch.stack([cx.t() for cx in result[1:]], dim=-1))
-            self.activations = torch.cat(act_chunks, dim=-1).cpu()
-        else:
-            acts = [x.t().cpu()]
-            for alayer in range(1, self.num_layers):
-                x_previous = x.clone()
-                x = torch.sparse.mm(weights, x)
-                x = self.activation_function(
-                    x,
-                    x_previous=x_previous,
-                    slopes_full=slopes_full,
-                    biases_full=biases_full,
-                    taus_full=taus_full,
-                )
-                if self._should_apply_sensory_after_layer(alayer):
-                    x = self._apply_sensory_input(
-                        x,
-                        self._sensory_input_after_layer(inputs, alayer),
-                    )
-                    # x = torch.where(x >= self.threshold, x, torch.zeros_like(x))
-                    # this propagates NaN honesty
-                    if self.output_rectify:
-                        x = torch.relu(x - self.threshold) + self.threshold * (
-                            x >= self.threshold
-                        ).to(x.dtype)
-                    x = (
-                        x
-                        if self.output_clamp_max is None
-                        else torch.clamp(x, max=self.output_clamp_max)
-                    )
-                    if self.sensory_input_mode == "replace":
-                        x = self._apply_sensory_input(
-                            x,
-                            self._sensory_input_after_layer(inputs, alayer),
-                        )
-                if manipulate is not None:
-                    x = x.clone()
-                    for b, _ in manipulate.items():
-                        if alayer in manipulate_idx[b]:
-                            for neuron_idx, target_act in manipulate_idx[b][
-                                alayer
-                            ].items():
-                                x[neuron_idx, b] = target_act
-                acts.append(x.t().cpu())
-            self.activations = torch.stack(acts, dim=-1)
-
-        del inputs, x
-        torch.cuda.empty_cache()
-
-        if single_input:
-            self.activations = self.activations.squeeze(0)
-        return self.activations
-
 
 # Note: input gradients are handled in the activation_maximisation and saliency
 # functions themselves, so no context manager for that here
@@ -2149,6 +1896,28 @@ def training_mode(
             divisive_strength=False,
             tau=False,
         )
+
+
+def _targets_for_batches(targets: pd.DataFrame, batch_indices) -> pd.DataFrame:
+    """
+    The rows of ``targets`` whose ``batch`` is in ``batch_indices``, ordered by
+    the position of their batch in ``batch_indices`` (rows of one batch keep
+    their order) and with ``batch`` renumbered to that position. This is the
+    order in which ``train_model`` flattens the targets, and so the order of
+    the ``pred`` and ``target`` vectors a custom ``activation_loss_fn``
+    receives.
+
+    Args:
+        targets (pd.DataFrame): Targets with a ``batch`` column.
+        batch_indices (sequence of int): The batches to keep, in order.
+
+    Returns:
+        pd.DataFrame: The selected rows, with ``batch`` renumbered from 0.
+    """
+    position = {b: i for i, b in enumerate(batch_indices)}
+    selected = targets[targets["batch"].isin(list(position))].copy()
+    selected["batch"] = selected["batch"].map(position)
+    return selected.sort_values(by="batch", kind="stable")
 
 
 def train_model(
@@ -2288,23 +2057,8 @@ def train_model(
         train_inputs = inputs[train_indices]
         val_inputs = inputs[val_indices]
 
-        train_targets = targets[targets["batch"].isin(train_indices)].copy()
-        train_targets.loc[:, ["batch"]] = pd.Categorical(
-            train_targets["batch"], categories=list(train_indices)
-        )
-        train_targets = train_targets.sort_values(by="batch")
-        # change to local batch indices
-        batch2local_batch = {b: i for i, b in enumerate(train_indices)}
-        train_targets.loc[:, ["batch"]] = train_targets.batch.map(batch2local_batch)
-
-        val_targets = targets[targets["batch"].isin(val_indices)].copy()
-        val_targets.loc[:, ["batch"]] = pd.Categorical(
-            val_targets["batch"], categories=list(val_indices)
-        )
-        val_targets = val_targets.sort_values(by="batch")
-        # change to local batch indices
-        batch2local_batch = {b: i for i, b in enumerate(val_indices)}
-        val_targets.loc[:, ["batch"]] = val_targets.batch.map(batch2local_batch)
+        train_targets = _targets_for_batches(targets, train_indices)
+        val_targets = _targets_for_batches(targets, val_indices)
 
         return (
             train_inputs,
