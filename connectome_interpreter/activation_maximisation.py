@@ -26,7 +26,6 @@ from .utils import (
     scipy_sparse_to_pytorch,
 )
 
-
 # Default box for a pair-mode gain. The gain is dimensionless (w_eff = m * w), so
 # a fixed box is meaningful across edges of any weight. 0 is a safe lower bound
 # because dL/dm = w * dL/dw_eff is nonzero there, so a zeroed edge can recover.
@@ -483,9 +482,7 @@ class _NetworkBase(nn.Module):
                 # would silently flip excitation/inhibition. The incoming-weight
                 # budget's projection additionally relies on m >= 0 for its
                 # row-L1 accounting (|m * w| = m * |w|).
-                raise ValueError(
-                    f"slope_bounds for pair {pair} must be non-negative."
-                )
+                raise ValueError(f"slope_bounds for pair {pair} must be non-negative.")
             if float(lower) > float(upper):
                 lower = upper
             lower_values.append(float(lower))
@@ -676,9 +673,9 @@ class _NetworkBase(nn.Module):
                 "never come under it. Raise the budget or make those edges trainable."
             )
 
-        infeasible = torch.where(
-            checkable & (frozen_row_l1 + lower_l1 > budget + tol)
-        )[0]
+        infeasible = torch.where(checkable & (frozen_row_l1 + lower_l1 > budget + tol))[
+            0
+        ]
         if infeasible.numel() > 0:
             raise ValueError(
                 f"incoming_weight_budget={budget} is infeasible for post-node "
@@ -2553,9 +2550,11 @@ def train_model(
             # Forward pass. The transform is re-applied each epoch so a
             # differentiable transform (driven by extra_parameters) gets gradients.
             outputs = model(
-                train_inputs
-                if input_transform is None
-                else input_transform(train_inputs),
+                (
+                    train_inputs
+                    if input_transform is None
+                    else input_transform(train_inputs)
+                ),
                 checkpoint_steps=checkpoint_steps,
                 initial_state=train_initial_state,
             )  # shape: (train_num, num_neurons, num_layers)
@@ -2643,9 +2642,11 @@ def train_model(
             if has_validation:
                 with torch.no_grad():
                     val_outputs = model(
-                        val_inputs
-                        if input_transform is None
-                        else input_transform(val_inputs),
+                        (
+                            val_inputs
+                            if input_transform is None
+                            else input_transform(val_inputs)
+                        ),
                         initial_state=val_initial_state,
                     )
                     if output_transform is not None:

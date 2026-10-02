@@ -1815,7 +1815,9 @@ class TestLinearNetwork(unittest.TestCase):
         self.assertIn("ambiguous", str(ctx.exception))
 
         # a 1-D initial_state is unambiguous and still accepted
-        output = model(inputs, initial_state=torch.tensor([7.0, 2.0], device=self.device))
+        output = model(
+            inputs, initial_state=torch.tensor([7.0, 2.0], device=self.device)
+        )
         self.assertEqual(tuple(output.shape), (2, 2, 1))
 
     def test_output_flags_are_multilayered_only(self):
@@ -4394,7 +4396,9 @@ class TestIncomingWeightBudget(unittest.TestCase):
         scale = model.project_incoming_budget_()
         self.assertTrue(torch.allclose(model.slope, before))
         np.testing.assert_allclose(scale.cpu().numpy(), np.ones(4), atol=1e-6)
-        np.testing.assert_allclose(self._row_l1(model).numpy()[1:], [0.4, 0.6, 0.9], atol=1e-6)
+        np.testing.assert_allclose(
+            self._row_l1(model).numpy()[1:], [0.4, 0.6, 0.9], atol=1e-6
+        )
 
     def test_projection_lands_the_row_exactly_on_the_budget(self):
         model = self._model(budget=1.0)
@@ -4738,7 +4742,9 @@ class TestIncomingWeightBudget(unittest.TestCase):
     def test_train_model_reports_nothing_when_the_budget_never_binds(self):
         model = self._model(budget=1.0)
         inputs = torch.zeros((1, 1, 2), device=self.device)
-        targets = pd.DataFrame([{"batch": 0, "neuron_idx": 3, "layer": 0, "value": 0.0}])
+        targets = pd.DataFrame(
+            [{"batch": 0, "neuron_idx": 3, "layer": 0, "value": 0.0}]
+        )
         _, history, *_ = train_model(
             model,
             inputs,
@@ -4886,9 +4892,7 @@ class TestCallableInitialState(unittest.TestCase):
     epoch from the current model instead of freezing one tensor."""
 
     def setUp(self):
-        self.weights = csr_matrix(
-            np.array([[0.0, 0.0], [0.5, 0.0]], dtype=np.float32)
-        )
+        self.weights = csr_matrix(np.array([[0.0, 0.0], [0.5, 0.0]], dtype=np.float32))
         self.idx_to_group = {0: "A", 1: "B"}
 
     def _fixtures(self, num_batches=6):

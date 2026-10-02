@@ -7,45 +7,22 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from scipy import sparse
+from scipy import optimize, sparse
+from scipy.sparse import linalg as spla
 
 from .activation_maximisation import LinearNetwork, MultilayeredNetwork
 
-__all__ = [
-    # dynamics
-    "network_step",
-    "network_fixed_point",
-    "linear_network_steady_state",
-    "nonlinear_network_steady_state",
-    "make_initial_state_fn",
-    # stability
-    "free_update_matrix",
-    "stability_penalty",
-    "spectral_radius",
-    # sensor
-    "ExponentialSensor",
-    "GCAMP6F_TAU_MS",
-    # readout & loss
-    "affine_readout_solve",
-    "affine_readout_frame",
-    "make_affine_readout_loss",
-    # windows & metrics
-    "score_mask_for_transition_windows",
-    "build_raw_window_targets",
-    "extract_transition_windows",
-    "r2",
-    # persistence
-    "save_fit",
-    "load_fit",
-    "rebuild_network",
-    "simulate_trace",
-    "pair_slope_table",
-]
+# Up to this many nodes, the steady-state and stability functions use exact
+# dense computations; above it, sparse ones. The dense eigendecomposition in
+# stability_penalty runs every training step and takes ~20 ms at 256 nodes but
+# ~240 ms at 800 nodes (CPU).
+_DENSE_NODE_LIMIT = 256
 
+# GCaMP6f decay time constant in ms (literature range ~200-500 ms)
+GCAMP6F_TAU_MS = 300.0
+_SENSOR_SUPPORT_TAU = 6.0  # kernel length, in multiples of tau
 
-# ------------------------------------------------------------------
-# dynamics
-# ------------------------------------------------------------------
+_MODEL_KEY_PREFIX = "model_"
 
 
 def _free_and_sensory_indices(model):
@@ -204,8 +181,6 @@ def _steady_state_sparse_solve(
     Returns:
         tuple[np.ndarray, scipy.sparse.linalg.SuperLU]: ``(x_free, lu)``.
     """
-    from scipy.sparse import linalg as spla
-
     weights = _effective_weights_to_scipy(model)
     free = free_idx.detach().cpu().numpy()
     sens = sensory_idx.detach().cpu().numpy()
@@ -268,13 +243,11 @@ def _linear_steady_state_sparse_diff(
 
     # One differentiable evaluation of the linear map at the solution: equal to
     # x* in value, but carries the gradient with respect to the parameters.
-    weighted = torch.sparse.mm(
-        model.effective_weights, x_star.reshape(-1, 1)
-    ).reshape(-1)
-    free_map = slopes * weighted + biases
-    reconstructed = x_star.index_copy(
-        0, free_idx, free_map.index_select(0, free_idx)
+    weighted = torch.sparse.mm(model.effective_weights, x_star.reshape(-1, 1)).reshape(
+        -1
     )
+    free_map = slopes * weighted + biases
+    reconstructed = x_star.index_copy(0, free_idx, free_map.index_select(0, free_idx))
 
     def solve_T(g):
         g = g.detach().cpu().numpy().astype(np.float64)
@@ -342,8 +315,6 @@ def _newton_fixed_point_dense(
     ``free_update_matrix()``. Raises if the result is not a fixed point to
     within ``fp_tol``.
     """
-    from scipy import optimize
-
     device = model.all_weights.device
     n_nodes = model.all_weights.shape[0]
     n_free = free_idx.numel()
@@ -360,9 +331,7 @@ def _newton_fixed_point_dense(
     def residual(free_values):
         state = full_state(free_values)
         stepped = network_step(model, state, sensory_values)
-        return (
-            (stepped[free_idx] - state[free_idx]).cpu().numpy().astype(np.float64)
-        )
+        return (stepped[free_idx] - state[free_idx]).cpu().numpy().astype(np.float64)
 
     def jacobian(free_values):
         update = free_update_matrix(model, full_state(free_values))
@@ -460,7 +429,9 @@ def nonlinear_network_steady_state(
     return _FreeBlockAdjoint.apply(stepped, solve_T, free_idx)
 
 
-def make_initial_state_fn(solver, detach: bool = True, warm_start_kw: Optional[str] = None):
+def make_initial_state_fn(
+    solver, detach: bool = True, warm_start_kw: Optional[str] = None
+):
     """
     Wrap a steady-state solver into a callable for
     ``train_model(initial_state=...)``, which calls it at the start of every
@@ -494,17 +465,6 @@ def make_initial_state_fn(solver, detach: bool = True, warm_start_kw: Optional[s
         return cache["state"] if detach else state
 
     return initial_state_fn
-
-
-# ------------------------------------------------------------------
-# stability
-# ------------------------------------------------------------------
-
-# Up to this many nodes, the steady-state and stability functions use exact
-# dense computations; above it, sparse ones. The dense eigendecomposition in
-# stability_penalty runs every training step and takes ~20 ms at 256 nodes but
-# ~240 ms at 800 nodes (CPU).
-_DENSE_NODE_LIMIT = 256
 
 
 def free_update_matrix(model, state=None):
@@ -587,16 +547,14 @@ def _spectral_radius_sparse(model, free_idx, gain):
     """
     Spectral radius of the update matrix of a large network, via ARPACK.
     """
-    from scipy.sparse import linalg as spla
-
     weights = _effective_weights_to_scipy(model)
     free = free_idx.detach().cpu().numpy()
     weights_ff = weights[free][:, free]
     gain_f = gain.detach().cpu().numpy()[free].astype(np.float64)
-    taus = (
-        model.node_parameter("tau").detach().cpu().numpy()[free].astype(np.float64)
+    taus = model.node_parameter("tau").detach().cpu().numpy()[free].astype(np.float64)
+    update = (
+        sparse.diags((taus - 1.0) / taus) + sparse.diags(gain_f / taus) @ weights_ff
     )
-    update = sparse.diags((taus - 1.0) / taus) + sparse.diags(gain_f / taus) @ weights_ff
     update = update.tocsr()
     if free.size <= 2:
         eigenvalues = np.linalg.eigvals(update.toarray())
@@ -667,15 +625,6 @@ def spectral_radius(model, state=None):
             return _spectral_radius_sparse(model, free_idx, gain)
         update = free_update_matrix(model, state)
         return float(torch.abs(torch.linalg.eigvals(update)).max().detach().cpu())
-
-
-# ------------------------------------------------------------------
-# sensor
-# ------------------------------------------------------------------
-
-# GCaMP6f decay time constant in ms (literature range ~200-500 ms)
-GCAMP6F_TAU_MS = 300.0
-_SENSOR_SUPPORT_TAU = 6.0  # kernel length, in multiples of tau
 
 
 class ExponentialSensor:
@@ -759,11 +708,6 @@ class ExponentialSensor:
             raise ValueError("trace must be 1-D (T,) or 2-D (n, T).")
         x = torch.as_tensor(trace).reshape(1, -1, trace.shape[-1])
         return self._convolve(x).reshape(trace.shape).numpy()
-
-
-# ------------------------------------------------------------------
-# affine readout & loss
-# ------------------------------------------------------------------
 
 
 def affine_readout_solve(latent, target, ridge: float = 1e-4):
@@ -1036,11 +980,6 @@ def make_affine_readout_loss(
     return loss_fn
 
 
-# ------------------------------------------------------------------
-# windows & metrics
-# ------------------------------------------------------------------
-
-
 def score_mask_for_transition_windows(
     n_samples: int, transition_idx, window_steps: int
 ) -> np.ndarray:
@@ -1173,13 +1112,6 @@ def r2(y, y_pred) -> float:
     return 1.0 - ss_res / ss_tot
 
 
-# ------------------------------------------------------------------
-# persistence
-# ------------------------------------------------------------------
-
-_MODEL_KEY_PREFIX = "model_"
-
-
 def _model_arrays(model) -> dict:
     """
     Everything ``rebuild_network()`` needs, as numpy arrays with ``model_`` keys.
@@ -1216,7 +1148,9 @@ def _model_arrays(model) -> dict:
         "model_output_clamp_max": optional_float(
             getattr(model, "output_clamp_max", None)
         ),
-        "model_output_rectify": np.asarray(bool(getattr(model, "output_rectify", False))),
+        "model_output_rectify": np.asarray(
+            bool(getattr(model, "output_rectify", False))
+        ),
     }
     if model.idx_to_group is not None:
         out["model_node_group"] = np.asarray(

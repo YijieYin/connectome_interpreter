@@ -1,6 +1,10 @@
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
 import numpy as np
 import pandas as pd
-import pytest
 import scipy.sparse as sps
 import torch
 
@@ -197,10 +201,10 @@ def _big_pairwise_linear_chain(n=300, weight=0.4):
 # ---------------------------------------------------------------------------
 
 
-class TestNodeParameter:
+class TestNodeParameter(unittest.TestCase):
     def test_pairwise_slope_is_ones(self):
         model = _mln_pairwise()
-        assert torch.equal(model.node_parameter("slope"), torch.ones(3))
+        self.assertTrue(torch.equal(model.node_parameter("slope"), torch.ones(3)))
 
     def test_node_mode_values(self):
         model = _mln_node_mode()
@@ -228,11 +232,11 @@ class TestNodeParameter:
         )
 
     def test_unknown_name_raises(self):
-        with pytest.raises(ValueError, match="Unknown parameter name"):
+        with self.assertRaisesRegex(ValueError, "Unknown parameter name"):
             _mln_pairwise().node_parameter("weights")
 
 
-class TestActivationGain:
+class TestActivationGain(unittest.TestCase):
     def test_linear_gain_is_slope_and_state_independent(self):
         model = _stable_linear_net()
         gain = model.activation_gain()
@@ -240,7 +244,7 @@ class TestActivationGain:
 
     def test_custom_activation_without_gain_raises(self):
         model = _mln_pairwise(activation_function=tanh_relu_activation)
-        with pytest.raises(ValueError, match="activation_gain_fn"):
+        with self.assertRaisesRegex(ValueError, "activation_gain_fn"):
             model.activation_gain(torch.zeros(3))
 
     def test_custom_gain_dispatched(self):
@@ -262,9 +266,7 @@ class TestActivationGain:
         )
 
     def test_custom_pair_matches_builtin_forward(self):
-        inputs = _input_tensor(
-            np.linspace(0.1, 0.5, 6).astype(np.float32), device=CPU
-        )
+        inputs = _input_tensor(np.linspace(0.1, 0.5, 6).astype(np.float32), device=CPU)
         custom = _mln_pairwise(
             activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
         )
@@ -288,7 +290,7 @@ class TestActivationGain:
         np.testing.assert_allclose(gain, expected, rtol=1e-5)
 
     def test_builtin_multilayered_gain_requires_state(self):
-        with pytest.raises(ValueError, match="state-dependent"):
+        with self.assertRaisesRegex(ValueError, "state-dependent"):
             _mln_node_mode().activation_gain()
 
     def test_divisive_normalization_gain_not_implemented(self):
@@ -305,14 +307,14 @@ class TestActivationGain:
             sensory_input_mode="replace",
             device=CPU,
         )
-        with pytest.raises(NotImplementedError, match="divisive_normalization"):
+        with self.assertRaisesRegex(NotImplementedError, "divisive_normalization"):
             model.activation_gain(torch.zeros(3))
         linear = _linear_net(
             weights,
             idx_to_group={0: "S", 1: "A", 2: "B"},
             divisive_normalization={"A": ["B"]},
         )
-        with pytest.raises(NotImplementedError, match="divisive_normalization"):
+        with self.assertRaisesRegex(NotImplementedError, "divisive_normalization"):
             linear.activation_gain()
 
 
@@ -321,21 +323,21 @@ class TestActivationGain:
 # ---------------------------------------------------------------------------
 
 
-class TestDynamics:
+class TestDynamics(unittest.TestCase):
     def test_free_and_sensory_split(self):
         free_idx, sensory_idx = rf._free_and_sensory_indices(_stable_linear_net())
-        assert sensory_idx.tolist() == [0]
-        assert set(free_idx.tolist()) == {1, 2}
+        self.assertEqual(sensory_idx.tolist(), [0])
+        self.assertEqual(set(free_idx.tolist()), {1, 2})
 
     def test_steady_state_solves_free_update_fixed_point(self):
         net = _stable_linear_net()
         steady = rf.linear_network_steady_state(net, [1.0])
-        assert bool(torch.isfinite(steady).all())
+        self.assertTrue(bool(torch.isfinite(steady).all()))
         free_idx, sensory_idx = rf._free_and_sensory_indices(net)
-        assert torch.isclose(steady[sensory_idx[0]], torch.tensor(1.0))
+        self.assertTrue(torch.isclose(steady[sensory_idx[0]], torch.tensor(1.0)))
         update = rf.free_update_matrix(net)
-        assert update.shape == (free_idx.numel(), free_idx.numel())
-        assert torch.isfinite(update).all()
+        self.assertEqual(update.shape, (free_idx.numel(), free_idx.numel()))
+        self.assertTrue(torch.isfinite(update).all())
 
     def test_steady_state_sparse_path_matches_recursion(self):
         net = _big_linear_chain(n=300, weight=0.5)
@@ -351,7 +353,7 @@ class TestDynamics:
             sensory_input_mode="add",
             device=CPU,
         )
-        with pytest.raises(ValueError, match="replace"):
+        with self.assertRaisesRegex(ValueError, "replace"):
             rf.network_step(model, torch.zeros(3), [0.1])
 
     def test_fixed_point_converges_and_is_a_fixed_point(self):
@@ -359,9 +361,9 @@ class TestDynamics:
             activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
         )
         state, info = rf.network_fixed_point(model, [0.3], return_info=True, tol=1e-8)
-        assert info["converged"]
+        self.assertTrue(info["converged"])
         next_state = rf.network_step(model, state, [0.3])
-        assert float(torch.abs(next_state - state).max()) <= 1e-6
+        self.assertLessEqual(float(torch.abs(next_state - state).max()), 1e-6)
 
     def test_fixed_point_warm_start_converges_quickly(self):
         model = _mln_pairwise(
@@ -371,11 +373,11 @@ class TestDynamics:
         _, info = rf.network_fixed_point(
             model, [0.3], initial_state=state, min_steps=1, tol=1e-8, return_info=True
         )
-        assert info["converged"]
-        assert info["iterations"] <= 3
+        self.assertTrue(info["converged"])
+        self.assertLessEqual(info["iterations"], 3)
 
 
-class TestMakeInitialStateFn:
+class TestMakeInitialStateFn(unittest.TestCase):
     def test_wraps_steady_state_solver(self):
         from functools import partial
 
@@ -392,14 +394,14 @@ class TestMakeInitialStateFn:
         fn = rf.make_initial_state_fn(
             lambda model, **kw: torch.zeros(3, requires_grad=True) + 1.0
         )
-        assert fn(None).requires_grad is False
+        self.assertIs(fn(None).requires_grad, False)
 
     def test_detach_false_keeps_grad(self):
         fn = rf.make_initial_state_fn(
             lambda model, **kw: torch.zeros(3, requires_grad=True) + 1.0,
             detach=False,
         )
-        assert fn(None).requires_grad is True
+        self.assertIs(fn(None).requires_grad, True)
 
     def test_warm_start_threads_previous_state(self):
         received = []
@@ -411,12 +413,12 @@ class TestMakeInitialStateFn:
         fn = rf.make_initial_state_fn(solver, warm_start_kw="initial_state")
         first = fn(None)
         second = fn(None)
-        assert received[0] == {}
-        assert torch.equal(received[1]["initial_state"], first)
-        assert torch.equal(second, torch.full((3,), 2.0))
+        self.assertEqual(received[0], {})
+        self.assertTrue(torch.equal(received[1]["initial_state"], first))
+        self.assertTrue(torch.equal(second, torch.full((3,), 2.0)))
 
 
-class TestNonlinearNetworkSteadyState:
+class TestNonlinearNetworkSteadyState(unittest.TestCase):
     """The implicit-differentiation equilibrium solver (dense backend)."""
 
     U = [0.3]
@@ -445,13 +447,11 @@ class TestNonlinearNetworkSteadyState:
             .abs()
             .max()
         )
-        assert float(moved) <= 1e-5
+        self.assertLessEqual(float(moved), 1e-5)
         iterative = rf.network_fixed_point(
             model, self.U, max_steps=20000, min_steps=20, tol=1e-7
         )
-        np.testing.assert_allclose(
-            state.detach().numpy(), iterative.numpy(), atol=1e-5
-        )
+        np.testing.assert_allclose(state.detach().numpy(), iterative.numpy(), atol=1e-5)
 
     def test_gradient_matches_finite_differences(self):
         model = self._model()
@@ -475,9 +475,7 @@ class TestNonlinearNetworkSteadyState:
                         )
                         param.data[i] -= sign * h
                 fd = (values[0] - values[1]) / (2 * h)
-                np.testing.assert_allclose(
-                    float(analytic[i]), fd, rtol=5e-2, atol=2e-3
-                )
+                np.testing.assert_allclose(float(analytic[i]), fd, rtol=5e-2, atol=2e-3)
 
     def test_tau_gradient_vanishes(self):
         # The equilibrium condition has no tau (the leak cancels at a fixed
@@ -489,7 +487,7 @@ class TestNonlinearNetworkSteadyState:
             [model.tau_param],
             allow_unused=False,
         )
-        assert float(tau_grad.abs().max()) < 1e-4
+        self.assertLess(float(tau_grad.abs().max()), 1e-4)
 
     def test_matches_linear_closed_form(self):
         net = _linear_net(
@@ -516,11 +514,11 @@ class TestNonlinearNetworkSteadyState:
 
     def test_raises_without_gain(self):
         model = _mln_pairwise(activation_function=tanh_relu_activation)
-        with pytest.raises(ValueError, match="activation_gain_fn"):
+        with self.assertRaisesRegex(ValueError, "activation_gain_fn"):
             rf.nonlinear_network_steady_state(model, self.U)
 
     def test_raises_above_dense_limit(self):
-        with pytest.raises(NotImplementedError, match="at most 256 nodes"):
+        with self.assertRaisesRegex(NotImplementedError, "at most 256 nodes"):
             rf.nonlinear_network_steady_state(_big_linear_chain(), [0.3])
 
     def test_make_initial_state_fn_integration(self):
@@ -531,17 +529,17 @@ class TestNonlinearNetworkSteadyState:
         attached = rf.make_initial_state_fn(
             solver, detach=False, warm_start_kw="initial_state"
         )(model)
-        assert attached.requires_grad
+        self.assertTrue(attached.requires_grad)
         detached = rf.make_initial_state_fn(
             solver, detach=True, warm_start_kw="initial_state"
         )(model)
-        assert not detached.requires_grad
+        self.assertFalse(detached.requires_grad)
         np.testing.assert_allclose(
             attached.detach().numpy(), detached.numpy(), atol=1e-6
         )
 
 
-class TestLinearNetworkSteadyStateSparse:
+class TestLinearNetworkSteadyStateSparse(unittest.TestCase):
     """The differentiable sparse (splu forward + IFT-adjoint backward) linear
     steady state used above ``_DENSE_NODE_LIMIT``. The dense path (autograd
     through ``torch.linalg.solve``) is the reference the sparse gradient must
@@ -572,25 +570,31 @@ class TestLinearNetworkSteadyStateSparse:
             model.tau_param.requires_grad_(True)
         return model
 
+    def _force_sparse_path(self):
+        # route even this small model through the sparse solver
+        patcher = mock.patch.object(rf, "_DENSE_NODE_LIMIT", 1)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @staticmethod
     def _loss(state):
         weights = torch.tensor([0.7, -1.3, 0.9])
         return (weights * state).sum()
 
-    def test_sparse_matches_dense_value(self, monkeypatch):
+    def test_sparse_matches_dense_value(self):
         model = self._model()
         dense = rf.linear_network_steady_state(model, self.U).detach().numpy()
-        monkeypatch.setattr(rf, "_DENSE_NODE_LIMIT", 1)
+        self._force_sparse_path()
         sparse_state = rf.linear_network_steady_state(model, self.U).detach().numpy()
         np.testing.assert_allclose(sparse_state, dense, atol=1e-6)
 
-    def test_sparse_gradient_matches_dense(self, monkeypatch):
+    def test_sparse_gradient_matches_dense(self):
         model = self._model()
         dense_grads = torch.autograd.grad(
             self._loss(rf.linear_network_steady_state(model, self.U)),
             [model.slope, model.biases],
         )
-        monkeypatch.setattr(rf, "_DENSE_NODE_LIMIT", 1)
+        self._force_sparse_path()
         sparse_grads = torch.autograd.grad(
             self._loss(rf.linear_network_steady_state(model, self.U)),
             [model.slope, model.biases],
@@ -600,9 +604,9 @@ class TestLinearNetworkSteadyStateSparse:
                 sparse_g.numpy(), dense_g.numpy(), rtol=1e-4, atol=1e-6
             )
 
-    def test_gradient_matches_finite_differences(self, monkeypatch):
+    def test_gradient_matches_finite_differences(self):
         model = self._model()
-        monkeypatch.setattr(rf, "_DENSE_NODE_LIMIT", 1)
+        self._force_sparse_path()
         grads = torch.autograd.grad(
             self._loss(rf.linear_network_steady_state(model, self.U)),
             [model.slope, model.biases],
@@ -623,50 +627,46 @@ class TestLinearNetworkSteadyStateSparse:
                         )
                         param.data[i] -= sign * h
                 fd = (values[0] - values[1]) / (2 * h)
-                np.testing.assert_allclose(
-                    float(analytic[i]), fd, rtol=5e-2, atol=2e-3
-                )
+                np.testing.assert_allclose(float(analytic[i]), fd, rtol=5e-2, atol=2e-3)
 
-    def test_tau_gradient_is_none(self, monkeypatch):
+    def test_tau_gradient_is_none(self):
         # The linear equilibrium does not involve tau, so the sparse path (like
         # the dense one) yields no gradient for the taus.
         model = self._model()
-        monkeypatch.setattr(rf, "_DENSE_NODE_LIMIT", 1)
+        self._force_sparse_path()
         (tau_grad,) = torch.autograd.grad(
             self._loss(rf.linear_network_steady_state(model, self.U)),
             [model.tau_param],
             allow_unused=True,
         )
-        assert tau_grad is None or float(tau_grad.abs().max()) < 1e-6
+        self.assertTrue(tau_grad is None or float(tau_grad.abs().max()) < 1e-6)
 
     def test_large_network_dispatches_to_sparse_and_is_fixed_point(self):
         model = _big_pairwise_linear_chain()
-        assert model.all_weights.shape[0] > rf._DENSE_NODE_LIMIT
+        self.assertGreater(model.all_weights.shape[0], rf._DENSE_NODE_LIMIT)
         state = rf.linear_network_steady_state(model, self.U)
         moved = (
             (rf.network_step(model, state.detach(), self.U) - state.detach())
             .abs()
             .max()
         )
-        assert float(moved) <= 1e-5
+        self.assertLessEqual(float(moved), 1e-5)
         iterative = rf.network_fixed_point(
             model, self.U, max_steps=20000, min_steps=20, tol=1e-8
         )
-        np.testing.assert_allclose(
-            state.detach().numpy(), iterative.numpy(), atol=1e-5
-        )
+        np.testing.assert_allclose(state.detach().numpy(), iterative.numpy(), atol=1e-5)
 
     def test_large_network_is_differentiable(self):
         model = _big_pairwise_linear_chain()
         state = rf.linear_network_steady_state(model, self.U)
-        assert state.requires_grad
+        self.assertTrue(state.requires_grad)
         slope_grad, bias_grad = torch.autograd.grad(
             state.sum(), [model.slope, model.biases]
         )
-        assert torch.isfinite(slope_grad).all()
-        assert float(slope_grad.abs().max()) > 0
-        assert torch.isfinite(bias_grad).all()
-        assert float(bias_grad.abs().max()) > 0
+        self.assertTrue(torch.isfinite(slope_grad).all())
+        self.assertGreater(float(slope_grad.abs().max()), 0)
+        self.assertTrue(torch.isfinite(bias_grad).all())
+        self.assertGreater(float(bias_grad.abs().max()), 0)
 
     def test_make_initial_state_fn_integration_large(self):
         from functools import partial
@@ -674,9 +674,9 @@ class TestLinearNetworkSteadyStateSparse:
         model = _big_pairwise_linear_chain()
         solver = partial(rf.linear_network_steady_state, sensory_values=self.U)
         attached = rf.make_initial_state_fn(solver, detach=False)(model)
-        assert attached.requires_grad
+        self.assertTrue(attached.requires_grad)
         detached = rf.make_initial_state_fn(solver, detach=True)(model)
-        assert not detached.requires_grad
+        self.assertFalse(detached.requires_grad)
         np.testing.assert_allclose(
             attached.detach().numpy(), detached.numpy(), atol=1e-6
         )
@@ -687,18 +687,18 @@ class TestLinearNetworkSteadyStateSparse:
 # ---------------------------------------------------------------------------
 
 
-class TestStability:
+class TestStability(unittest.TestCase):
     def test_spectral_radius_and_penalty_agree_for_stable_network(self):
         net = _stable_linear_net()
         rho = rf.spectral_radius(net)
-        assert np.isfinite(rho) and rho < 1.0
-        assert float(rf.stability_penalty(net, margin=1e-4)) == 0.0
+        self.assertTrue(np.isfinite(rho) and rho < 1.0)
+        self.assertEqual(float(rf.stability_penalty(net, margin=1e-4)), 0.0)
 
     def test_penalty_positive_for_unstable_network(self):
         # a strong self-excitatory free node pushes the update radius above 1
         net = _linear_net([[0.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 0.0]])
-        assert rf.spectral_radius(net) > 1.0
-        assert float(rf.stability_penalty(net)) > 0.0
+        self.assertGreater(rf.spectral_radius(net), 1.0)
+        self.assertGreater(float(rf.stability_penalty(net)), 0.0)
 
     def test_free_update_matrix_matches_linear_formula(self):
         net = _stable_linear_net()
@@ -718,11 +718,11 @@ class TestStability:
         # high-activity operating point is more stable than a low one
         low = rf.spectral_radius(model, torch.zeros(3))
         high = rf.spectral_radius(model, torch.tensor([5.0, 5.0, 5.0]))
-        assert high < low
+        self.assertLess(high, low)
 
     def test_penalty_raises_without_gain(self):
         model = _mln_pairwise(activation_function=tanh_relu_activation)
-        with pytest.raises(ValueError, match="activation_gain_fn"):
+        with self.assertRaisesRegex(ValueError, "activation_gain_fn"):
             rf.stability_penalty(model, torch.zeros(3))
 
     def test_sparse_paths_run_on_large_network(self):
@@ -747,20 +747,22 @@ class TestStability:
         )
         rho = rf.spectral_radius(net)  # ARPACK path (n > _DENSE_NODE_LIMIT)
         reference = float(torch.abs(torch.linalg.eigvals(_dense_update(net))).max())
-        assert abs(rho - reference) < 1e-4
-        assert rho < 1.0
-        assert float(rf.stability_penalty(net)) == 0.0  # Gershgorin path
+        self.assertLess(abs(rho - reference), 1e-4)
+        self.assertLess(rho, 1.0)
+        self.assertEqual(float(rf.stability_penalty(net)), 0.0)
         bound = float(_gershgorin_bound(net))
-        assert rho <= bound + 1e-6  # Gershgorin upper-bounds the true radius
-        assert bound < 1.0
+        self.assertLessEqual(rho, bound + 1e-6)
+        self.assertLess(bound, 1.0)
 
     def test_gershgorin_bound_small_net(self):
         # bound >= true radius on the dense-regime nets too
         net = _stable_linear_net()
-        assert rf.spectral_radius(net) <= float(_gershgorin_bound(net)) + 1e-6
+        self.assertLessEqual(
+            rf.spectral_radius(net), float(_gershgorin_bound(net)) + 1e-6
+        )
 
     def test_free_update_matrix_refuses_large_network(self):
-        with pytest.raises(ValueError, match="at most 256 nodes"):
+        with self.assertRaisesRegex(ValueError, "at most 256 nodes"):
             rf.free_update_matrix(_big_linear_chain())
 
     def test_penalty_is_differentiable(self):
@@ -780,10 +782,10 @@ class TestStability:
         model.slope.requires_grad_(True)
         state = torch.zeros(2)
         penalty = rf.stability_penalty(model, state)
-        assert float(penalty) > 0.0
+        self.assertGreater(float(penalty), 0.0)
         penalty.backward()
-        assert model.slope.grad is not None
-        assert torch.isfinite(model.slope.grad).all()
+        self.assertIsNotNone(model.slope.grad)
+        self.assertTrue(torch.isfinite(model.slope.grad).all())
 
 
 # ---------------------------------------------------------------------------
@@ -791,14 +793,14 @@ class TestStability:
 # ---------------------------------------------------------------------------
 
 
-class TestExponentialSensor:
+class TestExponentialSensor(unittest.TestCase):
     def test_kernel_normalised_and_decaying(self):
         sensor = rf.ExponentialSensor(tau_ms=300.0, dt_ms=1.0)
         kernel = sensor.kernel
-        assert kernel.dtype == np.float32
-        assert abs(kernel.sum() - 1.0) < 1e-5  # unit DC gain -> plateaus preserved
-        assert np.all(np.diff(kernel) < 0)  # monotonically decaying
-        assert kernel.size == int(round(6.0 * 300.0))  # support_tau * tau / dt
+        self.assertEqual(kernel.dtype, np.float32)
+        self.assertLess(abs(kernel.sum() - 1.0), 1e-5)
+        self.assertTrue(np.all(np.diff(kernel) < 0))
+        self.assertEqual(kernel.size, int(round(6.0 * 300.0)))
 
     def test_kernel_tap_ratio_matches_tau(self):
         sensor = rf.ExponentialSensor(tau_ms=250.0, dt_ms=1.0)
@@ -819,15 +821,15 @@ class TestExponentialSensor:
         np.testing.assert_allclose(
             y[1000 : 1000 + sensor.kernel.size], sensor.kernel, atol=1e-6
         )
-        assert np.allclose(y[:1000], 0.0)  # causal: nothing before the impulse
+        self.assertTrue(np.allclose(y[:1000], 0.0))
 
     def test_apply_causal_step_smoothed(self):
         sensor = rf.ExponentialSensor(tau_ms=300.0, dt_ms=1.0)
         x = np.concatenate([np.zeros(3000), np.ones(6000)])
         y = sensor.apply(x)
-        assert np.allclose(y[:3000], 0.0)
-        assert 0.0 < y[3050] < 1.0
-        assert abs(y[-1] - 1.0) < 1e-3
+        self.assertTrue(np.allclose(y[:3000], 0.0))
+        self.assertTrue(0.0 < y[3050] < 1.0)
+        self.assertLess(abs(y[-1] - 1.0), 1e-3)
 
     def test_output_transform_matches_apply(self):
         sensor = rf.ExponentialSensor(tau_ms=300.0, dt_ms=1.0)
@@ -844,19 +846,19 @@ class TestExponentialSensor:
         sensor = rf.ExponentialSensor(tau_ms=300.0, dt_ms=1.0)
         x = torch.randn(1, 4, 1500, requires_grad=True)
         y = sensor.output_transform(x)
-        assert y.shape == x.shape
+        self.assertEqual(y.shape, x.shape)
         y.sum().backward()
-        assert x.grad is not None and torch.isfinite(x.grad).all()
+        self.assertTrue(x.grad is not None and torch.isfinite(x.grad).all())
 
     def test_output_transform_rejects_non_3d(self):
         sensor = rf.ExponentialSensor(tau_ms=10.0, dt_ms=1.0)
-        with pytest.raises(ValueError, match="batch, neurons, T"):
+        with self.assertRaisesRegex(ValueError, "batch, neurons, T"):
             sensor.output_transform(torch.zeros(5, 5))
 
     def test_invalid_parameters_raise(self):
-        with pytest.raises(ValueError):
+        with self.assertRaises(ValueError):
             rf.ExponentialSensor(tau_ms=0.0)
-        with pytest.raises(ValueError):
+        with self.assertRaises(ValueError):
             rf.ExponentialSensor(tau_ms=1.0, dt_ms=0.0)
 
 
@@ -865,26 +867,26 @@ class TestExponentialSensor:
 # ---------------------------------------------------------------------------
 
 
-class TestAffineReadout:
+class TestAffineReadout(unittest.TestCase):
     def test_solve_recovers_affine_relation(self):
         latent = torch.linspace(-1, 1, 100)
         target = 2.5 * latent + 0.3
         scale, offset = rf.affine_readout_solve(latent, target, ridge=0.0)
-        assert abs(float(scale) - 2.5) < 1e-5
-        assert abs(float(offset) - 0.3) < 1e-5
+        self.assertLess(abs(float(scale) - 2.5), 1e-5)
+        self.assertLess(abs(float(offset) - 0.3), 1e-5)
 
     def test_solve_clamps_scale_nonnegative(self):
         latent = torch.linspace(-1, 1, 100)
         target = -2.0 * latent
         scale, offset = rf.affine_readout_solve(latent, target)
-        assert float(scale) == 0.0
+        self.assertEqual(float(scale), 0.0)
 
     def test_penalties_zero_when_comfortable(self):
         scale_pen, std_pen = rf._affine_readout_penalties(
             torch.tensor([0.0]), torch.tensor([1.0])
         )
-        assert float(scale_pen) == 0.0
-        assert float(std_pen) == 0.0
+        self.assertEqual(float(scale_pen), 0.0)
+        self.assertEqual(float(std_pen), 0.0)
 
     def test_penalties_active_branches_match_formulas(self):
         scale_pen, std_pen = rf._affine_readout_penalties(
@@ -894,31 +896,39 @@ class TestAffineReadout:
             latent_std_floor=0.02,
         )
         # the scale penalty is a soft knee, nonzero for any nonzero scale
-        assert float(scale_pen) == pytest.approx(np.log1p(2.0) ** 2, rel=1e-5)
-        assert float(std_pen) == pytest.approx(0.015**2, rel=1e-5)
+        np.testing.assert_allclose(
+            float(scale_pen), np.log1p(2.0) ** 2, rtol=1e-5, atol=1e-12
+        )
+        np.testing.assert_allclose(float(std_pen), 0.015**2, rtol=1e-5, atol=1e-12)
 
     def test_frame_schema_and_values(self):
         latent = {"L1": np.linspace(0, 1, 50)}
         target = {"L1": 3.0 * np.linspace(0, 1, 50) + 1.0}
         frame, by_layer = rf.affine_readout_frame(latent, target, ridge=0.0)
-        assert list(frame.columns) == [
-            "layer",
-            "readout_offset",
-            "readout_scale",
-            "latent_mean",
-            "target_mean",
-            "latent_std",
-            "target_std",
-        ]
+        self.assertEqual(
+            list(frame.columns),
+            [
+                "layer",
+                "readout_offset",
+                "readout_scale",
+                "latent_mean",
+                "target_mean",
+                "latent_std",
+                "target_std",
+            ],
+        )
         scale, offset = by_layer["L1"]
-        assert abs(scale - 3.0) < 1e-4
-        assert abs(offset - 1.0) < 1e-4
+        self.assertLess(abs(scale - 3.0), 1e-4)
+        self.assertLess(abs(offset - 1.0), 1e-4)
 
 
 def _toy_targets():
     """Targets over two windows for channels with neuron_idx 1 and 2."""
     rng = np.random.RandomState(1)
-    traces = {"A": rng.randn(20).astype(np.float32), "B": rng.randn(20).astype(np.float32)}
+    traces = {
+        "A": rng.randn(20).astype(np.float32),
+        "B": rng.randn(20).astype(np.float32),
+    }
     transition_idx = [2, 10]
     window = 4
     targets = rf.build_raw_window_targets(
@@ -936,7 +946,7 @@ def _flat_target_vector(targets):
     return torch.as_tensor(order["value"].to_numpy(), dtype=torch.float32)
 
 
-class TestMakeAffineReadoutLoss:
+class TestMakeAffineReadoutLoss(unittest.TestCase):
     def test_zero_loss_for_affinely_related_prediction(self):
         model = _mln_pairwise()
         _, targets, windows = _toy_targets()
@@ -951,7 +961,7 @@ class TestMakeAffineReadoutLoss:
         )
         target = _flat_target_vector(targets)
         pred = 2.0 * target + 3.0  # affinely related -> perfect readout fit
-        assert float(loss_fn(pred, target)) < 1e-10
+        self.assertLess(float(loss_fn(pred, target)), 1e-10)
 
     def test_moment_check_catches_wrong_grouping(self):
         model = _mln_pairwise()
@@ -964,7 +974,7 @@ class TestMakeAffineReadoutLoss:
             expected_layer_windows={1: windows["B"], 2: windows["A"]},
         )
         target = _flat_target_vector(targets)
-        with pytest.raises(ValueError, match="grouping does not match"):
+        with self.assertRaisesRegex(ValueError, "grouping does not match"):
             loss_fn(target.clone(), target)
 
     def test_normalize_by_target_var_reweights_channels(self):
@@ -992,11 +1002,11 @@ class TestMakeAffineReadoutLoss:
             tvars.append(target[m].var(unbiased=False))
         mses, tvars = torch.stack(mses), torch.stack(tvars)
 
-        assert torch.allclose(plain_fn(pred, target), mses.mean(), atol=1e-7)
+        self.assertTrue(torch.allclose(plain_fn(pred, target), mses.mean(), atol=1e-7))
         expected = ((tvars.mean() / tvars) * mses).mean()
         got = normed_fn(pred, target)
-        assert torch.allclose(got, expected, atol=1e-7)
-        assert abs(float(got - plain_fn(pred, target))) > 1e-4
+        self.assertTrue(torch.allclose(got, expected, atol=1e-7))
+        self.assertGreater(abs(float(got - plain_fn(pred, target))), 1e-4)
 
     def test_normalize_matches_plain_for_equal_variance_channels(self):
         model = _mln_pairwise()
@@ -1014,14 +1024,16 @@ class TestMakeAffineReadoutLoss:
         target = _flat_target_vector(targets)
         rng = np.random.RandomState(0)
         pred = torch.as_tensor(rng.randn(len(target)).astype(np.float32))
-        assert torch.allclose(normed_fn(pred, target), plain_fn(pred, target), atol=1e-7)
+        self.assertTrue(
+            torch.allclose(normed_fn(pred, target), plain_fn(pred, target), atol=1e-7)
+        )
 
     def test_multi_batch_targets_rejected(self):
         model = _mln_pairwise()
         _, targets, _ = _toy_targets()
         shifted = targets.copy()
         shifted["batch"] = 1
-        with pytest.raises(ValueError, match="single-batch"):
+        with self.assertRaisesRegex(ValueError, "single-batch"):
             rf.make_affine_readout_loss(
                 model, pd.concat([targets, shifted]), layer_ids=[1, 2]
             )
@@ -1029,13 +1041,13 @@ class TestMakeAffineReadoutLoss:
     def test_unknown_layer_id_rejected(self):
         model = _mln_pairwise()
         _, targets, _ = _toy_targets()
-        with pytest.raises(ValueError, match="no rows"):
+        with self.assertRaisesRegex(ValueError, "no rows"):
             rf.make_affine_readout_loss(model, targets, layer_ids=[1, 7])
 
     def test_stability_optin_without_gain_raises_at_build(self):
         model = _mln_pairwise(activation_function=tanh_relu_activation)
         _, targets, _ = _toy_targets()
-        with pytest.raises(ValueError, match="stability_weight=0"):
+        with self.assertRaisesRegex(ValueError, "stability_weight=0"):
             rf.make_affine_readout_loss(
                 model, targets, layer_ids=[1, 2], stability_weight=1.0
             )
@@ -1047,7 +1059,7 @@ class TestMakeAffineReadoutLoss:
         _, targets, _ = _toy_targets()
         loss_fn = rf.make_affine_readout_loss(model, targets, layer_ids=[1, 2])
         target = _flat_target_vector(targets)
-        assert torch.isfinite(loss_fn(target.clone(), target))
+        self.assertTrue(torch.isfinite(loss_fn(target.clone(), target)))
 
     def test_stability_term_added_and_warm_started(self):
         model = _mln_pairwise(
@@ -1076,9 +1088,9 @@ class TestMakeAffineReadoutLoss:
         first = float(loss_fn(pred, target))
         state = rf.network_fixed_point(model, [0.3])
         expected = weight * float(rf.stability_penalty(model, state))
-        assert abs(first - expected) < 1e-8
+        self.assertLess(abs(first - expected), 1e-8)
         loss_fn(pred, target)
-        assert calls[0] is None and calls[1] is not None  # warm start passed on
+        self.assertTrue(calls[0] is None and calls[1] is not None)
 
 
 # ---------------------------------------------------------------------------
@@ -1086,31 +1098,31 @@ class TestMakeAffineReadoutLoss:
 # ---------------------------------------------------------------------------
 
 
-class TestWindowsAndMetrics:
+class TestWindowsAndMetrics(unittest.TestCase):
     def test_score_mask(self):
         mask = rf.score_mask_for_transition_windows(20, [2, 10], 4)
-        assert mask.sum() == 8
-        assert mask[2:6].all() and mask[10:14].all()
-        with pytest.raises(ValueError, match="exceeds"):
+        self.assertEqual(mask.sum(), 8)
+        self.assertTrue(mask[2:6].all() and mask[10:14].all())
+        with self.assertRaisesRegex(ValueError, "exceeds"):
             rf.score_mask_for_transition_windows(10, [8], 4)
-        with pytest.raises(ValueError, match="overlap"):
+        with self.assertRaisesRegex(ValueError, "overlap"):
             rf.score_mask_for_transition_windows(20, [2, 4], 4)
 
     def test_build_raw_window_targets_both_conventions(self):
         traces = {"A": np.arange(20, dtype=np.float32)}
         # per-node convention: neuron_idx is a model row
         node = rf.build_raw_window_targets(traces, [2], 3, node_index={"A": 7})
-        assert node["neuron_idx"].unique().tolist() == [7]
+        self.assertEqual(node["neuron_idx"].unique().tolist(), [7])
         # group convention: neuron_idx is a group id
         group = rf.build_raw_window_targets(traces, [2], 3, node_index={"A": 0})
-        assert group["neuron_idx"].unique().tolist() == [0]
-        assert node["value"].tolist() == [2.0, 3.0, 4.0]
-        assert node["layer"].tolist() == [2, 3, 4]
+        self.assertEqual(group["neuron_idx"].unique().tolist(), [0])
+        self.assertEqual(node["value"].tolist(), [2.0, 3.0, 4.0])
+        self.assertEqual(node["layer"].tolist(), [2, 3, 4])
 
     def test_extract_transition_windows_variants(self):
         trace = np.arange(20, dtype=np.float32)
         single = rf.extract_transition_windows(trace, [2, 10], 3)
-        assert single.shape == (2, 3)
+        self.assertEqual(single.shape, (2, 3))
         np.testing.assert_allclose(single[1], [10, 11, 12])
         as_dict = rf.extract_transition_windows({"A": trace}, [2], 3)
         np.testing.assert_allclose(as_dict["A"][0], [2, 3, 4])
@@ -1119,8 +1131,10 @@ class TestWindowsAndMetrics:
 
     def test_r2(self):
         y = np.array([1.0, 2.0, 3.0])
-        assert rf.r2(y, y) == pytest.approx(1.0)
-        assert rf.r2(y, np.full(3, y.mean())) == pytest.approx(0.0)
+        np.testing.assert_allclose(rf.r2(y, y), 1.0, rtol=1e-6, atol=1e-12)
+        np.testing.assert_allclose(
+            rf.r2(y, np.full(3, y.mean())), 0.0, rtol=1e-6, atol=1e-12
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1128,20 +1142,23 @@ class TestWindowsAndMetrics:
 # ---------------------------------------------------------------------------
 
 
-class TestPersistence:
-    def test_save_load_rebuild_round_trip(self, tmp_path):
+class TestPersistence(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp_path = Path(tmp.name)
+
+    def test_save_load_rebuild_round_trip(self):
         model = _mln_pairwise(
             activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
         )
-        inputs = _input_tensor(
-            np.linspace(0.1, 0.5, 6).astype(np.float32), device=CPU
-        )
+        inputs = _input_tensor(np.linspace(0.1, 0.5, 6).astype(np.float32), device=CPU)
         with torch.no_grad():
             expected = model(inputs, checkpoint_steps=0)
-        path = tmp_path / "fit.npz"
+        path = self.tmp_path / "fit.npz"
         rf.save_fit(path, model, arrays={"brightness": np.linspace(0.1, 0.5, 6)})
         fit = rf.load_fit(path)
-        assert "brightness" in fit
+        self.assertIn("brightness", fit)
         rebuilt = rf.rebuild_network(
             fit,
             activation_function=tanh_relu_activation,
@@ -1156,64 +1173,65 @@ class TestPersistence:
             atol=1e-5,
         )
 
-    def test_rebuild_from_path_and_linear_class(self, tmp_path):
+    def test_rebuild_from_path_and_linear_class(self):
         model = _stable_linear_net()
-        path = tmp_path / "fit.npz"
+        path = self.tmp_path / "fit.npz"
         rf.save_fit(path, model)
         rebuilt = rf.rebuild_network(path, device=CPU)
-        assert isinstance(rebuilt, cin.LinearNetwork)
+        self.assertTrue(isinstance(rebuilt, cin.LinearNetwork))
         np.testing.assert_allclose(
             rebuilt.node_parameter("slope").detach().numpy(),
             model.node_parameter("slope").detach().numpy(),
         )
 
-    def test_tau_max_round_trips_through_save_fit(self, tmp_path):
+    def test_tau_max_round_trips_through_save_fit(self):
         model = _mln_pairwise(tau_max=8000.0)
-        path = tmp_path / "fit.npz"
+        path = self.tmp_path / "fit.npz"
         rf.save_fit(path, model)
         rebuilt = rf.rebuild_network(path, device=CPU)
-        assert rebuilt.tau_max == pytest.approx(8000.0)
+        np.testing.assert_allclose(rebuilt.tau_max, 8000.0, rtol=1e-6, atol=1e-12)
 
-    def test_reserved_key_collision_raises(self, tmp_path):
-        with pytest.raises(ValueError, match="reserved"):
+    def test_reserved_key_collision_raises(self):
+        with self.assertRaisesRegex(ValueError, "reserved"):
             rf.save_fit(
-                tmp_path / "fit.npz",
+                self.tmp_path / "fit.npz",
                 _mln_pairwise(),
                 arrays={"model_something": np.zeros(2)},
             )
 
-    def test_rebuild_without_model_section_raises(self, tmp_path):
-        path = tmp_path / "fit.npz"
+    def test_rebuild_without_model_section_raises(self):
+        path = self.tmp_path / "fit.npz"
         rf.save_fit(path, arrays={"trace": np.zeros(3)})
-        with pytest.raises(ValueError, match="no model section"):
+        with self.assertRaisesRegex(ValueError, "no model section"):
             rf.rebuild_network(path)
 
 
-class TestTables:
+class TestTables(unittest.TestCase):
     def test_simulate_trace_columns(self):
         model = _mln_pairwise(
             activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
         )
-        inputs = _input_tensor(
-            np.full(6, 0.3, dtype=np.float32), device=CPU
-        )
+        inputs = _input_tensor(np.full(6, 0.3, dtype=np.float32), device=CPU)
         frame = rf.simulate_trace(
             model, inputs, node_columns={"lum": 0, "A": 1, "AB": [1, 2]}
         )
-        assert list(frame.columns) == ["lum", "A", "AB"]
-        assert len(frame) == 6
+        self.assertEqual(list(frame.columns), ["lum", "A", "AB"])
+        self.assertEqual(len(frame), 6)
         np.testing.assert_allclose(frame["lum"], 0.3, atol=1e-6)
 
     def test_pair_slope_table(self):
         model = _mln_pairwise()
         table = rf.pair_slope_table(model)
-        assert set(zip(table["pre"], table["post"])) == {
-            ("S", "A"),
-            ("A", "B"),
-            ("B", "A"),
-        }
+        self.assertEqual(
+            set(zip(table["pre"], table["post"])),
+            {
+                ("S", "A"),
+                ("A", "B"),
+                ("B", "A"),
+            },
+        )
         np.testing.assert_allclose(table["pair_slope"], 1.0)
-        assert rf.pair_slope_table(_mln_node_mode()).empty
+        self.assertTrue(rf.pair_slope_table(_mln_node_mode()).empty)
 
 
 # ---------------------------------------------------------------------------
@@ -1221,7 +1239,7 @@ class TestTables:
 # ---------------------------------------------------------------------------
 
 
-class TestTrainModelIntegration:
+class TestTrainModelIntegration(unittest.TestCase):
     def test_end_to_end_fit_with_loss_factory_and_sensor(self):
         torch.manual_seed(0)
         model = _mln_pairwise(
@@ -1266,7 +1284,7 @@ class TestTrainModelIntegration:
             output_transform=sensor.output_transform,
             wandb=False,
         )
-        assert trained_model is model
-        assert len(history["loss"]) == 2
+        self.assertIs(trained_model, model)
+        self.assertEqual(len(history["loss"]), 2)
         for value in history["loss"]:
-            assert np.isfinite(value)
+            self.assertTrue(np.isfinite(value))
