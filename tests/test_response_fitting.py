@@ -70,6 +70,31 @@ def tanh_relu_gain(self, state):
     return (1.0 - torch.tanh(u) ** 2) * gate
 
 
+def _input_tensor(trace, device=CPU):
+    """A 1-D stimulus trace as a ``(1, 1, T)`` model input."""
+    return torch.as_tensor(np.asarray(trace, dtype=np.float32), device=device)[
+        None, None, :
+    ]
+
+
+def _dense_update(net, state=None):
+    """Dense free-block update Jacobian, built independently of
+    ``free_update_matrix`` (which refuses networks above 256 nodes)."""
+    W = net.effective_weights.to_dense()
+    taus = net.node_parameter("tau")
+    gain = net.activation_gain(state)
+    update = torch.diag((taus - 1.0) / taus) + (gain / taus).view(-1, 1) * W
+    free_idx, _ = rf._free_and_sensory_indices(net)
+    return update.index_select(0, free_idx).index_select(1, free_idx)
+
+
+def _gershgorin_bound(net, state=None):
+    free_idx, _ = rf._free_and_sensory_indices(net)
+    return rf._gershgorin_spectral_radius_bound(
+        net, free_idx, net.activation_gain(state)
+    )
+
+
 def _linear_net(weights, **kwargs):
     return cin.LinearNetwork(
         all_weights=sps.csr_matrix(np.asarray(weights, dtype=np.float32)),
@@ -146,6 +171,36 @@ def _big_linear_chain(n=300, weight=0.5):
     )
 
 
+def _big_pairwise_linear_chain(n=300, weight=0.4):
+    """A > _DENSE_NODE_LIMIT chain LinearNetwork with pair-mode slopes and
+    trainable node biases, to exercise the *differentiable* sparse steady state.
+    Node 0 is sensory ("S"); every other node shares group "A", so the chain
+    edges are the ``(A, A)`` pair plus the single ``(S, A)`` input edge."""
+    rows = np.arange(1, n)
+    cols = np.arange(0, n - 1)
+    vals = np.full(n - 1, weight, dtype=np.float32)
+    weights = sps.coo_matrix((vals, (rows, cols)), shape=(n, n)).tocsr()
+    idx_to_group = {0: "S", **{i: "A" for i in range(1, n)}}
+    model = cin.LinearNetwork(
+        all_weights=weights,
+        sensory_indices=[0],
+        num_layers=3,
+        threshold=0.0,
+        tanh_steepness=1.0,
+        idx_to_group=idx_to_group,
+        bias_dict={"S": 0.0, "A": 0.1},
+        bias_transform="identity",
+        slope_dict={("S", "A"): 1.0, ("A", "A"): 1.0},
+        tau=1.0,
+        tau_dict={"S": 1.0, "A": 2.0},
+        sensory_input_mode="replace",
+        device=CPU,
+    )
+    model.slope.requires_grad_(True)
+    model.biases.requires_grad_(True)
+    return model
+
+
 # ---------------------------------------------------------------------------
 # node_parameter / activation_gain (library-side additions)
 # ---------------------------------------------------------------------------
@@ -179,10 +234,6 @@ class TestNodeParameter:
         )
         np.testing.assert_allclose(
             model.node_parameter("tau").detach().numpy(), [10.0] * 3
-        )
-        # explicit default wins over the model's own
-        np.testing.assert_allclose(
-            model.node_parameter("slope", default=2.0).detach().numpy(), [2.0] * 3
         )
 
     def test_unknown_name_raises(self):
@@ -220,7 +271,7 @@ class TestActivationGain:
         )
 
     def test_custom_pair_matches_builtin_forward(self):
-        inputs = rf.trace_to_input_tensor(
+        inputs = _input_tensor(
             np.linspace(0.1, 0.5, 6).astype(np.float32), device=CPU
         )
         custom = _mln_pairwise(
@@ -281,7 +332,7 @@ class TestActivationGain:
 
 class TestDynamics:
     def test_free_and_sensory_split(self):
-        free_idx, sensory_idx = rf.free_and_sensory_indices(_stable_linear_net())
+        free_idx, sensory_idx = rf._free_and_sensory_indices(_stable_linear_net())
         assert sensory_idx.tolist() == [0]
         assert set(free_idx.tolist()) == {1, 2}
 
@@ -289,7 +340,7 @@ class TestDynamics:
         net = _stable_linear_net()
         steady = rf.linear_network_steady_state(net, [1.0])
         assert bool(torch.isfinite(steady).all())
-        free_idx, sensory_idx = rf.free_and_sensory_indices(net)
+        free_idx, sensory_idx = rf._free_and_sensory_indices(net)
         assert torch.isclose(steady[sensory_idx[0]], torch.tensor(1.0))
         update = rf.free_update_matrix(net)
         assert update.shape == (free_idx.numel(), free_idx.numel())
@@ -331,6 +382,313 @@ class TestDynamics:
         )
         assert info["converged"]
         assert info["iterations"] <= 3
+
+
+class TestMakeInitialStateFn:
+    def test_wraps_steady_state_solver(self):
+        from functools import partial
+
+        net = _stable_linear_net()
+        fn = rf.make_initial_state_fn(
+            partial(rf.linear_network_steady_state, sensory_values=[0.3])
+        )
+        np.testing.assert_allclose(
+            fn(net).numpy(),
+            rf.linear_network_steady_state(net, [0.3]).detach().numpy(),
+        )
+
+    def test_detach_true_strips_grad(self):
+        fn = rf.make_initial_state_fn(
+            lambda model, **kw: torch.zeros(3, requires_grad=True) + 1.0
+        )
+        assert fn(None).requires_grad is False
+
+    def test_detach_false_keeps_grad(self):
+        fn = rf.make_initial_state_fn(
+            lambda model, **kw: torch.zeros(3, requires_grad=True) + 1.0,
+            detach=False,
+        )
+        assert fn(None).requires_grad is True
+
+    def test_warm_start_threads_previous_state(self):
+        received = []
+
+        def solver(model, **kwargs):
+            received.append(kwargs)
+            return torch.full((3,), float(len(received)))
+
+        fn = rf.make_initial_state_fn(solver, warm_start_kw="initial_state")
+        first = fn(None)
+        second = fn(None)
+        assert received[0] == {}
+        assert torch.equal(received[1]["initial_state"], first)
+        assert torch.equal(second, torch.full((3,), 2.0))
+
+
+class TestNonlinearNetworkSteadyState:
+    """The implicit-differentiation equilibrium solver (dense backend)."""
+
+    U = [0.3]
+
+    def _model(self):
+        model = _mln_pairwise(
+            activation_function=tanh_relu_activation,
+            activation_gain_fn=tanh_relu_gain,
+        )
+        # train_model normally switches these on (train_slopes/biases/tau)
+        model.slope.requires_grad_(True)
+        model.biases.requires_grad_(True)
+        model.tau_param.requires_grad_(True)
+        return model
+
+    @staticmethod
+    def _loss(state):
+        weights = torch.tensor([0.7, -1.3, 0.9])
+        return (weights * state).sum()
+
+    def test_is_fixed_point_and_matches_iterative(self):
+        model = self._model()
+        state = rf.nonlinear_network_steady_state(model, self.U)
+        moved = (
+            (rf.network_step(model, state.detach(), self.U) - state.detach())
+            .abs()
+            .max()
+        )
+        assert float(moved) <= 1e-5
+        iterative = rf.network_fixed_point(
+            model, self.U, max_steps=20000, min_steps=20, tol=1e-7
+        )
+        np.testing.assert_allclose(
+            state.detach().numpy(), iterative.numpy(), atol=1e-5
+        )
+
+    def test_gradient_matches_finite_differences(self):
+        model = self._model()
+        grads = torch.autograd.grad(
+            self._loss(rf.nonlinear_network_steady_state(model, self.U)),
+            [model.slope, model.biases],
+        )
+        h = 1e-3
+        for param, analytic in zip([model.slope, model.biases], grads):
+            for i in range(param.numel()):
+                values = []
+                for sign in (+1.0, -1.0):
+                    with torch.no_grad():
+                        param.data[i] += sign * h
+                        values.append(
+                            float(
+                                self._loss(
+                                    rf.nonlinear_network_steady_state(model, self.U)
+                                )
+                            )
+                        )
+                        param.data[i] -= sign * h
+                fd = (values[0] - values[1]) / (2 * h)
+                np.testing.assert_allclose(
+                    float(analytic[i]), fd, rtol=5e-2, atol=2e-3
+                )
+
+    def test_tau_gradient_vanishes(self):
+        # The equilibrium condition has no tau (the leak cancels at a fixed
+        # point), so the implicit gradient wrt tau is zero up to the solve
+        # residual.
+        model = self._model()
+        (tau_grad,) = torch.autograd.grad(
+            self._loss(rf.nonlinear_network_steady_state(model, self.U)),
+            [model.tau_param],
+            allow_unused=False,
+        )
+        assert float(tau_grad.abs().max()) < 1e-4
+
+    def test_matches_linear_closed_form(self):
+        net = _linear_net(
+            [[0.0, 0.0, 0.0], [0.10, 0.0, 0.20], [0.0, 0.15, 0.0]],
+            sensory_input_mode="replace",
+        )
+        implicit = rf.nonlinear_network_steady_state(net, self.U)
+        closed_form = rf.linear_network_steady_state(net, self.U)
+        np.testing.assert_allclose(
+            implicit.detach().numpy(),
+            closed_form.detach().numpy(),
+            atol=1e-5,
+        )
+
+    def test_warm_start_accepted(self):
+        model = self._model()
+        first = rf.nonlinear_network_steady_state(model, self.U)
+        second = rf.nonlinear_network_steady_state(
+            model, self.U, initial_state=first.detach()
+        )
+        np.testing.assert_allclose(
+            first.detach().numpy(), second.detach().numpy(), atol=1e-6
+        )
+
+    def test_raises_without_gain(self):
+        model = _mln_pairwise(activation_function=tanh_relu_activation)
+        with pytest.raises(ValueError, match="activation_gain_fn"):
+            rf.nonlinear_network_steady_state(model, self.U)
+
+    def test_raises_above_dense_limit(self):
+        with pytest.raises(NotImplementedError, match="at most 256 nodes"):
+            rf.nonlinear_network_steady_state(_big_linear_chain(), [0.3])
+
+    def test_make_initial_state_fn_integration(self):
+        from functools import partial
+
+        model = self._model()
+        solver = partial(rf.nonlinear_network_steady_state, sensory_values=self.U)
+        attached = rf.make_initial_state_fn(
+            solver, detach=False, warm_start_kw="initial_state"
+        )(model)
+        assert attached.requires_grad
+        detached = rf.make_initial_state_fn(
+            solver, detach=True, warm_start_kw="initial_state"
+        )(model)
+        assert not detached.requires_grad
+        np.testing.assert_allclose(
+            attached.detach().numpy(), detached.numpy(), atol=1e-6
+        )
+
+
+class TestLinearNetworkSteadyStateSparse:
+    """The differentiable sparse (splu forward + IFT-adjoint backward) linear
+    steady state used above ``_DENSE_NODE_LIMIT``. The dense path (autograd
+    through ``torch.linalg.solve``) is the reference the sparse gradient must
+    reproduce; the small-network tests force the sparse branch by shrinking the
+    limit so both run on the same 3-node model."""
+
+    U = [0.3]
+
+    def _model(self):
+        model = cin.LinearNetwork(
+            sps.csr_matrix(_MLN_WEIGHTS),
+            sensory_indices=[0],
+            num_layers=5,
+            threshold=0.0,
+            tanh_steepness=1.0,
+            idx_to_group={0: "S", 1: "A", 2: "B"},
+            bias_dict={"S": 0.0, "A": 0.05, "B": 0.02},
+            bias_transform="identity",
+            slope_dict={("S", "A"): 1.0, ("A", "B"): 1.0, ("B", "A"): 1.0},
+            tau=1.0,
+            tau_dict={"S": 1.0, "A": 2.0, "B": 3.0},
+            sensory_input_mode="replace",
+            device=CPU,
+        )
+        model.slope.requires_grad_(True)
+        model.biases.requires_grad_(True)
+        if model.tau_param is not None:
+            model.tau_param.requires_grad_(True)
+        return model
+
+    @staticmethod
+    def _loss(state):
+        weights = torch.tensor([0.7, -1.3, 0.9])
+        return (weights * state).sum()
+
+    def test_sparse_matches_dense_value(self, monkeypatch):
+        model = self._model()
+        dense = rf.linear_network_steady_state(model, self.U).detach().numpy()
+        monkeypatch.setattr(rf, "_DENSE_NODE_LIMIT", 1)
+        sparse_state = rf.linear_network_steady_state(model, self.U).detach().numpy()
+        np.testing.assert_allclose(sparse_state, dense, atol=1e-6)
+
+    def test_sparse_gradient_matches_dense(self, monkeypatch):
+        model = self._model()
+        dense_grads = torch.autograd.grad(
+            self._loss(rf.linear_network_steady_state(model, self.U)),
+            [model.slope, model.biases],
+        )
+        monkeypatch.setattr(rf, "_DENSE_NODE_LIMIT", 1)
+        sparse_grads = torch.autograd.grad(
+            self._loss(rf.linear_network_steady_state(model, self.U)),
+            [model.slope, model.biases],
+        )
+        for dense_g, sparse_g in zip(dense_grads, sparse_grads):
+            np.testing.assert_allclose(
+                sparse_g.numpy(), dense_g.numpy(), rtol=1e-4, atol=1e-6
+            )
+
+    def test_gradient_matches_finite_differences(self, monkeypatch):
+        model = self._model()
+        monkeypatch.setattr(rf, "_DENSE_NODE_LIMIT", 1)
+        grads = torch.autograd.grad(
+            self._loss(rf.linear_network_steady_state(model, self.U)),
+            [model.slope, model.biases],
+        )
+        h = 1e-3
+        for param, analytic in zip([model.slope, model.biases], grads):
+            for i in range(param.numel()):
+                values = []
+                for sign in (+1.0, -1.0):
+                    with torch.no_grad():
+                        param.data[i] += sign * h
+                        values.append(
+                            float(
+                                self._loss(
+                                    rf.linear_network_steady_state(model, self.U)
+                                )
+                            )
+                        )
+                        param.data[i] -= sign * h
+                fd = (values[0] - values[1]) / (2 * h)
+                np.testing.assert_allclose(
+                    float(analytic[i]), fd, rtol=5e-2, atol=2e-3
+                )
+
+    def test_tau_gradient_is_none(self, monkeypatch):
+        # The linear equilibrium does not involve tau, so the sparse path (like
+        # the dense one) yields no gradient for the taus.
+        model = self._model()
+        monkeypatch.setattr(rf, "_DENSE_NODE_LIMIT", 1)
+        (tau_grad,) = torch.autograd.grad(
+            self._loss(rf.linear_network_steady_state(model, self.U)),
+            [model.tau_param],
+            allow_unused=True,
+        )
+        assert tau_grad is None or float(tau_grad.abs().max()) < 1e-6
+
+    def test_large_network_dispatches_to_sparse_and_is_fixed_point(self):
+        model = _big_pairwise_linear_chain()
+        assert model.all_weights.shape[0] > rf._DENSE_NODE_LIMIT
+        state = rf.linear_network_steady_state(model, self.U)
+        moved = (
+            (rf.network_step(model, state.detach(), self.U) - state.detach())
+            .abs()
+            .max()
+        )
+        assert float(moved) <= 1e-5
+        iterative = rf.network_fixed_point(
+            model, self.U, max_steps=20000, min_steps=20, tol=1e-8
+        )
+        np.testing.assert_allclose(
+            state.detach().numpy(), iterative.numpy(), atol=1e-5
+        )
+
+    def test_large_network_is_differentiable(self):
+        model = _big_pairwise_linear_chain()
+        state = rf.linear_network_steady_state(model, self.U)
+        assert state.requires_grad
+        slope_grad, bias_grad = torch.autograd.grad(
+            state.sum(), [model.slope, model.biases]
+        )
+        assert torch.isfinite(slope_grad).all()
+        assert float(slope_grad.abs().max()) > 0
+        assert torch.isfinite(bias_grad).all()
+        assert float(bias_grad.abs().max()) > 0
+
+    def test_make_initial_state_fn_integration_large(self):
+        from functools import partial
+
+        model = _big_pairwise_linear_chain()
+        solver = partial(rf.linear_network_steady_state, sensory_values=self.U)
+        attached = rf.make_initial_state_fn(solver, detach=False)(model)
+        assert attached.requires_grad
+        detached = rf.make_initial_state_fn(solver, detach=True)(model)
+        assert not detached.requires_grad
+        np.testing.assert_allclose(
+            attached.detach().numpy(), detached.numpy(), atol=1e-6
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -397,19 +755,22 @@ class TestStability:
             device=CPU,
         )
         rho = rf.spectral_radius(net)  # ARPACK path (n > _DENSE_NODE_LIMIT)
-        update = rf.free_update_matrix(net)  # dense reference
-        reference = float(torch.abs(torch.linalg.eigvals(update)).max())
+        reference = float(torch.abs(torch.linalg.eigvals(_dense_update(net))).max())
         assert abs(rho - reference) < 1e-4
         assert rho < 1.0
         assert float(rf.stability_penalty(net)) == 0.0  # Gershgorin path
-        bound = rf.spectral_radius_bound(net)
+        bound = float(_gershgorin_bound(net))
         assert rho <= bound + 1e-6  # Gershgorin upper-bounds the true radius
         assert bound < 1.0
 
-    def test_spectral_radius_bound_small_net(self):
+    def test_gershgorin_bound_small_net(self):
         # bound >= true radius on the dense-regime nets too
         net = _stable_linear_net()
-        assert rf.spectral_radius(net) <= rf.spectral_radius_bound(net) + 1e-6
+        assert rf.spectral_radius(net) <= float(_gershgorin_bound(net)) + 1e-6
+
+    def test_free_update_matrix_refuses_large_network(self):
+        with pytest.raises(ValueError, match="at most 256 nodes"):
+            rf.free_update_matrix(_big_linear_chain())
 
     def test_penalty_is_differentiable(self):
         # pair-mode gain enters the Jacobian through effective_weights; at the
@@ -528,14 +889,14 @@ class TestAffineReadout:
         assert float(scale) == 0.0
 
     def test_penalties_zero_when_comfortable(self):
-        scale_pen, std_pen = rf.affine_readout_penalties(
+        scale_pen, std_pen = rf._affine_readout_penalties(
             torch.tensor([0.0]), torch.tensor([1.0])
         )
         assert float(scale_pen) == 0.0
         assert float(std_pen) == 0.0
 
     def test_penalties_active_branches_match_formulas(self):
-        scale_pen, std_pen = rf.affine_readout_penalties(
+        scale_pen, std_pen = rf._affine_readout_penalties(
             torch.tensor([20.0]),
             torch.tensor([0.005]),
             scale_soft_limit=10.0,
@@ -561,12 +922,6 @@ class TestAffineReadout:
         scale, offset = by_layer["L1"]
         assert abs(scale - 3.0) < 1e-4
         assert abs(offset - 1.0) < 1e-4
-
-    def test_implied_affine(self):
-        x = np.linspace(0, 1, 30)
-        scale, offset = rf.implied_affine(x, 4.0 * x - 2.0)
-        assert abs(scale - 4.0) < 1e-8
-        assert abs(offset + 2.0) < 1e-8
 
 
 def _toy_targets():
@@ -735,45 +1090,6 @@ class TestMakeAffineReadoutLoss:
         assert calls[0] is None and calls[1] is not None  # warm start passed on
 
 
-class TestBoundedLogScalar:
-    def test_value_reproduces_init_and_stays_bounded(self):
-        scalar = rf.BoundedLogScalar(0.17, (0.1, 0.3))
-        assert abs(scalar.item() - 0.17) < 1e-6
-        with torch.no_grad():
-            scalar.raw.fill_(100.0)
-        assert scalar.item() < 0.3 + 1e-6
-        with torch.no_grad():
-            scalar.raw.fill_(-100.0)
-        assert scalar.item() > 0.1 - 1e-6
-
-    def test_invalid_construction_raises(self):
-        with pytest.raises(ValueError):
-            rf.BoundedLogScalar(0.5, (0.1, 0.3))  # init outside bounds
-        with pytest.raises(ValueError):
-            rf.BoundedLogScalar(0.2, (0.3, 0.1))  # not increasing
-
-    def test_gradient_flows_through_transform(self):
-        scalar = rf.BoundedLogScalar(0.17, (0.1, 0.3))
-        transform = rf.make_log_offset_input_transform(scalar)
-        inputs = torch.full((1, 1, 5), 0.5)
-        out = transform(inputs)
-        np.testing.assert_allclose(
-            out.detach().numpy(), np.log(0.5 + scalar.item()), rtol=1e-5
-        )
-        out.sum().backward()
-        assert scalar.raw.grad is not None and torch.isfinite(scalar.raw.grad)
-
-    def test_log_trace_and_input_tensor(self):
-        trace = np.array([0.0, 0.5, 1.0], dtype=np.float32)
-        np.testing.assert_allclose(
-            rf.log_trace(trace, 0.5), np.log(trace + 0.5), rtol=1e-6
-        )
-        with pytest.raises(ValueError, match="positive"):
-            rf.log_trace(trace, 0.0)
-        tensor = rf.trace_to_input_tensor(trace)
-        assert tensor.shape == (1, 1, 3)
-
-
 # ---------------------------------------------------------------------------
 # Windows & metrics
 # ---------------------------------------------------------------------------
@@ -826,7 +1142,7 @@ class TestPersistence:
         model = _mln_pairwise(
             activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
         )
-        inputs = rf.trace_to_input_tensor(
+        inputs = _input_tensor(
             np.linspace(0.1, 0.5, 6).astype(np.float32), device=CPU
         )
         with torch.no_grad():
@@ -867,18 +1183,6 @@ class TestPersistence:
         rebuilt = rf.rebuild_network(path, device=CPU)
         assert rebuilt.tau_max == pytest.approx(8000.0)
 
-    def test_rebuild_without_tau_max_key_is_unbounded(self, tmp_path):
-        # save_fit files predating model_tau_max must rebuild as unbounded
-        model = _mln_pairwise()
-        assert model.tau_max is None
-        path = tmp_path / "fit.npz"
-        rf.save_fit(path, model)
-        fit = rf.load_fit(path)
-        assert float(fit["model_tau_max"]) == np.inf
-        del fit["model_tau_max"]
-        rebuilt = rf.rebuild_network(fit, device=CPU)
-        assert rebuilt.tau_max is None
-
     def test_reserved_key_collision_raises(self, tmp_path):
         with pytest.raises(ValueError, match="reserved"):
             rf.save_fit(
@@ -899,7 +1203,7 @@ class TestTables:
         model = _mln_pairwise(
             activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
         )
-        inputs = rf.trace_to_input_tensor(
+        inputs = _input_tensor(
             np.full(6, 0.3, dtype=np.float32), device=CPU
         )
         frame = rf.simulate_trace(
@@ -920,45 +1224,6 @@ class TestTables:
         np.testing.assert_allclose(table["pair_slope"], 1.0)
         assert rf.pair_slope_table(_mln_node_mode()).empty
 
-    def test_parameter_table(self):
-        model = _mln_pairwise()
-        table = rf.parameter_table(model, {"A": 1, "B": 2}).set_index("cell_type")
-        assert table.loc["A", "bias"] == pytest.approx(0.05)
-        assert table.loc["B", "tau"] == pytest.approx(3.0)
-        # row A receives S->A (0.4) and B->A (0.2) at slope 1
-        assert table.loc["A", "in_weight_sum"] == pytest.approx(0.6, abs=1e-6)
-        assert table.loc["A", "in_abs_weight_sum"] == pytest.approx(0.6, abs=1e-6)
-
-    def test_aggregated_pair_weight_matrix(self):
-        model = _mln_pairwise()
-        matrix = rf.aggregated_pair_weight_matrix(
-            model, {"S": [0], "AB": [1, 2]}
-        )
-        # AB rows receive 0.4 (S->A) from S over 2 members -> 0.2 mean
-        assert matrix.loc["AB", "S"] == pytest.approx(0.2, abs=1e-6)
-        # within AB: A->B 0.3 + B->A 0.2 over 2 members -> 0.25 mean
-        assert matrix.loc["AB", "AB"] == pytest.approx(0.25, abs=1e-6)
-
-    def test_to_jsonable(self):
-        out = rf.to_jsonable(
-            {
-                "f": np.float32(1.5),
-                "i": np.int64(2),
-                "arr": np.arange(3),
-                "path": Path("a") / "b",
-                "device": torch.device("cpu"),
-                "nested": (np.float64(0.5), "s"),
-            }
-        )
-        assert out == {
-            "f": 1.5,
-            "i": 2,
-            "arr": [0, 1, 2],
-            "path": str(Path("a") / "b"),
-            "device": "cpu",
-            "nested": [0.5, "s"],
-        }
-
 
 # ---------------------------------------------------------------------------
 # train_model integration
@@ -975,7 +1240,7 @@ class TestTrainModelIntegration:
         )
         brightness = np.full(30, 0.3, dtype=np.float32)
         brightness[10:] = 0.6
-        inputs = rf.trace_to_input_tensor(brightness, device=CPU)
+        inputs = _input_tensor(brightness, device=CPU)
         rng = np.random.RandomState(0)
         traces = {
             "A": rng.rand(30).astype(np.float32),

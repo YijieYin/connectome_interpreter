@@ -10,23 +10,35 @@ fits.
 
 Sections:
 
-- **Dynamics** — single steps, iterative fixed points, and the closed-form
-  linear steady state.
+- **Dynamics** — single steps, iterative fixed points, and differentiable
+  linear and nonlinear steady states.
 - **Stability** — spectral radius of the free-node update Jacobian and a
-  differentiable penalty, with a dense exact path for small networks and a
-  sparse Gershgorin / ARPACK path for large ones.
+  differentiable penalty.
 - **Sensor** — :class:`ExponentialSensor`, a fixed causal indicator kernel
   (e.g. GCaMP6f) applied identically in training (torch) and diagnostics
-  (numpy). Pass ``sensor=None`` conventions downstream for e.g. voltage
-  recordings.
+  (numpy).
 - **Affine readout & loss** — closed-form per-channel scale/offset readout
-  (variable projection), its regularisers, and
-  :func:`make_affine_readout_loss`, a ``train_model``-compatible loss factory.
+  (variable projection) and :func:`make_affine_readout_loss`, a
+  ``train_model``-compatible loss factory.
 - **Windows & metrics** — transition-window scoring masks, long-format target
   builders and window extraction.
-- **Persistence & tables** — :func:`save_fit` / :func:`load_fit` /
+- **Persistence** — :func:`save_fit` / :func:`load_fit` /
   :func:`rebuild_network` for a self-contained fitted-model round-trip, plus
-  tidy parameter and trace tables.
+  trace and pair-slope tables.
+
+Large networks (more than 256 nodes) switch to sparse routines. Linear and
+nonlinear models are supported equally except for the differentiable steady
+state:
+
+- :func:`network_step`, :func:`network_fixed_point`: any size.
+- :func:`linear_network_steady_state`: any size, differentiable (sparse LU
+  above 256 nodes).
+- :func:`nonlinear_network_steady_state`: at most 256 nodes; raises above.
+  Use :func:`network_fixed_point` (no gradient) there.
+- :func:`stability_penalty`: exact spectral radius up to 256 nodes, a
+  conservative Gershgorin upper bound above — stricter at the same margin.
+- :func:`spectral_radius`: exact up to 256 nodes, ARPACK above.
+- :func:`free_update_matrix`: dense, at most 256 nodes; raises above.
 """
 
 from __future__ import annotations
@@ -44,42 +56,33 @@ from .activation_maximisation import LinearNetwork, MultilayeredNetwork
 
 __all__ = [
     # dynamics
-    "free_and_sensory_indices",
     "network_step",
     "network_fixed_point",
     "linear_network_steady_state",
+    "nonlinear_network_steady_state",
+    "make_initial_state_fn",
     # stability
     "free_update_matrix",
     "stability_penalty",
     "spectral_radius",
-    "spectral_radius_bound",
     # sensor
     "ExponentialSensor",
     "GCAMP6F_TAU_MS",
     # readout & loss
     "affine_readout_solve",
-    "affine_readout_penalties",
     "affine_readout_frame",
-    "implied_affine",
     "make_affine_readout_loss",
-    "BoundedLogScalar",
-    "make_log_offset_input_transform",
-    "log_trace",
-    "trace_to_input_tensor",
     # windows & metrics
     "score_mask_for_transition_windows",
     "build_raw_window_targets",
     "extract_transition_windows",
     "r2",
-    # persistence & tables
+    # persistence
     "save_fit",
     "load_fit",
     "rebuild_network",
     "simulate_trace",
     "pair_slope_table",
-    "parameter_table",
-    "aggregated_pair_weight_matrix",
-    "to_jsonable",
 ]
 
 
@@ -88,25 +91,27 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-def free_and_sensory_indices(model):
-    """Split a network's nodes into free (dynamical) and sensory indices.
-
-    Args:
-        model: the network to inspect.
-
-    Returns:
-        tuple[torch.Tensor, torch.Tensor]: ``(free_idx, sensory_idx)`` long
-        tensors. ``sensory_idx`` are the clamped input nodes
-        (``model.sensory_indices``); ``free_idx`` is everything else.
-    """
+def _free_and_sensory_indices(model):
+    """``(free_idx, sensory_idx)`` long tensors: the clamped input nodes
+    (``model.sensory_indices``) and everything else."""
     n_nodes = model.all_weights.shape[0]
     device = model.all_weights.device
     sensory_idx = model.sensory_indices.detach().long().to(device)
-    all_idx = torch.arange(n_nodes, dtype=torch.long, device=device)
     sensory_mask = torch.zeros(n_nodes, dtype=torch.bool, device=device)
     sensory_mask[sensory_idx] = True
-    free_idx = all_idx[~sensory_mask]
+    free_idx = torch.arange(n_nodes, device=device)[~sensory_mask]
     return free_idx, sensory_idx
+
+
+def _as_sensory_values(model, sensory_values):
+    """``sensory_values`` as a flat float32 tensor on the model's device,
+    checked against ``model.sensory_indices``."""
+    sensory_values = torch.as_tensor(
+        sensory_values, dtype=torch.float32, device=model.all_weights.device
+    ).reshape(-1)
+    if sensory_values.numel() != model.sensory_indices.numel():
+        raise ValueError("sensory_values length must match model.sensory_indices.")
+    return sensory_values
 
 
 def network_step(model, state, sensory_values):
@@ -132,11 +137,7 @@ def network_step(model, state, sensory_values):
         raise ValueError("network_step assumes sensory_input_mode='replace'.")
     device = model.all_weights.device
     state = torch.as_tensor(state, dtype=torch.float32, device=device).reshape(-1, 1)
-    sensory_values = torch.as_tensor(
-        sensory_values, dtype=torch.float32, device=device
-    ).reshape(-1, 1)
-    if sensory_values.numel() != model.sensory_indices.numel():
-        raise ValueError("sensory_values length must match model.sensory_indices.")
+    sensory_values = _as_sensory_values(model, sensory_values).reshape(-1, 1)
 
     x = torch.sparse.mm(model.effective_weights, state)
     x = model.activation_function(x, x_previous=state)
@@ -182,10 +183,8 @@ def network_fixed_point(
         ``"iterations"``, ``"residual"``, ``"converged"``.
     """
     device = model.all_weights.device
-    sensory_values = torch.as_tensor(
-        sensory_values, dtype=torch.float32, device=device
-    ).reshape(-1)
-    _, sensory_idx = free_and_sensory_indices(model)
+    sensory_values = _as_sensory_values(model, sensory_values)
+    _, sensory_idx = _free_and_sensory_indices(model)
     with torch.no_grad():
         if initial_state is None:
             state = torch.zeros(
@@ -225,11 +224,22 @@ def _effective_weights_to_scipy(model):
     return sparse.coo_matrix((vals, (idx[0], idx[1])), shape=(n, n)).tocsr()
 
 
-def _steady_state_sparse(model, sensory_values, free_idx, sensory_idx, slopes, biases):
-    """Sparse, non-differentiable solve of the free-node linear steady state.
+def _steady_state_sparse_solve(
+    model, sensory_values, free_idx, sensory_idx, slopes, biases
+):
+    """Sparse LU solve of the free-node linear steady state (float64, no grad).
 
-    Solves ``(I - diag(slope_f) W_ff) x_f = slope_f * (W_fs s) + bias_f`` with a
-    sparse LU factorisation (scipy ``splu``), on CPU/float64.
+    Solves ``S x_f = slope_f * (W_fs s) + bias_f`` with
+    ``S = I - diag(slope_f) W_ff`` via a scipy ``splu`` factorisation, and
+    returns both the free-node solution and the factorisation itself. ``S`` is
+    the free-block ``(I - df/dx)`` of the linear map ``f(x) = slope * (W x) + b``
+    (whose Jacobian is ``diag(slope_f) W_ff``), so the same factorisation serves
+    the IFT adjoint's transposed solve in
+    :class:`_SparseLinearSteadyStateAdjoint`.
+
+    Returns:
+        tuple[np.ndarray, scipy.sparse.linalg.SuperLU]: ``(x_free, lu)``, both
+        float64/CPU.
     """
     from scipy.sparse import linalg as spla
 
@@ -246,12 +256,73 @@ def _steady_state_sparse(model, sensory_values, free_idx, sensory_idx, slopes, b
         sparse.eye(free.size, format="csc") - (sparse.diags(slope_f) @ weights_ff)
     ).tocsc()
     rhs = slope_f * (weights_fs @ sens_vals) + bias_f
-    solution = spla.splu(system).solve(rhs)
+    lu = spla.splu(system)
+    solution = lu.solve(rhs)
     if not np.isfinite(solution).all():
         raise ValueError("Sparse steady-state solve returned non-finite values.")
-    return torch.as_tensor(
-        solution, dtype=torch.float32, device=model.all_weights.device
+    return solution, lu
+
+
+class _FreeBlockAdjoint(torch.autograd.Function):
+    """Implicit-function-theorem adjoint for an equilibrium ``x* = f(x*)``.
+
+    Forward is the identity. Backward replaces the free-block gradient ``g`` by
+    ``solve_T(g) = (I - M)^-T g``, with ``M`` the free-block Jacobian ``df/dx``
+    at ``x*``; everything else passes through. Applied to one differentiable
+    evaluation of ``f`` at the detached ``x*``, this turns ``df/dtheta`` into
+    the total derivative ``dx*/dtheta``.
+    """
+
+    @staticmethod
+    def forward(ctx, state, solve_T, free_idx):
+        ctx.solve_T = solve_T
+        ctx.save_for_backward(free_idx)
+        return state.clone()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (free_idx,) = ctx.saved_tensors
+        grad = grad_output.clone()
+        grad[free_idx] = ctx.solve_T(grad.index_select(0, free_idx)).to(grad)
+        return grad, None, None
+
+
+def _linear_steady_state_sparse_diff(
+    model, sensory_values, free_idx, sensory_idx, slopes, biases, state
+):
+    """Differentiable sparse linear steady state (above the dense limit).
+
+    Forward: the float64 ``splu`` solve (no grad). Backward: one differentiable
+    application of ``f(x) = slope * (W_eff x) + bias`` at the detached ``x*``
+    supplies ``df/dtheta``, and :class:`_FreeBlockAdjoint` applies
+    ``S^-T`` by a transposed solve reusing the forward factorisation — the
+    same gradient as the dense path, without densifying ``W``. The
+    equilibrium does not depend on tau, so tau gets no gradient.
+    """
+    x_free_np, lu = _steady_state_sparse_solve(
+        model, sensory_values, free_idx, sensory_idx, slopes, biases
     )
+    device = model.all_weights.device
+    # x* with sensory nodes clamped; detached, so theta is the only grad path.
+    x_star = state.clone()
+    x_star[free_idx] = torch.as_tensor(x_free_np, dtype=torch.float32, device=device)
+
+    # Differentiable linear free-map at the (constant) solution: the free rows
+    # equal f(x*) = x* in value but carry df/dtheta (through effective_weights
+    # for pair slopes/weights, and directly for node slopes and biases).
+    weighted = torch.sparse.mm(
+        model.effective_weights, x_star.reshape(-1, 1)
+    ).reshape(-1)
+    free_map = slopes * weighted + biases
+    reconstructed = x_star.index_copy(
+        0, free_idx, free_map.index_select(0, free_idx)
+    )
+
+    def solve_T(g):
+        g = g.detach().cpu().numpy().astype(np.float64)
+        return torch.as_tensor(lu.solve(g, trans="T"))
+
+    return _FreeBlockAdjoint.apply(reconstructed, solve_T, free_idx)
 
 
 def linear_network_steady_state(model, sensory_values):
@@ -274,20 +345,15 @@ def linear_network_steady_state(model, sensory_values):
         Treating the sensory nodes as clamped is only exact when the model runs
         with ``sensory_input_mode="replace"``; in ``"add"`` mode the sensory
         nodes remain dynamical and this is an approximation.
-        Networks with at most ``_DENSE_NODE_LIMIT`` nodes use a dense
-        differentiable solve; larger ones use a sparse LU solve (scipy
-        ``splu``, CPU/float64) which is **not** differentiable.
+        Differentiable at any size: networks with at most 256 nodes use a
+        dense solve (autograd through ``torch.linalg.solve``), larger ones a
+        sparse LU solve (scipy ``splu``, CPU/float64) whose gradient is the
+        implicit-function-theorem adjoint reusing the same factorisation.
     """
-    free_idx, sensory_idx = free_and_sensory_indices(model)
+    free_idx, sensory_idx = _free_and_sensory_indices(model)
     device = model.all_weights.device
     n_nodes = model.all_weights.shape[0]
-    sensory_values = torch.as_tensor(
-        sensory_values,
-        dtype=torch.float32,
-        device=device,
-    ).reshape(-1)
-    if sensory_values.numel() != sensory_idx.numel():
-        raise ValueError("sensory_values length must match model.sensory_indices.")
+    sensory_values = _as_sensory_values(model, sensory_values)
 
     slopes = model.node_parameter("slope")
     biases = model.node_parameter("bias")
@@ -297,11 +363,9 @@ def linear_network_steady_state(model, sensory_values):
         return state
 
     if n_nodes > _DENSE_NODE_LIMIT:
-        with torch.no_grad():
-            state[free_idx] = _steady_state_sparse(
-                model, sensory_values, free_idx, sensory_idx, slopes, biases
-            )
-        return state
+        return _linear_steady_state_sparse_diff(
+            model, sensory_values, free_idx, sensory_idx, slopes, biases, state
+        )
 
     W = model.effective_weights.to_dense()
     W_ff = W.index_select(0, free_idx).index_select(1, free_idx)
@@ -313,6 +377,205 @@ def linear_network_steady_state(model, sensory_values):
     rhs = slopes_f * (W_fs @ sensory_values) + biases_f
     state[free_idx] = torch.linalg.solve(lhs, rhs)
     return state
+
+
+def _newton_fixed_point_dense(
+    model, sensory_values, free_idx, sensory_idx, initial_state, fp_tol
+):
+    """Float64 Newton solve of the free-node fixed point of :func:`network_step`.
+
+    Uses MINPACK's ``hybrd`` (Powell's hybrid method, ``scipy.optimize.root``
+    method ``"hybr"``) with the analytic Jacobian ``free_update_matrix - I``.
+    The residual is evaluated through the model's own float32 forward
+    machinery, so the achievable residual floor is ~1e-7; the returned state
+    is verified to be a fixed point of :func:`network_step` to ``fp_tol`` and
+    the solve raises otherwise. Runs under the caller's ``no_grad``.
+    """
+    from scipy import optimize
+
+    device = model.all_weights.device
+    n_nodes = model.all_weights.shape[0]
+    n_free = free_idx.numel()
+    eye = np.eye(n_free)
+
+    def full_state(free_values):
+        state = torch.zeros(n_nodes, dtype=torch.float32, device=device)
+        state[free_idx] = torch.as_tensor(
+            free_values, dtype=torch.float32, device=device
+        )
+        state[sensory_idx] = sensory_values
+        return state
+
+    def residual(free_values):
+        state = full_state(free_values)
+        stepped = network_step(model, state, sensory_values)
+        return (
+            (stepped[free_idx] - state[free_idx]).cpu().numpy().astype(np.float64)
+        )
+
+    def jacobian(free_values):
+        update = free_update_matrix(model, full_state(free_values))
+        return update.cpu().numpy().astype(np.float64) - eye
+
+    if initial_state is None:
+        start = np.zeros(n_free)
+    else:
+        start = (
+            torch.as_tensor(initial_state, dtype=torch.float32)
+            .detach()
+            .cpu()
+            .reshape(-1)[free_idx.cpu()]
+            .numpy()
+            .astype(np.float64)
+        )
+    solution = optimize.root(residual, start, jac=jacobian, method="hybr")
+    state = full_state(solution.x)
+    moved = float((network_step(model, state, sensory_values) - state).abs().max())
+    if moved > fp_tol:
+        raise RuntimeError(
+            f"Newton equilibrium solve did not reach a fixed point of "
+            f"network_step: residual {moved:.3e} > fp_tol {fp_tol:.1e} "
+            f"(scipy: success={solution.success}, {solution.message!r})"
+        )
+    return state
+
+
+def nonlinear_network_steady_state(
+    model, sensory_values, initial_state=None, fp_tol: float = 1e-5
+):
+    """Differentiable equilibrium of a nonlinear network with clamped inputs.
+
+    Solves the fixed point of :func:`network_step` for constant
+    ``sensory_values`` and returns it as a tensor whose gradient with respect
+    to the model parameters is the exact total derivative given by the
+    implicit function theorem — the nonlinear analog of
+    :func:`linear_network_steady_state`, for use as a per-epoch
+    ``initial_state`` via
+    ``make_initial_state_fn(..., detach=False, warm_start_kw="initial_state")``.
+
+    Mechanics (the standard fixed-point differentiation recipe, as in Deep
+    Equilibrium Models or SciML's ``SteadyStateAdjoint``; solver internals are
+    never differentiated):
+
+    - **forward**: float64 Newton (MINPACK ``hybrd`` via
+      ``scipy.optimize.root``) on the free-node block, with the analytic
+      Jacobian from :func:`free_update_matrix`; verified to be a fixed point
+      of :func:`network_step` to ``fp_tol``, raising otherwise.
+    - **backward**: one differentiable application of :func:`network_step` at
+      the (detached) solution provides ``∂f/∂θ`` through the model's own
+      forward machinery, and the incoming gradient is premultiplied by
+      ``(I - M)^-T`` (dense float64 solve) where ``M`` is the free-node
+      update Jacobian at the solution.
+
+    The local gain inside ``M`` comes from ``model.activation_gain`` — a model
+    with a custom ``activation_function`` and no ``activation_gain_fn``
+    raises, exactly as :func:`stability_penalty` does.
+
+    Args:
+        model: the network (``sensory_input_mode="replace"``), with at most
+            256 nodes — there is no sparse backend. For larger networks use
+            :func:`network_fixed_point` (no gradient).
+        sensory_values (array-like): constant sensory drive, in the order of
+            ``model.sensory_indices``.
+        initial_state (array-like, optional): warm start for the Newton
+            solve, e.g. the previous epoch's equilibrium.
+        fp_tol (float): max-abs ``network_step`` residual accepted at the
+            solution.
+
+    Returns:
+        torch.Tensor: the equilibrium over all nodes (float32, sensory nodes
+        clamped), carrying the implicit-gradient graph when gradients are
+        enabled. Its value equals one ``network_step`` application at the
+        Newton solution, i.e. it matches the exact fixed point to
+        ``<= fp_tol``.
+
+    Note:
+        The IFT is applied to the step map itself (Jacobian ``M`` from
+        :func:`free_update_matrix`) rather than to the tau-free equilibrium
+        condition ``activation(...) - x = 0``: the two defining equations
+        differ only by the invertible row scaling ``diag(1/tau)``, which
+        cancels in the implicit derivative, so the gradients are identical
+        at the fixed point. The step map is used because it reuses the
+        model's own forward and the stability code's Jacobian.
+        The equilibrium does not involve ``tau`` (the leak cancels at a
+        fixed point), so the tau gradient is zero up to the solve residual.
+        Conditioning: the adjoint solve amplifies by ``(1 - rho(M))^-1``,
+        which grows as the spectral radius approaches 1.
+    """
+    free_idx, sensory_idx = _free_and_sensory_indices(model)
+    device = model.all_weights.device
+    n_nodes = model.all_weights.shape[0]
+    sensory_values = _as_sensory_values(model, sensory_values)
+    if n_nodes > _DENSE_NODE_LIMIT:
+        raise NotImplementedError(
+            f"nonlinear_network_steady_state supports at most "
+            f"{_DENSE_NODE_LIMIT} nodes; use network_fixed_point (no gradient) "
+            "for larger networks."
+        )
+
+    state = torch.zeros(n_nodes, dtype=torch.float32, device=device)
+    state[sensory_idx] = sensory_values
+    if free_idx.numel() == 0:
+        return state
+
+    with torch.no_grad():
+        x_star = _newton_fixed_point_dense(
+            model, sensory_values, free_idx, sensory_idx, initial_state, fp_tol
+        )
+        update = free_update_matrix(model, x_star)
+        eye = torch.eye(update.shape[0], dtype=update.dtype, device=update.device)
+        system_transposed = (eye - update).to(torch.float64).T.contiguous()
+
+    def solve_T(g):
+        return torch.linalg.solve(system_transposed, g.to(system_transposed))
+
+    # One differentiable application at the (constant) solution supplies
+    # ∂f/∂θ; the adjoint correction turns its gradient into the IFT total
+    # derivative. x_star carries no graph, so θ is the only gradient path.
+    stepped = network_step(model, x_star, sensory_values)
+    return _FreeBlockAdjoint.apply(stepped, solve_T, free_idx)
+
+
+def make_initial_state_fn(solver, detach: bool = True, warm_start_kw: Optional[str] = None):
+    """Wrap a state solver into a per-epoch ``initial_state`` callable.
+
+    ``train_model`` accepts a callable ``initial_state``; it is invoked once at
+    the start of every epoch, after the previous step + projections, so the
+    rollout's t=0 state tracks the evolving model instead of freezing the
+    *initial* model's equilibrium for all epochs. (A fixed t=0 state goes
+    stale as the parameters move, and a slow hidden time constant lets the fit
+    exploit the stale transient.)
+
+    Args:
+        solver: ``fn(model, **kwargs) -> (n_nodes,) state tensor``, e.g.
+            ``functools.partial(linear_network_steady_state, sensory_values=u0)``
+            or a tolerance-bound :func:`network_fixed_point` partial.
+        detach (bool): detach the returned state from the autograd graph
+            (default). The loss then treats the t=0 state as a constant each
+            epoch — the finite-horizon truncation of the fully self-consistent
+            gradient. ``False`` lets gradients flow through a differentiable
+            solver (:func:`linear_network_steady_state`,
+            :func:`nonlinear_network_steady_state`); it has no effect on
+            solvers that run under ``no_grad`` (:func:`network_fixed_point`).
+        warm_start_kw (str, optional): name of the solver's starting-iterate
+            keyword (``"initial_state"`` for :func:`network_fixed_point`).
+            When set, each call passes the previous epoch's (detached) result
+            so an iterative solver warm-starts. None for closed-form solvers.
+
+    Returns:
+        callable: ``fn(model) -> state``, for ``train_model(initial_state=...)``.
+    """
+    cache = {"state": None}
+
+    def initial_state_fn(model):
+        kwargs = {}
+        if warm_start_kw is not None and cache["state"] is not None:
+            kwargs[warm_start_kw] = cache["state"]
+        state = solver(model, **kwargs)
+        cache["state"] = state.detach()
+        return cache["state"] if detach else state
+
+    return initial_state_fn
 
 
 # ---------------------------------------------------------------------------
@@ -351,12 +614,16 @@ def free_update_matrix(model, state=None):
     Note:
         Restricting to the free-node block is the correct linearisation only
         when the sensory nodes are clamped (``sensory_input_mode="replace"``).
-        Densifies the weight matrix; it is the dense backend used by
-        :func:`stability_penalty` and :func:`spectral_radius` for networks with
-        at most ``_DENSE_NODE_LIMIT`` nodes.
+        Dense, so limited to networks with at most 256 nodes (raises above).
     """
+    n_nodes = model.all_weights.shape[0]
+    if n_nodes > _DENSE_NODE_LIMIT:
+        raise ValueError(
+            f"free_update_matrix is dense and supports at most "
+            f"{_DENSE_NODE_LIMIT} nodes; got {n_nodes}."
+        )
     W = model.effective_weights.to_dense()
-    free_idx, _ = free_and_sensory_indices(model)
+    free_idx, _ = _free_and_sensory_indices(model)
     if free_idx.numel() == 0:
         return torch.zeros((0, 0), dtype=W.dtype, device=W.device)
     gain = model.activation_gain(state)
@@ -450,7 +717,7 @@ def stability_penalty(model, state=None, margin: float = 1e-4):
         torch.Tensor: scalar penalty.
 
     Note:
-        For networks with at most ``_DENSE_NODE_LIMIT`` nodes, ``rho`` is the
+        For networks with at most 256 nodes, ``rho`` is the
         exact spectral radius of :func:`free_update_matrix` (dense
         eigendecomposition). For larger networks, ``rho`` is a sparse,
         differentiable **Gershgorin upper bound** on the spectral radius. The
@@ -459,7 +726,7 @@ def stability_penalty(model, state=None, margin: float = 1e-4):
         Both regimes assume clamped sensory nodes
         (``sensory_input_mode="replace"``).
     """
-    free_idx, _ = free_and_sensory_indices(model)
+    free_idx, _ = _free_and_sensory_indices(model)
     if free_idx.numel() == 0:
         return torch.zeros((), dtype=torch.float32, device=model.all_weights.device)
 
@@ -470,34 +737,6 @@ def stability_penalty(model, state=None, margin: float = 1e-4):
         update = free_update_matrix(model, state)
         rho = torch.abs(torch.linalg.eigvals(update)).max()
     return torch.relu(rho - (1.0 - float(margin))) ** 2
-
-
-def spectral_radius_bound(model, state=None) -> float:
-    """Gershgorin upper bound on the free-node spectral radius, as a float.
-
-    No-grad diagnostic counterpart of the *sparse* regime of
-    :func:`stability_penalty`: the same conservative bound the penalty
-    optimises against on large networks, reported as a number. O(nnz), never
-    densifies — usable at neuron scale where :func:`spectral_radius`'s ARPACK
-    solve may be slow. A value below 1 certifies stability; above 1 is
-    inconclusive (the bound is conservative).
-
-    Args:
-        model: the network.
-        state (torch.Tensor, optional): operating point for state-dependent
-            gains; a ``LinearNetwork`` needs none.
-
-    Returns:
-        float: the bound (0.0 if there are no free nodes).
-    """
-    with torch.no_grad():
-        free_idx, _ = free_and_sensory_indices(model)
-        if free_idx.numel() == 0:
-            return 0.0
-        gain = model.activation_gain(state)
-        return float(
-            _gershgorin_spectral_radius_bound(model, free_idx, gain).detach().cpu()
-        )
 
 
 def spectral_radius(model, state=None):
@@ -515,7 +754,7 @@ def spectral_radius(model, state=None):
         float: the spectral radius (0.0 if there are no free nodes).
 
     Note:
-        Networks with at most ``_DENSE_NODE_LIMIT`` nodes use a dense
+        Networks with at most 256 nodes use a dense
         eigendecomposition; larger ones use ARPACK
         (``scipy.sparse.linalg.eigs``) to get the dominant eigenvalue without
         densifying. Unlike :func:`stability_penalty`, this returns the true
@@ -523,7 +762,7 @@ def spectral_radius(model, state=None):
         sensory nodes (``sensory_input_mode="replace"``).
     """
     with torch.no_grad():
-        free_idx, _ = free_and_sensory_indices(model)
+        free_idx, _ = _free_and_sensory_indices(model)
         if free_idx.numel() == 0:
             return 0.0
         if model.all_weights.shape[0] > _DENSE_NODE_LIMIT:
@@ -561,14 +800,14 @@ class ExponentialSensor:
     and delays transients but manufactures no increment/decrement amplitude
     asymmetry (that would need a static nonlinearity).
 
-    The same kernel drives both application paths, so they cannot drift:
+    Two entry points share one convolution:
 
     - :meth:`output_transform` — torch, differentiable; pass the bound method
       to ``train_model(output_transform=sensor.output_transform)``.
     - :meth:`apply` — numpy, for post-fit diagnostics.
 
-    For recordings without an indicator (e.g. voltage), pass ``sensor=None`` /
-    ``output_transform=None`` downstream rather than an identity sensor.
+    For recordings without an indicator (e.g. voltage), use no output
+    transform rather than an identity sensor.
 
     Args:
         tau_ms (float): decay time constant in **milliseconds** (matching
@@ -577,10 +816,6 @@ class ExponentialSensor:
             with the rate model's own time constants — they are degenerate.
         dt_ms (float): sampling step of the traces, in ms.
         support_tau (float): kernel truncation, in multiples of ``tau_ms``.
-        device (torch.device, optional): device to pre-place the torch kernel
-            on (it follows the input's device regardless).
-        kernel (array-like, optional): externally built kernel; overrides
-            ``tau_ms``/``support_tau``.
     """
 
     def __init__(
@@ -588,29 +823,26 @@ class ExponentialSensor:
         tau_ms: float = GCAMP6F_TAU_MS,
         dt_ms: float = 1.0,
         support_tau: float = _SENSOR_SUPPORT_TAU,
-        device=None,
-        kernel=None,
     ):
-        if kernel is None:
-            if tau_ms <= 0:
-                raise ValueError("tau_ms must be positive.")
-            if dt_ms <= 0:
-                raise ValueError("dt_ms must be positive.")
-            n = max(1, int(round(support_tau * tau_ms / dt_ms)))
-            t = np.arange(n) * float(dt_ms)
-            kernel = np.exp(-t / float(tau_ms))
-            kernel = kernel / kernel.sum()
-        self.kernel = np.asarray(kernel, dtype=np.float32)
+        if tau_ms <= 0:
+            raise ValueError("tau_ms must be positive.")
+        if dt_ms <= 0:
+            raise ValueError("dt_ms must be positive.")
+        n = max(1, int(round(support_tau * tau_ms / dt_ms)))
+        kernel = np.exp(-np.arange(n) * float(dt_ms) / float(tau_ms))
+        self.kernel = (kernel / kernel.sum()).astype(np.float32)
         self.tau_ms = float(tau_ms)
         self.dt_ms = float(dt_ms)
         # F.conv1d is cross-correlation, so flip the kernel to get true
         # convolution y[t] = sum_k kernel[k] * x[t-k].
-        weight = torch.as_tensor(self.kernel[::-1].copy(), dtype=torch.float32).view(
-            1, 1, -1
-        )
-        if device is not None:
-            weight = weight.to(device)
-        self._weight = weight
+        self._weight = torch.as_tensor(self.kernel[::-1].copy()).view(1, 1, -1)
+
+    def _convolve(self, x: torch.Tensor) -> torch.Tensor:
+        """Causal, replicate-padded convolution of ``(batch, neurons, T)``."""
+        b, n, t = x.shape
+        weight = self._weight.to(device=x.device, dtype=x.dtype)
+        x = F.pad(x.reshape(b * n, 1, t), (weight.shape[-1] - 1, 0), mode="replicate")
+        return F.conv1d(x, weight).reshape(b, n, t)
 
     def output_transform(self, outputs: torch.Tensor) -> torch.Tensor:
         """Causal sensor convolution along the time axis (torch path).
@@ -623,29 +855,18 @@ class ExponentialSensor:
         """
         if outputs.dim() != 3:
             raise ValueError("output_transform expects (batch, neurons, T).")
-        b, n, t = outputs.shape
-        ksize = self._weight.shape[-1]
-        x = outputs.reshape(b * n, 1, t)
-        x = F.pad(x, (ksize - 1, 0), mode="replicate")  # causal, start from edge value
-        y = F.conv1d(x, self._weight.to(x.device))
-        return y.reshape(b, n, t)
+        return self._convolve(outputs)
 
     def apply(self, trace):
-        """Causal convolution of a numpy trace with the kernel (numpy path).
+        """The same convolution on a numpy trace (float64).
 
-        ``trace`` is ``(T,)`` or ``(n, T)``; returns the same shape. Matches
-        :meth:`output_transform` (replicate-padded, causal).
+        ``trace`` is ``(T,)`` or ``(n, T)``; returns the same shape.
         """
         trace = np.asarray(trace, dtype=np.float64)
-        kernel = np.asarray(self.kernel, dtype=np.float64)
-        if trace.ndim == 1:
-            pad = np.concatenate([np.full(kernel.size - 1, trace[0]), trace])
-            return np.convolve(pad, kernel)[
-                kernel.size - 1 : kernel.size - 1 + trace.size
-            ]
-        if trace.ndim == 2:
-            return np.stack([self.apply(row) for row in trace])
-        raise ValueError("trace must be 1-D (T,) or 2-D (n, T).")
+        if trace.ndim not in (1, 2):
+            raise ValueError("trace must be 1-D (T,) or 2-D (n, T).")
+        x = torch.as_tensor(trace).reshape(1, -1, trace.shape[-1])
+        return self._convolve(x).reshape(trace.shape).numpy()
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +901,7 @@ def affine_readout_solve(latent, target, ridge: float = 1e-4):
     return scale, offset
 
 
-def affine_readout_penalties(
+def _affine_readout_penalties(
     scales,
     latent_stds,
     scale_soft_limit: float = 10.0,
@@ -768,41 +989,6 @@ def affine_readout_frame(
     return pd.DataFrame(rows), readout_by_layer
 
 
-def implied_affine(x, y):
-    """Implied optimal affine calibration of ``x`` to ``y`` (numpy, no ridge).
-
-    The closed-form nonnegative scale and offset that would best rescale a
-    model output to the target — useful to check whether a model fitted
-    *without* a readout is already calibrated (scale ~1, offset ~0 makes a
-    readout-free comparison fair).
-
-    Returns:
-        tuple[float, float]: ``(scale, offset)``.
-    """
-    x = np.asarray(x, dtype=np.float64).ravel()
-    y = np.asarray(y, dtype=np.float64).ravel()
-    xc = x - x.mean()
-    yc = y - y.mean()
-    scale = float((xc * yc).sum() / (xc * xc).sum())
-    scale = max(scale, 0.0)
-    offset = float(y.mean() - scale * x.mean())
-    return scale, offset
-
-
-def _require_activation_gain(model):
-    """Raise if Jacobian-based analysis on ``model`` would be impossible."""
-    if (
-        model.custom_activation_function is not None
-        and model.custom_activation_gain_fn is None
-    ):
-        raise ValueError(
-            "stability_weight > 0 requires the model's local gain, but this "
-            "model has a custom activation_function and no activation_gain_fn. "
-            "Pass activation_gain_fn=... at model construction, or set "
-            "stability_weight=0 to fit without the stability penalty."
-        )
-
-
 def make_affine_readout_loss(
     model,
     targets: pd.DataFrame,
@@ -845,7 +1031,7 @@ def make_affine_readout_loss(
             ordering is right.
         ridge, scale_soft_limit, latent_std_floor, scale_reg_weight,
         std_reg_weight: readout solve/penalty parameters, see
-            :func:`affine_readout_solve` / :func:`affine_readout_penalties`.
+            :func:`affine_readout_solve` / :func:`_affine_readout_penalties`.
         stability_weight (float): weight of :func:`stability_penalty` in the
             loss. Defaults to ``0.0`` — stability is explicit opt-in. A
             positive value with a model whose local gain is unavailable (custom
@@ -880,8 +1066,18 @@ def make_affine_readout_loss(
         )
     if stability_weight < 0:
         raise ValueError("stability_weight must be >= 0.")
-    if stability_weight > 0:
-        _require_activation_gain(model)
+    if (
+        stability_weight > 0
+        and model.custom_activation_function is not None
+        and model.custom_activation_gain_fn is None
+    ):
+        # Checked here so the error comes at build time, not on the first step.
+        raise ValueError(
+            "stability_weight > 0 requires the model's local gain, but this "
+            "model has a custom activation_function and no activation_gain_fn. "
+            "Pass activation_gain_fn=... at model construction, or set "
+            "stability_weight=0 to fit without the stability penalty."
+        )
 
     # Replicate train_model's flat target order: filter to the batch, then
     # sort_values("batch") (not stable on the all-equal key, but deterministic),
@@ -940,7 +1136,7 @@ def make_affine_readout_loss(
             loss = (weights * torch.stack(mses)).mean()
         else:
             loss = torch.stack(mses).mean()  # equal-sized channels -> global MSE
-        scale_penalty, std_penalty = affine_readout_penalties(
+        scale_penalty, std_penalty = _affine_readout_penalties(
             torch.stack(scales),
             torch.stack(latent_stds),
             scale_soft_limit=scale_soft_limit,
@@ -961,80 +1157,6 @@ def make_affine_readout_loss(
         return loss
 
     return loss_fn
-
-
-class BoundedLogScalar:
-    """A trainable positive scalar, box-bounded via a log-scale reparametrisation.
-
-    ``value() = exp(log_lo + (log_hi - log_lo) * sigmoid(raw))`` — updates to
-    the raw parameter act multiplicatively on the value, which stays strictly
-    inside ``bounds`` with no post-step projection. Used e.g. for the luminance
-    log-offset epsilon in ``log(brightness + epsilon)``: pass ``[scalar.raw]``
-    as ``train_model(extra_parameters=...)`` and read the fitted value back
-    with :meth:`item`.
-
-    Args:
-        init (float): initial value, strictly inside ``bounds``.
-        bounds (tuple): ``(lower, upper)``, both positive.
-        device (torch.device, optional): device for the raw parameter.
-    """
-
-    def __init__(self, init: float, bounds, device=None):
-        lower, upper = float(bounds[0]), float(bounds[1])
-        if not (0 < lower < upper):
-            raise ValueError("bounds must be positive and increasing.")
-        if not (lower < float(init) < upper):
-            raise ValueError("init must lie strictly inside bounds.")
-        self.bounds = (lower, upper)
-        self._log_lo = float(np.log(lower))
-        self._log_hi = float(np.log(upper))
-        frac = (float(np.log(float(init))) - self._log_lo) / (
-            self._log_hi - self._log_lo
-        )
-        self.raw = torch.nn.Parameter(
-            torch.logit(torch.tensor(frac, dtype=torch.float32, device=device))
-        )
-
-    def value(self) -> torch.Tensor:
-        """The current bounded value, differentiable w.r.t. ``raw``."""
-        return torch.exp(
-            self._log_lo + (self._log_hi - self._log_lo) * torch.sigmoid(self.raw)
-        )
-
-    def item(self) -> float:
-        """The current bounded value as a Python float."""
-        return float(self.value().detach().cpu())
-
-
-def make_log_offset_input_transform(offset: BoundedLogScalar) -> Callable:
-    """Build a ``train_model`` ``input_transform``: ``log(inputs + offset)``.
-
-    Feed ``train_model`` the *raw* (e.g. brightness) input tensor together with
-    this transform and ``extra_parameters=[offset.raw]``; the transform is
-    re-applied every epoch, so the trainable offset receives gradients.
-    """
-
-    def input_transform(inputs: torch.Tensor) -> torch.Tensor:
-        return torch.log(inputs + offset.value())
-
-    return input_transform
-
-
-def log_trace(trace, offset: float) -> np.ndarray:
-    """``log(trace + offset)`` as float32, validating positivity."""
-    trace = np.asarray(trace, dtype=np.float32)
-    shifted = trace + np.float32(offset)
-    if np.any(shifted <= 0):
-        raise ValueError("trace + offset must be positive everywhere.")
-    return np.log(shifted).astype(np.float32)
-
-
-def trace_to_input_tensor(trace, device=None) -> torch.Tensor:
-    """A 1-D stimulus trace as a ``(1, 1, T)`` ``train_model`` input tensor."""
-    trace = np.asarray(trace, dtype=np.float32)
-    if trace.ndim != 1:
-        raise ValueError("trace must be 1-D (T,).")
-    return torch.as_tensor(trace[None, None, :], dtype=torch.float32, device=device)
 
 
 # ---------------------------------------------------------------------------
@@ -1070,8 +1192,6 @@ def score_mask_for_transition_windows(
     mask = np.zeros(n_samples, dtype=bool)
     for start in transition_idx:
         mask[int(start) : int(start) + n_steps] = True
-    if int(mask.sum()) != int(transition_idx.size) * n_steps:
-        raise ValueError("Score mask sample count does not match window count.")
     return mask
 
 
@@ -1101,26 +1221,27 @@ def build_raw_window_targets(
         pd.DataFrame: the targets frame.
     """
     layers = list(target_traces) if layers is None else list(layers)
-    n_steps = int(window_steps)
-    rows = []
+    starts = np.asarray(transition_idx, dtype=np.int64)
+    # sample indices of all windows, in window order
+    steps = (starts[:, None] + np.arange(int(window_steps))).reshape(-1)
+    frames = []
     for layer in layers:
-        neuron_idx = int(node_index[layer])
         trace = np.asarray(target_traces[layer], dtype=np.float32)
-        for start in np.asarray(transition_idx, dtype=np.int64):
-            start = int(start)
-            stop = start + n_steps
-            if stop > trace.size:
-                raise ValueError("A target window exceeds the trace length.")
-            for layer_idx in range(start, stop):
-                rows.append(
-                    {
-                        "batch": 0,
-                        "neuron_idx": neuron_idx,
-                        "layer": int(layer_idx),
-                        "value": float(trace[layer_idx]),
-                    }
-                )
-    return pd.DataFrame(rows)
+        if steps.size and steps.max() >= trace.size:
+            raise ValueError("A target window exceeds the trace length.")
+        frames.append(
+            pd.DataFrame(
+                {
+                    "batch": 0,
+                    "neuron_idx": int(node_index[layer]),
+                    "layer": steps,
+                    "value": trace[steps].astype(np.float64),
+                }
+            )
+        )
+    if not frames:
+        return pd.DataFrame(columns=["batch", "neuron_idx", "layer", "value"])
+    return pd.concat(frames, ignore_index=True)
 
 
 def extract_transition_windows(
@@ -1172,7 +1293,7 @@ def r2(y, y_pred) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Persistence & tables
+# Persistence
 # ---------------------------------------------------------------------------
 
 _MODEL_KEY_PREFIX = "model_"
@@ -1180,30 +1301,23 @@ _MODEL_KEY_PREFIX = "model_"
 
 def _model_arrays(model) -> dict:
     """A model's rebuildable state as flat numpy arrays (``model_*`` keys)."""
+    def np32(tensor):
+        return tensor.detach().cpu().numpy().astype(np.float32)
+
+    def optional_float(value):
+        # None is stored as inf (npz has no None)
+        return np.asarray(np.inf if value is None else float(value), dtype=np.float32)
+
     weights = model.effective_weights.coalesce()
-    idx = weights.indices().detach().cpu().numpy()
-    vals = weights.values().detach().cpu().numpy().astype(np.float32)
     n_nodes = model.all_weights.shape[0]
     out = {
         "model_class": np.asarray(type(model).__name__),
-        "model_weights_indices": idx,
-        "model_weights_values": vals,
+        "model_weights_indices": weights.indices().detach().cpu().numpy(),
+        "model_weights_values": np32(weights.values()),
         "model_weights_shape": np.asarray(list(weights.shape), dtype=np.int64),
-        "model_node_bias": model.node_parameter("bias")
-        .detach()
-        .cpu()
-        .numpy()
-        .astype(np.float32),
-        "model_node_tau": model.node_parameter("tau")
-        .detach()
-        .cpu()
-        .numpy()
-        .astype(np.float32),
-        "model_node_slope": model.node_parameter("slope")
-        .detach()
-        .cpu()
-        .numpy()
-        .astype(np.float32),
+        "model_node_bias": np32(model.node_parameter("bias")),
+        "model_node_tau": np32(model.node_parameter("tau")),
+        "model_node_slope": np32(model.node_parameter("slope")),
         "model_sensory_indices": model.sensory_indices.detach()
         .cpu()
         .numpy()
@@ -1214,35 +1328,15 @@ def _model_arrays(model) -> dict:
             float(model.tanh_steepness), dtype=np.float32
         ),
         "model_sensory_input_mode": np.asarray(str(model.sensory_input_mode)),
-        "model_tau_max": np.asarray(
-            (
-                np.inf
-                if getattr(model, "tau_max", None) is None
-                else float(model.tau_max)
-            ),
-            dtype=np.float32,
-        ),
-        "model_output_clamp_max": np.asarray(
-            (
-                np.inf
-                if getattr(model, "output_clamp_max", None) is None
-                else float(model.output_clamp_max)
-            ),
-            dtype=np.float32,
+        "model_tau_max": optional_float(model.tau_max),
+        "model_output_clamp_max": optional_float(
+            getattr(model, "output_clamp_max", None)
         ),
         "model_output_rectify": np.asarray(bool(getattr(model, "output_rectify", False))),
     }
     if model.idx_to_group is not None:
         out["model_node_group"] = np.asarray(
             [str(model.idx_to_group[i]) for i in range(n_nodes)]
-        )
-    if model.slope_is_pairwise:
-        pairs = pair_slope_table(model)
-        out["model_pair_slope_pre"] = pairs["pre"].to_numpy(dtype=str)
-        out["model_pair_slope_post"] = pairs["post"].to_numpy(dtype=str)
-        out["model_pair_slope"] = pairs["pair_slope"].to_numpy(dtype=np.float32)
-        out["model_effective_pair_slope"] = pairs["effective_pair_slope"].to_numpy(
-            dtype=np.float32
         )
     return out
 
@@ -1253,8 +1347,8 @@ def save_fit(path, model=None, arrays: Optional[Mapping] = None) -> None:
     The model section stores everything :func:`rebuild_network` needs to
     re-simulate the fit — the **effective** weights (pair-mode gains folded
     in), per-node bias/tau/slope, sensory indices, threshold and the forward
-    flags — plus the raw pair-slope table for bookkeeping. Custom activation
-    functions cannot be serialised; pass them again at rebuild time.
+    flags. Custom activation functions cannot be serialised; pass them again
+    at rebuild time.
 
     Args:
         path: destination ``.npz`` path.
@@ -1320,21 +1414,17 @@ def rebuild_network(
     weights = sparse.coo_matrix(
         (np.asarray(fit["model_weights_values"]), (idx[0], idx[1])), shape=shape
     ).tocsr()
-    n_nodes = shape[0]
-    node_names = [f"n{i}" for i in range(n_nodes)]
-    idx_to_group = dict(enumerate(node_names))
-    bias_dict = {
-        name: float(value)
-        for name, value in zip(node_names, np.asarray(fit["model_node_bias"]))
-    }
-    tau_dict = {
-        name: float(value)
-        for name, value in zip(node_names, np.asarray(fit["model_node_tau"]))
-    }
-    slope_dict = {
-        name: float(value)
-        for name, value in zip(node_names, np.asarray(fit["model_node_slope"]))
-    }
+    # each node becomes its own parameter group
+    node_names = [f"n{i}" for i in range(shape[0])]
+
+    def per_node(key):
+        return {
+            name: float(value) for name, value in zip(node_names, np.asarray(fit[key]))
+        }
+
+    def optional_float(key):
+        value = float(fit[key])
+        return None if np.isinf(value) else value
 
     kwargs = dict(
         all_weights=weights,
@@ -1342,26 +1432,24 @@ def rebuild_network(
         num_layers=int(fit["model_num_layers"]),
         threshold=float(fit["model_threshold"]),
         tanh_steepness=float(fit["model_tanh_steepness"]),
-        idx_to_group=idx_to_group,
-        bias_dict=bias_dict,
+        idx_to_group=dict(enumerate(node_names)),
+        bias_dict=per_node("model_node_bias"),
         bias_transform="identity",
-        slope_dict=slope_dict,
-        tau_dict=tau_dict,
+        slope_dict=per_node("model_node_slope"),
+        tau_dict=per_node("model_node_tau"),
+        tau_max=optional_float("model_tau_max"),
         sensory_input_mode=str(fit["model_sensory_input_mode"]),
         activation_function=activation_function,
         activation_gain_fn=activation_gain_fn,
         device=device,
     )
-    # older save_fit files predate model_tau_max; treat as unbounded
-    tau_max = float(fit.get("model_tau_max", np.inf))
-    kwargs["tau_max"] = None if np.isinf(tau_max) else tau_max
-    class_name = str(fit.get("model_class", "MultilayeredNetwork"))
-    if class_name == "LinearNetwork":
+    if str(fit["model_class"]) == "LinearNetwork":
         return LinearNetwork(**kwargs)
-    clamp = float(fit["model_output_clamp_max"])
-    kwargs["output_clamp_max"] = None if np.isinf(clamp) else clamp
-    kwargs["output_rectify"] = bool(fit["model_output_rectify"])
-    return MultilayeredNetwork(**kwargs)
+    return MultilayeredNetwork(
+        **kwargs,
+        output_clamp_max=optional_float("model_output_clamp_max"),
+        output_rectify=bool(fit["model_output_rectify"]),
+    )
 
 
 def simulate_trace(
@@ -1417,99 +1505,3 @@ def pair_slope_table(model) -> pd.DataFrame:
             for i, (pre, post) in enumerate(model.slope_pairs)
         ]
     )
-
-
-def parameter_table(
-    model, node_columns: Mapping, weight_sums: bool = True
-) -> pd.DataFrame:
-    """Per-cell-type parameter table: bias, tau and (optionally) weight sums.
-
-    Args:
-        model: the network.
-        node_columns (Mapping): ``{cell type: node index or sequence of node
-            indices}``; sequences are averaged per member.
-        weight_sums (bool): also report per-member incoming/outgoing effective
-            weight sums (densifies the weight matrix).
-
-    Returns:
-        pd.DataFrame: columns ``cell_type, bias, tau`` (+ ``in_weight_sum,
-        in_abs_weight_sum, out_weight_sum``).
-    """
-    biases = model.node_parameter("bias").detach().cpu().numpy()
-    taus = model.node_parameter("tau").detach().cpu().numpy()
-    weights = (
-        model.effective_weights.to_dense().detach().cpu().numpy()
-        if weight_sums
-        else None
-    )
-    rows = []
-    for name, selector in node_columns.items():
-        if isinstance(selector, (int, np.integer)):
-            members = np.asarray([int(selector)])
-        else:
-            members = np.asarray(list(selector), dtype=int)
-        row = {
-            "cell_type": name,
-            "bias": float(biases[members].mean()),
-            "tau": float(taus[members].mean()),
-        }
-        if weight_sums:
-            row["in_weight_sum"] = float(weights[members, :].sum() / members.size)
-            row["in_abs_weight_sum"] = float(
-                np.abs(weights[members, :]).sum() / members.size
-            )
-            row["out_weight_sum"] = float(weights[:, members].sum() / members.size)
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
-def aggregated_pair_weight_matrix(model, group_members: Mapping) -> pd.DataFrame:
-    """Effective weights aggregated to group pairs (post in rows, pre in cols).
-
-    Each entry is the summed effective weight from all of ``pre``'s members
-    onto all of ``post``'s members, divided by the number of ``post`` members —
-    the mean total input a ``post`` neuron receives from the ``pre`` group.
-
-    Args:
-        model: the network.
-        group_members (Mapping): ``{group: sequence of node indices}``.
-
-    Returns:
-        pd.DataFrame: square frame indexed by group.
-    """
-    weights = model.effective_weights.to_dense().detach().cpu().numpy()
-    groups = list(group_members)
-    members = {
-        group: np.asarray(list(group_members[group]), dtype=int) for group in groups
-    }
-    matrix = np.zeros((len(groups), len(groups)), dtype=np.float64)
-    for i, post in enumerate(groups):
-        post_idx = members[post]
-        for j, pre in enumerate(groups):
-            block = weights[np.ix_(post_idx, members[pre])]
-            matrix[i, j] = block.sum() / post_idx.size
-    return pd.DataFrame(matrix, index=groups, columns=groups)
-
-
-def to_jsonable(value):
-    """Recursively convert a value into JSON-serialisable builtins.
-
-    Handles numpy scalars/arrays, :class:`~pathlib.Path`, ``torch.device``,
-    dicts (keys stringified) and lists/tuples; everything else passes through
-    unchanged. Intended for run-metadata dumps.
-    """
-    if isinstance(value, np.integer):
-        return int(value)
-    if isinstance(value, np.floating):
-        return float(value)
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, dict):
-        return {str(k): to_jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [to_jsonable(v) for v in value]
-    if isinstance(value, torch.device):
-        return str(value)
-    return value

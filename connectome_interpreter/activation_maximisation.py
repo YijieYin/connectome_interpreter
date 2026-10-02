@@ -873,7 +873,7 @@ class _NetworkBase(nn.Module):
         # tau < 1 is physically meaningless
         return torch.clamp(self.tau_param, min=1.0, max=tau_max)
 
-    def node_parameter(self, name: str, default: Optional[float] = None):
+    def node_parameter(self, name: str):
         """Expand a per-group parameter to one value per node.
 
         Parameters are stored per cell-type group and mapped to nodes via
@@ -881,13 +881,12 @@ class _NetworkBase(nn.Module):
         ``effective_slope`` / ``biases`` / ``effective_tau``. This returns the
         same per-node view those paths use, so downstream analysis (e.g. the
         stability tools in ``connectome_interpreter.response_fitting``) cannot
-        disagree with the forward pass.
+        disagree with the forward pass. A parameter not set on the model is
+        filled with the model's default (``tanh_steepness`` / ``default_bias``
+        / ``tau``).
 
         Args:
             name (str): one of ``"slope"``, ``"bias"``, ``"tau"``.
-            default (float, optional): fill value used when the parameter is
-                not set on the model. None (the default) uses the model's own
-                default (``tanh_steepness`` / ``default_bias`` / ``tau``).
 
         Returns:
             torch.Tensor: shape ``(n_nodes,)`` on the model's device. For
@@ -907,15 +906,15 @@ class _NetworkBase(nn.Module):
             if self.slope_is_pairwise:
                 return torch.ones(n_nodes, dtype=torch.float32, device=device)
             if self.slope is None or self.indices is None:
-                return _fill(self.tanh_steepness if default is None else default)
+                return _fill(self.tanh_steepness)
             return self.effective_slope[self.indices]
         if name == "bias":
             if self.raw_biases is None or self.indices is None:
-                return _fill(self.default_bias if default is None else default)
+                return _fill(self.default_bias)
             return self.biases[self.indices]
         if name == "tau":
             if self.tau_param is None or self.indices is None:
-                return _fill(self.tau if default is None else default)
+                return _fill(self.tau)
             return self.effective_tau[self.indices]
         raise ValueError(f"Unknown parameter name: {name!r}")
 
@@ -2237,7 +2236,7 @@ def train_model(
     rescale_slope_updates: bool = False,
     checkpoint_steps: int = 50,
     activation_loss_fn: Union[str, Callable] = "mse",
-    initial_state: Optional[torch.Tensor] = None,
+    initial_state: Optional[Union[torch.Tensor, Callable]] = None,
     target_node_groups: Optional[dict] = None,
     extra_parameters: Optional[List[torch.nn.Parameter]] = None,
     input_transform: Optional[Callable] = None,
@@ -2279,11 +2278,21 @@ def train_model(
         activation_loss_fn (str or callable, optional): Loss function for activations.
             Either "mae", "mse" (default), or a callable with signature fn(pred:
             torch.Tensor, target: torch.Tensor) -> torch.Tensor returning a scalar loss.
-        initial_state (torch.Tensor, optional): Initial full-network state for each
-            batch. Shape can be (nodes,), (batch, nodes), or (nodes, batch). Sensory
-            nodes are still overwritten by the first input sample. When 2-D, it is
-            split alongside ``inputs`` (same batch axis) into per-stimulus train and
-            validation states.
+        initial_state (torch.Tensor or callable, optional): Initial full-network
+            state for each batch. Shape can be (nodes,), (batch, nodes), or
+            (nodes, batch). Sensory nodes are still overwritten by the first
+            input sample. When 2-D, it is split alongside ``inputs`` (same batch
+            axis) into per-stimulus train and validation states. A tensor is used
+            verbatim in every epoch. A callable ``fn(model) -> state`` is instead
+            invoked once at the start of each epoch (after the previous epoch's
+            optimizer step and parameter projections) so the t=0 state can track
+            the evolving model — e.g. restart every epoch at the *current*
+            model's steady state instead of a state that goes stale as the
+            parameters move (see ``response_fitting.make_initial_state_fn``).
+            Its result is split the same way and used for that epoch's train
+            and validation forward passes. The result is used as returned:
+            detach it inside the callable to keep the initial state out of the
+            gradient graph.
         target_node_groups (dict, optional): Fit group (e.g. cell-type) averages
             instead of individual nodes. Maps ``group_id -> sequence of member node
             indices``. When provided, the ``targets`` DataFrame's ``neuron_idx``
@@ -2499,15 +2508,17 @@ def train_model(
 
         # Per-stimulus initial states are split alongside the inputs so each half
         # keeps the states belonging to its own batch entries.
-        train_initial_state = initial_state
-        val_initial_state = initial_state
-        if initial_state is not None and torch.as_tensor(initial_state).dim() == 2:
-            st = torch.as_tensor(initial_state)
+        def split_initial_state(state):
+            if state is None or torch.as_tensor(state).dim() != 2:
+                return state, state
+            st = torch.as_tensor(state)
             axis = 0 if st.shape[0] == inputs.shape[0] else 1
             train_idx_t = torch.as_tensor(train_indices, device=st.device)
             val_idx_t = torch.as_tensor(val_indices, device=st.device)
-            train_initial_state = st.index_select(axis, train_idx_t)
-            val_initial_state = st.index_select(axis, val_idx_t)
+            return st.index_select(axis, train_idx_t), st.index_select(axis, val_idx_t)
+
+        if not callable(initial_state):
+            train_initial_state, val_initial_state = split_initial_state(initial_state)
 
         batch_idx = torch.tensor(
             train_targets["batch"].astype(int).values,
@@ -2561,6 +2572,12 @@ def train_model(
 
         for epoch in tqdm(range(num_epochs)):
             optimizer.zero_grad()
+            # A callable initial_state is re-evaluated each epoch, after the
+            # previous step + projections, so the t=0 state tracks the model.
+            if callable(initial_state):
+                train_initial_state, val_initial_state = split_initial_state(
+                    initial_state(model)
+                )
             # Forward pass. The transform is re-applied each epoch so a
             # differentiable transform (driven by extra_parameters) gets gradients.
             outputs = model(

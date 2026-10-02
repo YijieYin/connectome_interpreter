@@ -4881,6 +4881,93 @@ class TestTauMax(unittest.TestCase):
                 self._model(tau_dict={"A": 4.0, "B": 16.0}, tau_max=bad)
 
 
+class TestCallableInitialState(unittest.TestCase):
+    """train_model(initial_state=callable) re-evaluates the t=0 state each
+    epoch from the current model instead of freezing one tensor."""
+
+    def setUp(self):
+        self.weights = csr_matrix(
+            np.array([[0.0, 0.0], [0.5, 0.0]], dtype=np.float32)
+        )
+        self.idx_to_group = {0: "A", 1: "B"}
+
+    def _fixtures(self, num_batches=6):
+        model = MultilayeredNetwork(
+            self.weights,
+            sensory_indices=[0],
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+            device=torch.device("cpu"),
+        )
+        inputs = torch.rand(num_batches, 1, 2)
+        targets = pd.DataFrame(
+            [
+                {"batch": i, "neuron_idx": 1, "layer": 1, "value": 0.5}
+                for i in range(num_batches)
+            ]
+        )
+        return model, inputs, targets
+
+    def _train(self, model, inputs, targets, initial_state, train_fraction=1.0):
+        return train_model(
+            model,
+            inputs,
+            targets,
+            num_epochs=4,
+            wandb=False,
+            train_fraction=train_fraction,
+            train_slopes=True,
+            train_biases=False,
+            train_divisive_strength=False,
+            train_tau=False,
+            checkpoint_steps=0,
+            initial_state=initial_state,
+        )
+
+    def test_called_once_per_epoch_with_the_model(self):
+        model, inputs, targets = self._fixtures()
+        calls = []
+
+        def state_fn(m):
+            calls.append(m)
+            return torch.zeros(2)
+
+        self._train(model, inputs, targets, state_fn)
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all(m is model for m in calls))
+
+    def test_constant_callable_matches_fixed_tensor(self):
+        state = torch.tensor([0.2, 0.1])
+        model_a, inputs, targets = self._fixtures()
+        model_b = MultilayeredNetwork(
+            self.weights,
+            sensory_indices=[0],
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+            device=torch.device("cpu"),
+        )
+        self._train(model_a, inputs, targets, state)
+        self._train(model_b, inputs, targets, lambda m: state)
+        np.testing.assert_allclose(
+            model_a.slope.detach().numpy(), model_b.slope.detach().numpy()
+        )
+
+    def test_callable_reused_for_validation_forward(self):
+        model, inputs, targets = self._fixtures()
+        calls = []
+
+        def state_fn(m):
+            calls.append(m)
+            return torch.zeros(2)
+
+        _, history, *_ = self._train(
+            model, inputs, targets, state_fn, train_fraction=0.5
+        )
+        # once per epoch, shared by the train and validation forwards
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(history["val_loss"]), 4)
+
+
 class TestRescaleSlopeUpdatesInTrainModel(unittest.TestCase):
     """train_model(rescale_slope_updates=True) routes the optimizer step through
     rescale_slope_update_, dividing it by the per-pair slope_update_scale."""
