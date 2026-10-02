@@ -1293,14 +1293,11 @@ class _NetworkBase(nn.Module):
 
         full_input = self._initial_full_input(inputs, initial_state, req_grad)
 
-        def step(x, layer):
+        def step(x, sensory_input):
+            # takes the sensory input rather than reading `inputs`, which is
+            # deleted below before returning
             return self._step(
-                x,
-                weights,
-                self._sensory_input_for_layer(inputs, layer),
-                slopes_full,
-                biases_full,
-                taus_full,
+                x, weights, sensory_input, slopes_full, biases_full, taus_full
             )
 
         def manipulate_layer(x, layer):
@@ -1315,7 +1312,8 @@ class _NetworkBase(nn.Module):
             return x
 
         # ---- Layer 0 ----
-        x = manipulate_layer(step(full_input, 0), 0)
+        x = step(full_input, self._sensory_input_for_layer(inputs, 0))
+        x = manipulate_layer(x, 0)
 
         # ---- Remaining layers ----
         if return_layer_list:
@@ -1340,7 +1338,8 @@ class _NetworkBase(nn.Module):
                     per_layer_acts.extend(result[1:])
             else:
                 for alayer in range(1, self.num_layers):
-                    x = manipulate_layer(step(x, alayer), alayer)
+                    x = step(x, self._sensory_input_for_layer(inputs, alayer))
+                    x = manipulate_layer(x, alayer)
                     per_layer_acts.append(x)  # <-- no .t()
 
             del inputs, x
@@ -1371,7 +1370,8 @@ class _NetworkBase(nn.Module):
         else:
             acts = [x.t().cpu()]
             for alayer in range(1, self.num_layers):
-                x = manipulate_layer(step(x, alayer), alayer)
+                x = step(x, self._sensory_input_for_layer(inputs, alayer))
+                x = manipulate_layer(x, alayer)
                 acts.append(x.t().cpu())
             self.activations = torch.stack(acts, dim=-1)
 
