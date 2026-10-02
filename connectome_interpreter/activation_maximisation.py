@@ -126,7 +126,6 @@ class _NetworkBase(nn.Module):
         divisive_normalization: Optional[Dict[str, List[str]]] = None,
         divisive_strength: Union[float, int, dict] = 1,
         activation_function: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-        activation_gain_fn: Optional[Callable] = None,
         tau: float = 10,
         tau_dict: Optional[dict] = None,
         tau_log_scale: bool = False,
@@ -223,7 +222,6 @@ class _NetworkBase(nn.Module):
         self.idx_to_group = idx_to_group
         self.activations = []
         self.custom_activation_function = activation_function
-        self.custom_activation_gain_fn = activation_gain_fn
         self.default_bias = default_bias
         self.bias_transform = bias_transform
         self.divisive_normalization = divisive_normalization
@@ -760,11 +758,22 @@ class _NetworkBase(nn.Module):
             self.slope.copy_(before_step + step / self.slope_update_scale)
 
     def project_parameter_bounds_(self) -> None:
-        # only pair-mode slope has bounds to project onto
-        if not self.slope_is_pairwise:
-            return
+        """Pull the bounded parameters back onto their bounds after an optimizer
+        step: pair-mode slopes onto [lower, upper], tau onto [1, tau_max] (in
+        log space with tau_log_scale). A parameter sitting exactly on a bound
+        still receives its gradient through the clamp in effective_slope /
+        effective_tau, so it can move back inside later; one left strictly
+        outside the bound would get a zero gradient from then on."""
         with torch.no_grad():
-            self.slope.copy_(self.effective_slope)
+            if self.slope_is_pairwise:
+                self.slope.copy_(self.effective_slope)
+            if self.tau_param is not None:
+                tau_max = getattr(self, "tau_max", None)
+                if getattr(self, "tau_log_scale", False):
+                    log_max = None if tau_max is None else float(np.log(tau_max))
+                    self.tau_param.clamp_(min=0.0, max=log_max)
+                else:
+                    self.tau_param.clamp_(min=1.0, max=tau_max)
 
     def project_incoming_budget_(self) -> Optional[torch.Tensor]:
         """Pull every non-sensory row back under ``incoming_weight_budget``.
@@ -865,8 +874,12 @@ class _NetworkBase(nn.Module):
             return self.tau
         tau_max = getattr(self, "tau_max", None)
         if getattr(self, "tau_log_scale", False):
-            # tau_param holds log(tau); exponentiate back to ms
-            return torch.clamp(torch.exp(self.tau_param), min=1.0, max=tau_max)
+            # tau_param holds log(tau). The bounds are applied in log space so
+            # that a parameter projected onto log(tau_max) sits exactly on the
+            # bound, where clamp still passes the gradient; exp(log(tau_max))
+            # can round above tau_max in float32, which would zero it.
+            log_max = None if tau_max is None else float(np.log(tau_max))
+            return torch.exp(torch.clamp(self.tau_param, min=0.0, max=log_max))
         # tau < 1 is physically meaningless
         return torch.clamp(self.tau_param, min=1.0, max=tau_max)
 
@@ -907,40 +920,6 @@ class _NetworkBase(nn.Module):
                 return _fill(self.tau)
             return self.effective_tau[self.indices]
         raise ValueError(f"Unknown parameter name: {name!r}")
-
-    def activation_gain(self, state: Optional[torch.Tensor] = None):
-        """
-        Local gain of each node at ``state``: the derivative of the activation
-        with respect to the node's input ``effective_weights @ state``. Used by
-        the stability and steady-state functions in ``response_fitting``.
-
-        Uses ``activation_gain_fn`` if given. Raises if the model has a custom
-        ``activation_function`` but no ``activation_gain_fn``, since the gain is
-        then unknown. Otherwise uses the gain of the built-in activation.
-
-        Args:
-            state (torch.Tensor, optional): State of all nodes, shape
-                (n_nodes,). Needed if the gain depends on the state
-                (``MultilayeredNetwork``, custom gains), not for a
-                ``LinearNetwork``. Defaults to None.
-
-        Returns:
-            torch.Tensor: Gain per node, shape (n_nodes,).
-        """
-        if self.custom_activation_gain_fn is not None:
-            return self.custom_activation_gain_fn(self, state)
-        if self.custom_activation_function is not None:
-            raise ValueError(
-                "This model has a custom activation_function but no "
-                "activation_gain_fn, so its local gain is unknown. Pass "
-                "activation_gain_fn=... at construction (the derivative of "
-                "the custom activation) to enable Jacobian-based analysis "
-                "such as the stability penalty."
-            )
-        return self._builtin_activation_gain(state)
-
-    def _builtin_activation_gain(self, state):
-        raise NotImplementedError
 
     def _apply_sensory_input(self, state: torch.Tensor, input_at_layer: torch.Tensor):
         # Each call retains one (num_neurons, batch) clone in the autograd graph.
@@ -1185,28 +1164,18 @@ class LinearNetwork(_NetworkBase):
             strengths. Defaults to 1.
         activation_function (Callable, optional): Custom activation function. If None,
             uses default implementation.
-        activation_gain_fn (Callable, optional): Derivative of a custom
-            ``activation_function`` with respect to each node's input, as
-            ``fn(model, state) -> gain per node``. Needed for the stability and
-            steady-state functions in ``response_fitting`` when using a custom
-            activation. Defaults to None.
         tau (float, optional): Time constant. Higher tau results in slower changes.
             Minimum 1, where the activation at the current time step is solely
             determined by the current input. Defaults to 10.
         tau_max (float, optional): Upper bound on the time constants, in the
             same units as ``tau``. Useful when slow time constants are not
             constrained by the data and would otherwise keep growing during
-            training. Defaults to None (no bound).
+            training. ``train_model`` projects the tau parameters onto
+            ``[1, tau_max]`` after every optimizer step, so a tau that reaches
+            the bound stays on it, with a live gradient, rather than beyond it.
+            Defaults to None (no bound).
         device (torch.device, optional): Device for computation.
     """
-
-    def _builtin_activation_gain(self, state=None):
-        # the gain of a linear activation is its slope
-        if self.divisive_normalization is not None:
-            raise NotImplementedError(
-                "activation_gain does not support divisive_normalization."
-            )
-        return self.node_parameter("slope")
 
     def activation_function(
         self,
@@ -1673,18 +1642,16 @@ class MultilayeredNetwork(_NetworkBase):
             strengths. Defaults to 1.
         activation_function (Callable, optional): Custom activation function. If None,
             uses default implementation.
-        activation_gain_fn (Callable, optional): Derivative of a custom
-            ``activation_function`` with respect to each node's input, as
-            ``fn(model, state) -> gain per node``. Needed for the stability and
-            steady-state functions in ``response_fitting`` when using a custom
-            activation. Defaults to None.
         tau (float, optional): Time constant. Higher tau results in slower changes.
             Minimum 1, where the activation at the current time step is solely
             determined by the current input. Defaults to 10.
         tau_max (float, optional): Upper bound on the time constants, in the
             same units as ``tau``. Useful when slow time constants are not
             constrained by the data and would otherwise keep growing during
-            training. Defaults to None (no bound).
+            training. ``train_model`` projects the tau parameters onto
+            ``[1, tau_max]`` after every optimizer step, so a tau that reaches
+            the bound stays on it, with a live gradient, rather than beyond it.
+            Defaults to None (no bound).
         device (torch.device, optional): Device for computation.
         output_clamp_max (float, optional): Upper clamp applied to non-sensory
             activations after each layer in :meth:`forward`. None disables it
@@ -1717,32 +1684,6 @@ class MultilayeredNetwork(_NetworkBase):
         super().__init__(*args, **kwargs)
         self.output_clamp_max = output_clamp_max
         self.output_rectify = output_rectify
-
-    def _builtin_activation_gain(self, state):
-        """
-        Gain of the built-in activation: with ``u = slope * x + bias``, it is
-        ``(1 - tanh(u)**2) * slope`` where ``u >= threshold`` and 0 elsewhere.
-        ``output_clamp_max`` and ``output_rectify`` are ignored, which can only
-        overestimate the gain.
-        """
-        if self.divisive_normalization is not None:
-            raise NotImplementedError(
-                "activation_gain does not support divisive_normalization."
-            )
-        if state is None:
-            raise ValueError(
-                "The built-in MultilayeredNetwork activation gain is "
-                "state-dependent; pass the operating-point state."
-            )
-        weights = self.effective_weights
-        state = torch.as_tensor(
-            state, dtype=torch.float32, device=weights.device
-        ).reshape(-1, 1)
-        slopes = self.node_parameter("slope")
-        biases = self.node_parameter("bias")
-        u = slopes * torch.sparse.mm(weights, state).squeeze(1) + biases
-        gate = (u >= self.threshold).to(u.dtype)
-        return (1.0 - torch.tanh(u) ** 2) * slopes * gate
 
     def activation_function(
         self,

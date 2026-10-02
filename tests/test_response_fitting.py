@@ -53,18 +53,6 @@ def tanh_relu_activation(self, x, x_previous=None):
     return 1 / taus * torch.tanh(z) + (taus - 1) / taus * x_previous
 
 
-def tanh_relu_gain(self, state):
-    """Matching local gain: ``(1 - tanh(u)^2) * 1[u >= threshold]`` (pair-mode
-    slopes are ones, folded into the effective weights)."""
-    weights = self.effective_weights
-    state = torch.as_tensor(state, dtype=torch.float32, device=weights.device).reshape(
-        -1, 1
-    )
-    u = torch.sparse.mm(weights, state).squeeze(1) + self.node_parameter("bias")
-    gate = (u >= self.threshold).to(u.dtype)
-    return (1.0 - torch.tanh(u) ** 2) * gate
-
-
 def _input_tensor(trace, device=CPU):
     """A 1-D stimulus trace as a ``(1, 1, T)`` model input."""
     return torch.as_tensor(np.asarray(trace, dtype=np.float32), device=device)[
@@ -72,21 +60,29 @@ def _input_tensor(trace, device=CPU):
     ]
 
 
-def _dense_update(net, state=None):
-    """Dense free-block update Jacobian, built independently of
-    ``free_update_matrix`` (which refuses networks above 256 nodes)."""
-    W = net.effective_weights.to_dense()
-    taus = net.node_parameter("tau")
-    gain = net.activation_gain(state)
-    update = torch.diag((taus - 1.0) / taus) + (gain / taus).view(-1, 1) * W
-    free_idx, _ = rf._free_and_sensory_indices(net)
-    return update.index_select(0, free_idx).index_select(1, free_idx)
+def _autograd_jacobian(net, state=None):
+    """Dense free-block Jacobian of ``network_step`` by brute-force autograd
+    over the whole free state: the reference for ``free_update_matrix``, which
+    assembles it from per-node derivatives instead (and refuses networks above
+    256 nodes)."""
+    free_idx, sensory_idx = rf._free_and_sensory_indices(net)
+    if state is None:
+        state = torch.zeros(net.all_weights.shape[0])
+    state = torch.as_tensor(state, dtype=torch.float32)
+    sensory = state[sensory_idx]
+
+    def step_free(free_values):
+        full = state.clone()
+        full[free_idx] = free_values
+        return rf._clamped_step(net, full, sensory)[free_idx]
+
+    return torch.autograd.functional.jacobian(step_free, state[free_idx].clone())
 
 
 def _gershgorin_bound(net, state=None):
     free_idx, _ = rf._free_and_sensory_indices(net)
     return rf._gershgorin_spectral_radius_bound(
-        net, free_idx, net.activation_gain(state)
+        net, free_idx, rf._operating_state(net, state)
     )
 
 
@@ -109,8 +105,10 @@ _MLN_WEIGHTS = np.array(
 )
 
 
-def _mln_pairwise(activation_function=None, activation_gain_fn=None, **kwargs):
+def _mln_pairwise(activation_function=None, **kwargs):
     """3-node MultilayeredNetwork, pair-mode slopes, clamped sensory node 0."""
+    kwargs.setdefault("output_clamp_max", None)
+    kwargs.setdefault("output_rectify", True)
     return cin.MultilayeredNetwork(
         sps.csr_matrix(_MLN_WEIGHTS),
         sensory_indices=[0],
@@ -124,10 +122,7 @@ def _mln_pairwise(activation_function=None, activation_gain_fn=None, **kwargs):
         tau=1.0,
         tau_dict={"S": 1.0, "A": 2.0, "B": 3.0},
         sensory_input_mode="replace",
-        output_clamp_max=None,
-        output_rectify=True,
         activation_function=activation_function,
-        activation_gain_fn=activation_gain_fn,
         device=CPU,
         **kwargs,
     )
@@ -197,7 +192,7 @@ def _big_pairwise_linear_chain(n=300, weight=0.4):
 
 
 # ---------------------------------------------------------------------------
-# node_parameter / activation_gain (library-side additions)
+# node_parameter / step linearisation
 # ---------------------------------------------------------------------------
 
 
@@ -236,40 +231,64 @@ class TestNodeParameter(unittest.TestCase):
             _mln_pairwise().node_parameter("weights")
 
 
-class TestActivationGain(unittest.TestCase):
-    def test_linear_gain_is_slope_and_state_independent(self):
-        model = _stable_linear_net()
-        gain = model.activation_gain()
-        np.testing.assert_allclose(gain.detach().numpy(), [5.0] * 3)
+class TestStepLinearisation(unittest.TestCase):
+    """free_update_matrix assembles the step Jacobian from the per-node
+    autograd derivatives of _step_linearisation; the reference is brute-force
+    autograd over the whole free state (_autograd_jacobian)."""
 
-    def test_custom_activation_without_gain_raises(self):
-        model = _mln_pairwise(activation_function=tanh_relu_activation)
-        with self.assertRaisesRegex(ValueError, "activation_gain_fn"):
-            model.activation_gain(torch.zeros(3))
+    STATE = torch.tensor([0.5, 0.1, 0.2])
 
-    def test_custom_gain_dispatched(self):
-        model = _mln_pairwise(
-            activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
-        )
-        state = torch.tensor([0.5, 0.1, 0.2])
-        expected = tanh_relu_gain(model, state)
+    def test_linear_network_terms_and_state_independence(self):
+        net = _stable_linear_net()  # slope 5, tau 10, no output ops
+        d_u, d_prev, mask = rf._step_linearisation(net, torch.zeros(3))
+        np.testing.assert_allclose(d_u.numpy(), [0.5] * 3)  # slope / tau
+        np.testing.assert_allclose(d_prev.numpy(), [0.9] * 3)  # (tau - 1) / tau
+        np.testing.assert_allclose(mask.numpy(), [1.0] * 3)
+        # so the state may be omitted, and the Jacobian is the brute-force one
         np.testing.assert_allclose(
-            model.activation_gain(state).detach().numpy(), expected.detach().numpy()
-        )
-        # the pair re-implements the default activation, so the dispatched
-        # gain must agree with the built-in analytic Jacobian
-        builtin = _mln_pairwise().activation_gain(state)
-        np.testing.assert_allclose(
-            model.activation_gain(state).detach().numpy(),
-            builtin.detach().numpy(),
+            rf.free_update_matrix(net).numpy(),
+            _autograd_jacobian(net, self.STATE).numpy(),
             rtol=1e-6,
+        )
+
+    def test_builtin_multilayered_matches_autograd(self):
+        for model in (_mln_node_mode(), _mln_pairwise()):
+            np.testing.assert_allclose(
+                rf.free_update_matrix(model, self.STATE).detach().numpy(),
+                _autograd_jacobian(model, self.STATE).numpy(),
+                rtol=1e-5,
+                atol=1e-7,
+            )
+
+    def test_builtin_multilayered_terms_match_analytic_gain(self):
+        model = _mln_node_mode()
+        d_u, d_prev, mask = rf._step_linearisation(model, self.STATE)
+        slopes = np.array([1.0, 1.5, 2.0])
+        biases = np.array([0.0, 0.1, 0.2])
+        taus = np.array([1.0, 2.0, 3.0])
+        u = slopes * (_MLN_WEIGHTS @ self.STATE.numpy()) + biases
+        gain = (1.0 - np.tanh(u) ** 2) * slopes * (u > 0.0)
+        # free nodes only: the sensory node has no input, so its u sits exactly
+        # on the threshold, where autograd's relu'(0) = 0 convention applies
+        np.testing.assert_allclose(d_u.numpy()[1:], (gain / taus)[1:], rtol=1e-5)
+        np.testing.assert_allclose(d_prev.numpy(), (taus - 1.0) / taus, rtol=1e-6)
+        # the free nodes are above the rectification threshold and below the clamp
+        np.testing.assert_allclose(mask.numpy()[1:], [1.0, 1.0])
+
+    def test_custom_activation_matches_builtin(self):
+        # the custom pair re-implements the default activation, so its
+        # autograd linearisation must agree with the built-in one's
+        custom = rf.free_update_matrix(
+            _mln_pairwise(activation_function=tanh_relu_activation), self.STATE
+        )
+        builtin = rf.free_update_matrix(_mln_pairwise(), self.STATE)
+        np.testing.assert_allclose(
+            custom.detach().numpy(), builtin.detach().numpy(), rtol=1e-6
         )
 
     def test_custom_pair_matches_builtin_forward(self):
         inputs = _input_tensor(np.linspace(0.1, 0.5, 6).astype(np.float32), device=CPU)
-        custom = _mln_pairwise(
-            activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
-        )
+        custom = _mln_pairwise(activation_function=tanh_relu_activation)
         default = _mln_pairwise()
         with torch.no_grad():
             np.testing.assert_allclose(
@@ -278,22 +297,57 @@ class TestActivationGain(unittest.TestCase):
                 atol=1e-6,
             )
 
-    def test_builtin_multilayered_gain_matches_analytic(self):
-        model = _mln_node_mode()
-        state = torch.tensor([0.5, 0.1, 0.2])
-        gain = model.activation_gain(state).detach().numpy()
-        weights = _MLN_WEIGHTS
-        slopes = np.array([1.0, 1.5, 2.0])
-        biases = np.array([0.0, 0.1, 0.2])
-        u = slopes * (weights @ state.numpy()) + biases
-        expected = (1.0 - np.tanh(u) ** 2) * slopes * (u >= 0.0)
-        np.testing.assert_allclose(gain, expected, rtol=1e-5)
+    def test_output_clamp_and_rectify_zero_the_rows(self):
+        # a node held at the output clamp, or rectified to zero, does not
+        # respond to its inputs: its row of the Jacobian is zero, as in
+        # brute-force autograd
+        def scaled_act(offset):
+            def act(self, x, x_previous=None):
+                taus = self.effective_tau[self.indices].view(-1, 1)
+                return 1 / taus * (3.0 * x + offset) + (taus - 1) / taus * x_previous
 
-    def test_builtin_multilayered_gain_requires_state(self):
-        with self.assertRaisesRegex(ValueError, "state-dependent"):
-            _mln_node_mode().activation_gain()
+            return act
 
-    def test_divisive_normalization_gain_not_implemented(self):
+        clamped = _mln_pairwise(
+            activation_function=scaled_act(0.1), output_clamp_max=1.0
+        )
+        state = torch.tensor([0.6, 1.5, 0.2])  # node A steps to 1.22 -> clamped
+        update = rf.free_update_matrix(clamped, state).detach()
+        np.testing.assert_allclose(update[0].numpy(), 0.0)
+        self.assertGreater(float(update[1].abs().max()), 0.0)
+        np.testing.assert_allclose(
+            update.numpy(),
+            _autograd_jacobian(clamped, state).numpy(),
+            rtol=1e-5,
+            atol=1e-7,
+        )
+        rectified = _mln_pairwise(activation_function=scaled_act(-2.0))
+        state = torch.tensor([0.1, 0.1, 0.1])  # both free nodes step below zero
+        update = rf.free_update_matrix(rectified, state).detach()
+        np.testing.assert_allclose(update.numpy(), 0.0)
+        np.testing.assert_allclose(
+            update.numpy(), _autograd_jacobian(rectified, state).numpy()
+        )
+
+    def test_requires_state_when_jacobian_depends_on_it(self):
+        with self.assertRaisesRegex(ValueError, "depends on the state"):
+            rf.free_update_matrix(_mln_node_mode())
+        with self.assertRaisesRegex(ValueError, "depends on the state"):
+            rf.spectral_radius(_mln_pairwise(activation_function=tanh_relu_activation))
+
+    def test_coupled_activation_rejected(self):
+        # an activation that mixes nodes has no per-node derivative; the probe
+        # check must catch it rather than linearise it wrongly
+        def coupled(self, x, x_previous=None):
+            taus = self.effective_tau[self.indices].view(-1, 1)
+            centred = x - x.mean(dim=0, keepdim=True)
+            return 1 / taus * torch.tanh(centred) + (taus - 1) / taus * x_previous
+
+        model = _mln_pairwise(activation_function=coupled)
+        with self.assertRaisesRegex(ValueError, "each node separately"):
+            rf.free_update_matrix(model, self.STATE)
+
+    def test_divisive_normalization_not_supported(self):
         # divisive edges must be negative (inhibitory) at construction
         weights = np.array(
             [[0.0, 0.0, 0.0], [0.4, 0.0, 0.2], [0.0, -0.3, 0.0]], dtype=np.float32
@@ -308,14 +362,20 @@ class TestActivationGain(unittest.TestCase):
             device=CPU,
         )
         with self.assertRaisesRegex(NotImplementedError, "divisive_normalization"):
-            model.activation_gain(torch.zeros(3))
+            rf.free_update_matrix(model, torch.zeros(3))
+        with self.assertRaisesRegex(NotImplementedError, "divisive_normalization"):
+            rf.nonlinear_network_steady_state(model, [1.0])
         linear = _linear_net(
             weights,
             idx_to_group={0: "S", 1: "A", 2: "B"},
             divisive_normalization={"A": ["B"]},
         )
         with self.assertRaisesRegex(NotImplementedError, "divisive_normalization"):
-            linear.activation_gain()
+            rf.spectral_radius(linear)
+        # the linear solve would silently use the unmodulated slopes (the
+        # modulation lives in activation_function), so it refuses too
+        with self.assertRaisesRegex(NotImplementedError, "divisive_normalization"):
+            rf.linear_network_steady_state(linear, [1.0])
 
 
 # ---------------------------------------------------------------------------
@@ -357,18 +417,14 @@ class TestDynamics(unittest.TestCase):
             rf.network_step(model, torch.zeros(3), [0.1])
 
     def test_fixed_point_converges_and_is_a_fixed_point(self):
-        model = _mln_pairwise(
-            activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
-        )
+        model = _mln_pairwise(activation_function=tanh_relu_activation)
         state, info = rf.network_fixed_point(model, [0.3], return_info=True, tol=1e-8)
         self.assertTrue(info["converged"])
         next_state = rf.network_step(model, state, [0.3])
         self.assertLessEqual(float(torch.abs(next_state - state).max()), 1e-6)
 
     def test_fixed_point_warm_start_converges_quickly(self):
-        model = _mln_pairwise(
-            activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
-        )
+        model = _mln_pairwise(activation_function=tanh_relu_activation)
         state = rf.network_fixed_point(model, [0.3], tol=1e-10)
         _, info = rf.network_fixed_point(
             model, [0.3], initial_state=state, min_steps=1, tol=1e-8, return_info=True
@@ -424,10 +480,7 @@ class TestNonlinearNetworkSteadyState(unittest.TestCase):
     U = [0.3]
 
     def _model(self):
-        model = _mln_pairwise(
-            activation_function=tanh_relu_activation,
-            activation_gain_fn=tanh_relu_gain,
-        )
+        model = _mln_pairwise(activation_function=tanh_relu_activation)
         # train_model normally switches these on (train_slopes/biases/tau)
         model.slope.requires_grad_(True)
         model.biases.requires_grad_(True)
@@ -512,10 +565,48 @@ class TestNonlinearNetworkSteadyState(unittest.TestCase):
             first.detach().numpy(), second.detach().numpy(), atol=1e-6
         )
 
-    def test_raises_without_gain(self):
-        model = _mln_pairwise(activation_function=tanh_relu_activation)
-        with self.assertRaisesRegex(ValueError, "activation_gain_fn"):
-            rf.nonlinear_network_steady_state(model, self.U)
+    def test_gradient_correct_when_output_clamp_binds(self):
+        # the clamp is part of the step, so the Jacobian behind the implicit
+        # gradient must include it; reference: backprop through a long
+        # unrolled iteration started at the fixed point
+        def gained_act(self, x, x_previous=None):
+            biases = self.node_parameter("bias").view(-1, 1)
+            taus = self.effective_tau[self.indices].view(-1, 1)
+            return 1 / taus * (3.0 * x + biases) + (taus - 1) / taus * x_previous
+
+        weights = np.array(
+            [[0.0, 0.0, 0.0], [0.5, 0.0, 0.1], [0.0, 0.3, 0.0]], dtype=np.float32
+        )
+        model = cin.MultilayeredNetwork(
+            sps.csr_matrix(weights),
+            sensory_indices=[0],
+            num_layers=3,
+            threshold=0.0,
+            idx_to_group={0: "S", 1: "A", 2: "B"},
+            bias_dict={"S": 0.0, "A": 0.1, "B": 0.1},
+            bias_transform="identity",
+            slope_dict={("S", "A"): 1.0, ("B", "A"): 1.0, ("A", "B"): 1.0},
+            tau_dict={"S": 1.0, "A": 3.0, "B": 4.0},
+            activation_function=gained_act,
+            sensory_input_mode="replace",
+            output_rectify=False,
+            output_clamp_max=1.0,
+            device=CPU,
+        )
+        model.slope.requires_grad_(True)
+        model.biases.requires_grad_(True)
+        readout = torch.tensor([0.0, 1.0, -0.5])
+        state = rf.nonlinear_network_steady_state(model, [1.0])
+        self.assertGreaterEqual(float(state[1]), 1.0 - 1e-6)  # A sits at the clamp
+        implicit = torch.autograd.grad(
+            (readout * state).sum(), [model.slope, model.biases]
+        )
+        x = rf.network_fixed_point(model, [1.0], max_steps=5000, tol=1e-9).detach()
+        for _ in range(300):
+            x = rf.network_step(model, x, [1.0])
+        unrolled = torch.autograd.grad((readout * x).sum(), [model.slope, model.biases])
+        for a, b in zip(implicit, unrolled):
+            np.testing.assert_allclose(a.numpy(), b.numpy(), atol=1e-5)
 
     def test_raises_above_dense_limit(self):
         with self.assertRaisesRegex(NotImplementedError, "at most 256 nodes"):
@@ -711,19 +802,17 @@ class TestStability(unittest.TestCase):
         np.testing.assert_allclose(update, full[1:, 1:], rtol=1e-6)
 
     def test_nonlinear_penalty_uses_state_dependent_gain(self):
-        model = _mln_pairwise(
-            activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
-        )
+        model = _mln_pairwise(activation_function=tanh_relu_activation)
         # gain = 1 - tanh(u)^2: saturation lowers the local gain, so a
         # high-activity operating point is more stable than a low one
         low = rf.spectral_radius(model, torch.zeros(3))
         high = rf.spectral_radius(model, torch.tensor([5.0, 5.0, 5.0]))
         self.assertLess(high, low)
 
-    def test_penalty_raises_without_gain(self):
+    def test_penalty_requires_state_for_state_dependent_jacobian(self):
         model = _mln_pairwise(activation_function=tanh_relu_activation)
-        with self.assertRaisesRegex(ValueError, "activation_gain_fn"):
-            rf.stability_penalty(model, torch.zeros(3))
+        with self.assertRaisesRegex(ValueError, "depends on the state"):
+            rf.stability_penalty(model)
 
     def test_sparse_paths_run_on_large_network(self):
         # random sparse net: generic spectrum (the degenerate chain defeats
@@ -746,7 +835,9 @@ class TestStability(unittest.TestCase):
             device=CPU,
         )
         rho = rf.spectral_radius(net)  # ARPACK path (n > _DENSE_NODE_LIMIT)
-        reference = float(torch.abs(torch.linalg.eigvals(_dense_update(net))).max())
+        reference = float(
+            torch.abs(torch.linalg.eigvals(_autograd_jacobian(net))).max()
+        )
         self.assertLess(abs(rho - reference), 1e-4)
         self.assertLess(rho, 1.0)
         self.assertEqual(float(rf.stability_penalty(net)), 0.0)
@@ -766,9 +857,11 @@ class TestStability(unittest.TestCase):
             rf.free_update_matrix(_big_linear_chain())
 
     def test_penalty_is_differentiable(self):
-        # pair-mode gain enters the Jacobian through effective_weights; at the
-        # zero state the built-in tanh gain is 1, so the strong self-edge
-        # (w_eff = 2 * 2 = 4) makes the update radius 0.9 + 4/10 > 1
+        # pair-mode gain enters the Jacobian through effective_weights; at a
+        # small positive state the built-in tanh gain is ~0.85, so the strong
+        # self-edge (w_eff = 2 * 2 = 4) makes the update radius
+        # 0.9 + 0.85 * 4/10 > 1. (Not the zero state: there the input sits
+        # exactly on the threshold, where autograd's relu'(0) = 0 applies.)
         model = cin.MultilayeredNetwork(
             sps.csr_matrix(np.array([[0.0, 0.0], [0.0, 2.0]], dtype=np.float32)),
             sensory_indices=[0],
@@ -780,7 +873,7 @@ class TestStability(unittest.TestCase):
             device=CPU,
         )
         model.slope.requires_grad_(True)
-        state = torch.zeros(2)
+        state = torch.tensor([0.1, 0.1])
         penalty = rf.stability_penalty(model, state)
         self.assertGreater(float(penalty), 0.0)
         penalty.backward()
@@ -1044,17 +1137,48 @@ class TestMakeAffineReadoutLoss(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no rows"):
             rf.make_affine_readout_loss(model, targets, layer_ids=[1, 7])
 
-    def test_stability_optin_without_gain_raises_at_build(self):
-        model = _mln_pairwise(activation_function=tanh_relu_activation)
+    def test_stability_optin_with_divnorm_raises_at_build(self):
+        weights = np.array(
+            [[0.0, 0.0, 0.0], [0.4, 0.0, 0.2], [0.0, -0.3, 0.0]], dtype=np.float32
+        )
+        model = cin.MultilayeredNetwork(
+            sps.csr_matrix(weights),
+            sensory_indices=[0],
+            num_layers=3,
+            idx_to_group={0: "S", 1: "A", 2: "B"},
+            divisive_normalization={"A": ["B"]},
+            sensory_input_mode="replace",
+            device=CPU,
+        )
         _, targets, _ = _toy_targets()
-        with self.assertRaisesRegex(ValueError, "stability_weight=0"):
+        with self.assertRaisesRegex(NotImplementedError, "divisive_normalization"):
             rf.make_affine_readout_loss(
-                model, targets, layer_ids=[1, 2], stability_weight=1.0
+                model,
+                targets,
+                layer_ids=[1, 2],
+                stability_weight=1.0,
+                stability_state_fn=lambda previous: torch.zeros(3),
             )
 
-    def test_stability_weight_zero_skips_gain_requirement(self):
-        # same gain-less model: with the default weight 0 the factory builds
-        # and the loss runs -- backward compatible
+    def test_stability_optin_without_state_fn_raises_at_build(self):
+        # the built-in MultilayeredNetwork gain is state-dependent, so the
+        # linearisation point must be given up front rather than failing on
+        # the first loss call inside train_model
+        _, targets, _ = _toy_targets()
+        with self.assertRaisesRegex(ValueError, "stability_state_fn"):
+            rf.make_affine_readout_loss(
+                _mln_pairwise(), targets, layer_ids=[1, 2], stability_weight=1.0
+            )
+        # a LinearNetwork's gain is state-independent: no state_fn needed
+        loss_fn = rf.make_affine_readout_loss(
+            _stable_linear_net(), targets, layer_ids=[1, 2], stability_weight=1.0
+        )
+        target = _flat_target_vector(targets)
+        self.assertTrue(torch.isfinite(loss_fn(target.clone(), target)))
+
+    def test_stability_weight_zero_skips_linearisation_requirement(self):
+        # a state-dependent model without a state_fn: with the default weight
+        # 0 the factory builds and the loss runs -- backward compatible
         model = _mln_pairwise(activation_function=tanh_relu_activation)
         _, targets, _ = _toy_targets()
         loss_fn = rf.make_affine_readout_loss(model, targets, layer_ids=[1, 2])
@@ -1062,9 +1186,7 @@ class TestMakeAffineReadoutLoss(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss_fn(target.clone(), target)))
 
     def test_stability_term_added_and_warm_started(self):
-        model = _mln_pairwise(
-            activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
-        )
+        model = _mln_pairwise(activation_function=tanh_relu_activation)
         _, targets, _ = _toy_targets()
         calls = []
 
@@ -1107,6 +1229,24 @@ class TestWindowsAndMetrics(unittest.TestCase):
             rf.score_mask_for_transition_windows(10, [8], 4)
         with self.assertRaisesRegex(ValueError, "overlap"):
             rf.score_mask_for_transition_windows(20, [2, 4], 4)
+        # the order of the transitions does not matter
+        unsorted = rf.score_mask_for_transition_windows(20, [10, 2], 4)
+        np.testing.assert_array_equal(unsorted, mask)
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            rf.score_mask_for_transition_windows(20, [4, 2], 4)
+
+    def test_build_raw_window_targets_rejects_overlap(self):
+        traces = {"A": np.arange(20, dtype=np.float32)}
+        # overlapping windows would repeat (neuron_idx, layer) rows, counting
+        # those samples more than once in the loss
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            rf.build_raw_window_targets(traces, [2, 4], 3, node_index={"A": 0})
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            rf.build_raw_window_targets(traces, [4, 2], 3, node_index={"A": 0})
+        # unsorted but non-overlapping is fine, and keeps the given order
+        frame = rf.build_raw_window_targets(traces, [10, 2], 3, node_index={"A": 0})
+        self.assertEqual(frame["layer"].tolist(), [10, 11, 12, 2, 3, 4])
+        self.assertFalse(frame.duplicated(["neuron_idx", "layer"]).any())
 
     def test_build_raw_window_targets_both_conventions(self):
         traces = {"A": np.arange(20, dtype=np.float32)}
@@ -1135,6 +1275,8 @@ class TestWindowsAndMetrics(unittest.TestCase):
         np.testing.assert_allclose(
             rf.r2(y, np.full(3, y.mean())), 0.0, rtol=1e-6, atol=1e-12
         )
+        # undefined for a constant target
+        self.assertTrue(np.isnan(rf.r2(np.ones(3), np.array([1.0, 1.1, 0.9]))))
 
 
 # ---------------------------------------------------------------------------
@@ -1149,9 +1291,7 @@ class TestPersistence(unittest.TestCase):
         self.tmp_path = Path(tmp.name)
 
     def test_save_load_rebuild_round_trip(self):
-        model = _mln_pairwise(
-            activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
-        )
+        model = _mln_pairwise(activation_function=tanh_relu_activation)
         inputs = _input_tensor(np.linspace(0.1, 0.5, 6).astype(np.float32), device=CPU)
         with torch.no_grad():
             expected = model(inputs, checkpoint_steps=0)
@@ -1160,10 +1300,7 @@ class TestPersistence(unittest.TestCase):
         fit = rf.load_fit(path)
         self.assertIn("brightness", fit)
         rebuilt = rf.rebuild_network(
-            fit,
-            activation_function=tanh_relu_activation,
-            activation_gain_fn=tanh_relu_gain,
-            device=CPU,
+            fit, activation_function=tanh_relu_activation, device=CPU
         )
         with torch.no_grad():
             actual = rebuilt(inputs, checkpoint_steps=0)
@@ -1208,9 +1345,7 @@ class TestPersistence(unittest.TestCase):
 
 class TestTables(unittest.TestCase):
     def test_simulate_trace_columns(self):
-        model = _mln_pairwise(
-            activation_function=tanh_relu_activation, activation_gain_fn=tanh_relu_gain
-        )
+        model = _mln_pairwise(activation_function=tanh_relu_activation)
         inputs = _input_tensor(np.full(6, 0.3, dtype=np.float32), device=CPU)
         frame = rf.simulate_trace(
             model, inputs, node_columns={"lum": 0, "A": 1, "AB": [1, 2]}
@@ -1242,11 +1377,7 @@ class TestTables(unittest.TestCase):
 class TestTrainModelIntegration(unittest.TestCase):
     def test_end_to_end_fit_with_loss_factory_and_sensor(self):
         torch.manual_seed(0)
-        model = _mln_pairwise(
-            activation_function=tanh_relu_activation,
-            activation_gain_fn=tanh_relu_gain,
-            num_layers=30,
-        )
+        model = _mln_pairwise(activation_function=tanh_relu_activation, num_layers=30)
         brightness = np.full(30, 0.3, dtype=np.float32)
         brightness[10:] = 0.6
         inputs = _input_tensor(brightness, device=CPU)

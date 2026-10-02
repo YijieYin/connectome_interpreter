@@ -4886,6 +4886,78 @@ class TestTauMax(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self._model(tau_dict={"A": 4.0, "B": 16.0}, tau_max=bad)
 
+    def test_projection_pulls_tau_back_onto_the_bound(self):
+        # an optimizer step that overshoots a bound is projected back onto it,
+        # after which the raw parameter equals the effective tau
+        for log_scale, overshoot in ((False, 36.0), (True, float(np.log(10.0)))):
+            model = self._model(
+                tau_dict={"A": 4.0, "B": 4.0}, tau_log_scale=log_scale, tau_max=8.0
+            )
+            with torch.no_grad():
+                model.tau_param.add_(overshoot)  # both over the bound
+            model.project_parameter_bounds_()
+            projected = torch.exp(model.tau_param) if log_scale else model.tau_param
+            np.testing.assert_allclose(
+                projected.detach().cpu().numpy(), [8.0, 8.0], rtol=1e-5
+            )
+            np.testing.assert_allclose(
+                model.effective_tau.detach().cpu().numpy(), [8.0, 8.0], rtol=1e-5
+            )
+
+    def test_projection_also_enforces_the_lower_bound(self):
+        model = self._model(tau_dict={"A": 4.0, "B": 4.0}, tau_log_scale=True)
+        with torch.no_grad():
+            model.tau_param.sub_(10.0)  # tau -> 2e-4, below the floor of 1
+        model.project_parameter_bounds_()
+        np.testing.assert_allclose(
+            model.tau_param.detach().cpu().numpy(), [0.0, 0.0], atol=1e-7
+        )
+
+    def test_tau_on_the_bound_keeps_its_gradient(self):
+        # on the bound the clamp still passes the gradient (inclusive), so a
+        # pinned tau can move back inside; strictly beyond it the gradient is
+        # zero. Log scale with a large tau_max is the hard case: exp(log(tau_max))
+        # rounds above tau_max in float32, so the bound is applied in log space.
+        inputs = torch.full((1, 1, 2), 0.5, device=self.device)
+        for log_scale in (False, True):
+            for tau_max in (8.0, 8000.0):
+                model = self._model(
+                    tau_dict={"A": 4.0, "B": 4.0},
+                    tau_log_scale=log_scale,
+                    tau_max=tau_max,
+                )
+                with torch.no_grad():
+                    model.tau_param.add_(float(np.log(1e4)) if log_scale else 1e4)
+                model.project_parameter_bounds_()
+                model.tau_param.requires_grad_(True)
+                model(inputs, checkpoint_steps=0)[0, 1, :].sum().backward()
+                self.assertNotEqual(float(model.tau_param.grad[1]), 0.0)
+
+    def test_train_model_keeps_tau_param_inside_the_bounds(self):
+        model = self._model(
+            tau_dict={"A": 4.0, "B": 7.9}, tau_log_scale=True, tau_max=8.0
+        )
+        inputs = torch.full((4, 1, 2), 0.5, device=self.device)
+        targets = pd.DataFrame(
+            [{"batch": i, "neuron_idx": 1, "layer": 1, "value": 0.0} for i in range(4)]
+        )
+        train_model(
+            model,
+            inputs,
+            targets,
+            num_epochs=5,
+            wandb=False,
+            train_fraction=1.0,
+            train_slopes=False,
+            train_biases=False,
+            train_divisive_strength=False,
+            train_tau=True,
+            learning_rate=1.0,
+            checkpoint_steps=0,
+        )
+        self.assertLessEqual(float(model.tau_param.max()), float(np.log(8.0)) + 1e-6)
+        self.assertGreaterEqual(float(model.tau_param.min()), 0.0)
+
 
 class TestCallableInitialState(unittest.TestCase):
     """train_model(initial_state=callable) re-evaluates the t=0 state each
