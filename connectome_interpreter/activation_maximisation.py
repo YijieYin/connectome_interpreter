@@ -768,12 +768,8 @@ class _NetworkBase(nn.Module):
             if self.slope_is_pairwise:
                 self.slope.copy_(self.effective_slope)
             if self.tau_param is not None:
-                tau_max = getattr(self, "tau_max", None)
-                if getattr(self, "tau_log_scale", False):
-                    log_max = None if tau_max is None else float(np.log(tau_max))
-                    self.tau_param.clamp_(min=0.0, max=log_max)
-                else:
-                    self.tau_param.clamp_(min=1.0, max=tau_max)
+                lower, upper = self._tau_param_bounds()
+                self.tau_param.clamp_(min=lower, max=upper)
 
     def project_incoming_budget_(self) -> Optional[torch.Tensor]:
         """Pull every non-sensory row back under ``incoming_weight_budget``.
@@ -872,16 +868,37 @@ class _NetworkBase(nn.Module):
     def effective_tau(self):
         if self.tau_param is None:
             return self.tau
+        lower, upper = self._tau_param_bounds()
+        clamped = torch.clamp(self.tau_param, min=lower, max=upper)
+        if getattr(self, "tau_log_scale", False):
+            # tau_param holds log(tau); exponentiate back to ms
+            return torch.exp(clamped)
+        return clamped  # tau < 1 is physically meaningless
+
+    def _tau_param_bounds(self):
+        """The bounds of ``tau_param``, [1, tau_max] or their logs under
+        tau_log_scale, as tensors in the parameter's dtype. The bounds are
+        applied in log space so that a parameter projected onto log(tau_max)
+        is exactly on the bound: exp(log(tau_max)) can round above tau_max in
+        float32. They are tensors rather than Python floats so that the clamp
+        compares the parameter with its bound in the same precision; compared
+        in double, a float32 parameter on the bound can appear beyond it by
+        rounding and lose its gradient."""
         tau_max = getattr(self, "tau_max", None)
         if getattr(self, "tau_log_scale", False):
-            # tau_param holds log(tau). The bounds are applied in log space so
-            # that a parameter projected onto log(tau_max) sits exactly on the
-            # bound, where clamp still passes the gradient; exp(log(tau_max))
-            # can round above tau_max in float32, which would zero it.
-            log_max = None if tau_max is None else float(np.log(tau_max))
-            return torch.exp(torch.clamp(self.tau_param, min=0.0, max=log_max))
-        # tau < 1 is physically meaningless
-        return torch.clamp(self.tau_param, min=1.0, max=tau_max)
+            lower = 0.0
+            upper = None if tau_max is None else float(np.log(tau_max))
+        else:
+            lower, upper = 1.0, tau_max
+
+        def as_tensor(value):
+            if value is None:
+                return None
+            return torch.tensor(
+                value, dtype=self.tau_param.dtype, device=self.tau_param.device
+            )
+
+        return as_tensor(lower), as_tensor(upper)
 
     def node_parameter(self, name: str):
         """
