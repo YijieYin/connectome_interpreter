@@ -7,6 +7,7 @@ import pandas as pd
 import torch
 from scipy.sparse import csr_matrix
 
+from connectome_interpreter.activation_maximisation import _targets_for_batches
 from connectome_interpreter.activation_maximisation import (
     LinearNetwork,
     MultilayeredNetwork,
@@ -4957,6 +4958,27 @@ class TestTauMax(unittest.TestCase):
         )
         self.assertLessEqual(float(model.tau_param.max()), float(np.log(8.0)) + 1e-6)
         self.assertGreaterEqual(float(model.tau_param.min()), 0.0)
+
+
+class TestTargetsForBatches(unittest.TestCase):
+    """_targets_for_batches gives the order in which train_model flattens the
+    targets, which a custom activation_loss_fn relies on."""
+
+    def test_selects_orders_and_renumbers(self):
+        targets = pd.DataFrame(
+            {
+                "batch": [2, 0, 2, 1, 0],
+                "neuron_idx": [1, 1, 2, 1, 2],
+                "layer": [0, 0, 0, 0, 0],
+                "value": [0.2, 0.0, 0.22, 0.1, 0.02],
+            }
+        )
+        ordered = _targets_for_batches(targets, [2, 0])
+        # batch 2 becomes local batch 0 and comes first, batch 1 is dropped,
+        # and the rows of one batch keep their order
+        self.assertEqual(ordered["batch"].astype(int).tolist(), [0, 0, 1, 1])
+        self.assertEqual(ordered["value"].tolist(), [0.2, 0.22, 0.0, 0.02])
+        self.assertEqual(len(_targets_for_batches(targets, [])), 0)
 
 
 class TestCallableInitialState(unittest.TestCase):

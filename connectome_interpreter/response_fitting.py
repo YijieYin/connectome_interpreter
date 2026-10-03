@@ -13,6 +13,7 @@ from scipy.sparse import linalg as spla
 from .activation_maximisation import (
     LinearNetwork,
     MultilayeredNetwork,
+    _targets_for_batches,
     get_neuron_activation,
 )
 from .utils import pytorch_sparse_to_scipy
@@ -64,6 +65,7 @@ def _post_step(model, y):
     The elementwise operations ``MultilayeredNetwork.forward`` applies to the
     state after the activation: ``output_rectify`` and ``output_clamp_max``
     where set. A ``LinearNetwork`` has neither, so ``y`` is returned as is.
+    Written by Claude Fable 5.1.
     """
     if getattr(model, "output_rectify", False):
         y = torch.relu(y - model.threshold) + model.threshold * (
@@ -103,7 +105,8 @@ def _clamped_step(model, state, sensory_values):
     ``network_step()`` without the ``sensory_input_mode`` check: the sensory
     nodes are clamped to ``sensory_values`` whatever the mode. The solvers use
     this, for which it is exact in ``"replace"`` mode and an approximation in
-    ``"add"`` mode, where the model does not clamp the sensory nodes.
+    ``"add"`` mode, where the model does not clamp the sensory nodes. Written
+    by Claude Fable 5.1.
     """
     device = model.all_weights.device
     state = torch.as_tensor(state, dtype=torch.float32, device=device).reshape(-1, 1)
@@ -186,6 +189,7 @@ def network_fixed_point(
 def _check_linearisable(model):
     """
     Raise if the step Jacobian cannot be built from per-node derivatives.
+    Written by Claude Fable 5.1.
     """
     if model.divisive_normalization is not None:
         raise NotImplementedError(
@@ -199,7 +203,8 @@ def _check_linearisable(model):
 def _linearisation_is_state_independent(model):
     """
     True if the step Jacobian does not depend on the state: a
-    ``LinearNetwork`` with the built-in (affine) activation.
+    ``LinearNetwork`` with the built-in (affine) activation. Written by Claude
+    Fable 5.1.
     """
     return isinstance(model, LinearNetwork) and model.custom_activation_function is None
 
@@ -207,7 +212,7 @@ def _linearisation_is_state_independent(model):
 def _operating_state(model, state):
     """
     The state at which to linearise: ``state``, or zeros if it is None and the
-    Jacobian does not depend on the state.
+    Jacobian does not depend on the state. Written by Claude Fable 5.1.
     """
     if state is not None:
         return state
@@ -225,7 +230,8 @@ def _operating_state(model, state):
 
 def _step_linearisation(model, state, create_graph: bool = False):
     """
-    Per-node derivatives of one network step at ``state``, by autograd.
+    Per-node derivatives of one network step at ``state``, by autograd. Written
+    by Claude Fable 5.1.
 
     With ``u = W x`` (``W`` the effective weights), one step is
     ``z = post(act(u, x))``, where ``act`` is the model's activation (built-in
@@ -322,7 +328,8 @@ def _step_linearisation(model, state, create_graph: bool = False):
 def _sparse_update_matrix(model, free_idx, state):
     """
     ``free_update_matrix()`` as a float64 scipy CSR matrix, built from the
-    sparse weights for large networks (no gradient).
+    sparse weights for large networks (no gradient). Written by Claude Fable
+    5.1.
     """
     d_u, d_prev, mask = (
         t.detach().cpu().numpy().astype(np.float64)
@@ -345,7 +352,8 @@ class _FreeBlockAdjoint(torch.autograd.Function):
     ``g`` on the free nodes by ``solve_T(g) = (I - M)^-T g``, where ``M`` is the
     Jacobian ``df/dx`` on the free nodes at ``x*``. Applied to one
     differentiable evaluation of ``f`` at the (detached) ``x*``, this gives the
-    gradient of ``x*`` with respect to the model parameters.
+    gradient of ``x*`` with respect to the model parameters. Written by Claude
+    Opus 5.5.
     """
 
     @staticmethod
@@ -377,7 +385,7 @@ def _steady_state(
     gives ``x*``: dense (torch) up to ``_DENSE_NODE_LIMIT`` nodes, above that
     a sparse LU (scipy ``splu``) whose factorisation the backward pass
     reuses. For a nonlinear network ``x*`` comes from Newton's method (dense
-    only).
+    only). Written by Claude Fable 5.1.
     """
     _check_linearisable(model)
     free_idx, sensory_idx = _free_and_sensory_indices(model)
@@ -482,7 +490,7 @@ def _newton_fixed_point_dense(
     Solve for the fixed point of ``network_step()`` with Newton's method
     (``scipy.optimize.root``, method ``"hybr"``), using the Jacobian from
     ``free_update_matrix()``. Raises if the result is not a fixed point to
-    within ``fp_tol``.
+    within ``fp_tol``. Written by Claude Opus 5.5.
     """
     device = model.all_weights.device
     n_nodes = model.all_weights.shape[0]
@@ -1056,11 +1064,9 @@ def make_affine_readout_loss(
                 "network_fixed_point(model, u0, initial_state=previous)."
             )
 
-    # train_model flattens the targets in this order; the masks pick out each
-    # channel's entries
-    order = targets[targets["batch"].isin([0])].copy()
-    order.loc[:, ["batch"]] = pd.Categorical(order["batch"], categories=[0])
-    order = order.sort_values(by="batch")
+    # the masks pick out each channel's entries in the order train_model
+    # flattens the targets
+    order = _targets_for_batches(targets, [0])
     flat_neuron_idx = order["neuron_idx"].to_numpy().astype(int)
     masks = [torch.as_tensor(flat_neuron_idx == lid) for lid in layer_ids]
     for lid, mask in zip(layer_ids, masks):
@@ -1138,7 +1144,7 @@ def _window_starts(transition_idx, window_steps: int):
     """
     Check a set of windows: ``window_steps >= 1`` and no two windows overlap.
     The overlap check sorts the starts, so ``transition_idx`` can be in any
-    order.
+    order. Written by Claude Fable 5.1.
 
     Returns:
         tuple[np.ndarray, int]: ``(starts, n_steps)``, with ``starts`` in the

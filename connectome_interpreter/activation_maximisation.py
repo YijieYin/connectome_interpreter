@@ -763,7 +763,8 @@ class _NetworkBase(nn.Module):
         log space with tau_log_scale). A parameter sitting exactly on a bound
         still receives its gradient through the clamp in effective_slope /
         effective_tau, so it can move back inside later; one left strictly
-        outside the bound would get a zero gradient from then on."""
+        outside the bound would get a zero gradient from then on. The tau
+        projection was written by Claude Fable 5.1."""
         with torch.no_grad():
             if self.slope_is_pairwise:
                 self.slope.copy_(self.effective_slope)
@@ -866,6 +867,10 @@ class _NetworkBase(nn.Module):
 
     @property
     def effective_tau(self):
+        """The time constants in use: ``tau_param`` bounded to [1, tau_max],
+        exponentiated first under tau_log_scale. The ``tau_max`` bound was
+        written by Claude Fable 5, its handling in the parameter's dtype by
+        Claude Fable 5.1."""
         if self.tau_param is None:
             return self.tau
         lower, upper = self._tau_param_bounds()
@@ -883,7 +888,7 @@ class _NetworkBase(nn.Module):
         float32. They are tensors rather than Python floats so that the clamp
         compares the parameter with its bound in the same precision; compared
         in double, a float32 parameter on the bound can appear beyond it by
-        rounding and lose its gradient."""
+        rounding and lose its gradient. Written by Claude Fable 5.1."""
         tau_max = getattr(self, "tau_max", None)
         if getattr(self, "tau_log_scale", False):
             lower = 0.0
@@ -904,7 +909,8 @@ class _NetworkBase(nn.Module):
         """
         Per-node values of a parameter that is stored per group, as used in the
         forward pass. If the parameter is not set, the model's default
-        (``tanh_steepness``, ``default_bias`` or ``tau``) is used.
+        (``tanh_steepness``, ``default_bias`` or ``tau``) is used. Written by
+        Claude Fable 5.
 
         Args:
             name (str): ``"slope"``, ``"bias"`` or ``"tau"``.
@@ -2151,6 +2157,28 @@ def training_mode(
         )
 
 
+def _targets_for_batches(targets: pd.DataFrame, batch_indices) -> pd.DataFrame:
+    """
+    The rows of ``targets`` whose ``batch`` is in ``batch_indices``, ordered by
+    the position of their batch in ``batch_indices`` (rows of one batch keep
+    their order) and with ``batch`` renumbered to that position. This is the
+    order in which ``train_model`` flattens the targets, and so the order of
+    the ``pred`` and ``target`` vectors a custom ``activation_loss_fn``
+    receives. Written by Claude Fable 5.1.
+
+    Args:
+        targets (pd.DataFrame): Targets with a ``batch`` column.
+        batch_indices (sequence of int): The batches to keep, in order.
+
+    Returns:
+        pd.DataFrame: The selected rows, with ``batch`` renumbered from 0.
+    """
+    position = {b: i for i, b in enumerate(batch_indices)}
+    selected = targets[targets["batch"].isin(list(position))].copy()
+    selected["batch"] = selected["batch"].map(position)
+    return selected.sort_values(by="batch", kind="stable")
+
+
 def train_model(
     model: MultilayeredNetwork,
     inputs: torch.Tensor,
@@ -2220,7 +2248,8 @@ def train_model(
             every epoch, e.g. to start from the current model's steady state
             (see ``response_fitting.make_initial_state_fn``). Its result is
             split in the same way and used as returned, so detach it inside the
-            callable if it should not carry gradients.
+            callable if it should not carry gradients. The callable form was
+            written by Claude Opus 5.5.
         target_node_groups (dict, optional): Fit group (e.g. cell-type) averages
             instead of individual nodes. Maps ``group_id -> sequence of member node
             indices``. When provided, the ``targets`` DataFrame's ``neuron_idx``
@@ -2288,23 +2317,8 @@ def train_model(
         train_inputs = inputs[train_indices]
         val_inputs = inputs[val_indices]
 
-        train_targets = targets[targets["batch"].isin(train_indices)].copy()
-        train_targets.loc[:, ["batch"]] = pd.Categorical(
-            train_targets["batch"], categories=list(train_indices)
-        )
-        train_targets = train_targets.sort_values(by="batch")
-        # change to local batch indices
-        batch2local_batch = {b: i for i, b in enumerate(train_indices)}
-        train_targets.loc[:, ["batch"]] = train_targets.batch.map(batch2local_batch)
-
-        val_targets = targets[targets["batch"].isin(val_indices)].copy()
-        val_targets.loc[:, ["batch"]] = pd.Categorical(
-            val_targets["batch"], categories=list(val_indices)
-        )
-        val_targets = val_targets.sort_values(by="batch")
-        # change to local batch indices
-        batch2local_batch = {b: i for i, b in enumerate(val_indices)}
-        val_targets.loc[:, ["batch"]] = val_targets.batch.map(batch2local_batch)
+        train_targets = _targets_for_batches(targets, train_indices)
+        val_targets = _targets_for_batches(targets, val_indices)
 
         return (
             train_inputs,
