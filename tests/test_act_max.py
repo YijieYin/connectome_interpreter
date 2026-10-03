@@ -4960,6 +4960,29 @@ class TestTauMax(unittest.TestCase):
         self.assertGreaterEqual(float(model.tau_param.min()), 0.0)
 
 
+class TestSensoryMaskAndFreeIndices(unittest.TestCase):
+    """sensory_mask / free_indices split the nodes the way forward treats
+    them: sensory rows are written by the input, free rows by the dynamics."""
+
+    def test_split_matches_sensory_indices(self):
+        weights = csr_matrix(np.zeros((5, 5), dtype=np.float32))
+        model = LinearNetwork(
+            weights, sensory_indices=[3, 0], num_layers=2, device=torch.device("cpu")
+        )
+        np.testing.assert_array_equal(
+            model.sensory_mask.numpy(), [True, False, False, True, False]
+        )
+        self.assertEqual(model.free_indices.tolist(), [1, 2, 4])
+
+    def test_without_sensory_nodes_every_node_is_free(self):
+        weights = csr_matrix(np.zeros((3, 3), dtype=np.float32))
+        model = LinearNetwork(
+            weights, sensory_indices=[], num_layers=2, device=torch.device("cpu")
+        )
+        self.assertFalse(bool(model.sensory_mask.any()))
+        self.assertEqual(model.free_indices.tolist(), [0, 1, 2])
+
+
 class TestTargetsForBatches(unittest.TestCase):
     """_targets_for_batches gives the order in which train_model flattens the
     targets, which a custom activation_loss_fn relies on."""
