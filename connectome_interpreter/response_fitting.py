@@ -13,7 +13,6 @@ from scipy.sparse import linalg as spla
 from .activation_maximisation import (
     LinearNetwork,
     MultilayeredNetwork,
-    _targets_for_batches,
     get_neuron_activation,
 )
 from .utils import pytorch_sparse_to_scipy
@@ -33,11 +32,18 @@ _MODEL_KEY_PREFIX = "model_"
 
 def _free_and_sensory_indices(model):
     """
-    ``(model.free_indices, sensory indices)``, both on the model's device.
+    Split the nodes into free (non-sensory) and sensory indices.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: ``(free_idx, sensory_idx)``.
     """
+    n_nodes = model.all_weights.shape[0]
     device = model.all_weights.device
-    sensory_idx = model.sensory_indices.detach().to(device=device, dtype=torch.long)
-    return model.free_indices, sensory_idx
+    sensory_idx = model.sensory_indices.detach().long().to(device)
+    sensory_mask = torch.zeros(n_nodes, dtype=torch.bool, device=device)
+    sensory_mask[sensory_idx] = True
+    free_idx = torch.arange(n_nodes, device=device)[~sensory_mask]
+    return free_idx, sensory_idx
 
 
 def _as_sensory_values(model, sensory_values):
@@ -51,6 +57,21 @@ def _as_sensory_values(model, sensory_values):
     if sensory_values.numel() != model.sensory_indices.numel():
         raise ValueError("sensory_values length must match model.sensory_indices.")
     return sensory_values
+
+
+def _post_step(model, y):
+    """
+    The elementwise operations ``MultilayeredNetwork.forward`` applies to the
+    state after the activation: ``output_rectify`` and ``output_clamp_max``
+    where set. A ``LinearNetwork`` has neither, so ``y`` is returned as is.
+    """
+    if getattr(model, "output_rectify", False):
+        y = torch.relu(y - model.threshold) + model.threshold * (
+            y >= model.threshold
+        ).to(y.dtype)
+    if getattr(model, "output_clamp_max", None) is not None:
+        y = torch.clamp(y, max=model.output_clamp_max)
+    return y
 
 
 def network_step(model, state, sensory_values):
@@ -88,11 +109,12 @@ def _clamped_step(model, state, sensory_values):
     state = torch.as_tensor(state, dtype=torch.float32, device=device).reshape(-1, 1)
     sensory_values = _as_sensory_values(model, sensory_values).reshape(-1, 1)
 
-    x = model._activation_step(state, model.effective_weights)
-    # forward (replace mode) writes the sensory input before and after the
+    x = torch.sparse.mm(model.effective_weights, state)
+    x = model.activation_function(x, x_previous=state)
+    # forward (replace mode) clamps the sensory nodes before and after the
     # output ops; the ops are elementwise, so clamping once at the end is the
     # same for the free nodes
-    x = model._output_ops(x).clone()
+    x = _post_step(model, x).clone()
     x[model.sensory_indices.to(device), :] = sensory_values
     return x.reshape(-1)
 
@@ -208,7 +230,7 @@ def _step_linearisation(model, state, create_graph: bool = False):
     With ``u = W x`` (``W`` the effective weights), one step is
     ``z = post(act(u, x))``, where ``act`` is the model's activation (built-in
     or custom, including the leaky integration) and ``post`` its output
-    rectification / clamp (``model._output_ops``). Both act on each node
+    rectification / clamp (``_post_step()``). Both act on each node
     separately, so the Jacobian of the step factorises into per-node terms::
 
         dz_i / dx_j = mask_i * (d_prev_i * delta_ij + d_u_i * W_ij)
@@ -289,7 +311,7 @@ def _step_linearisation(model, state, create_graph: bool = False):
         # derivative of the output rectification / clamp at this operating
         # point: 0 where it is active, else 1
         y_leaf = y.detach().requires_grad_(True)
-        z = model._output_ops(y_leaf)
+        z = _post_step(model, y_leaf)
         if z is y_leaf:
             mask = torch.ones_like(y_leaf)
         else:
@@ -1034,9 +1056,11 @@ def make_affine_readout_loss(
                 "network_fixed_point(model, u0, initial_state=previous)."
             )
 
-    # the masks pick out each channel's entries in the order train_model
-    # flattens the targets
-    order = _targets_for_batches(targets, [0])
+    # train_model flattens the targets in this order; the masks pick out each
+    # channel's entries
+    order = targets[targets["batch"].isin([0])].copy()
+    order.loc[:, ["batch"]] = pd.Categorical(order["batch"], categories=[0])
+    order = order.sort_values(by="batch")
     flat_neuron_idx = order["neuron_idx"].to_numpy().astype(int)
     masks = [torch.as_tensor(flat_neuron_idx == lid) for lid in layer_ids]
     for lid, mask in zip(layer_ids, masks):

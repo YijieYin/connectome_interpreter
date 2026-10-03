@@ -416,6 +416,29 @@ class TestDynamics(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "replace"):
             rf.network_step(model, torch.zeros(3), [0.1])
 
+    def test_network_step_matches_one_forward_layer(self):
+        # network_step re-implements one layer of forward (matmul, activation,
+        # output ops, clamped sensory nodes): pin it to the model's own forward
+        # for both classes, with a binding output clamp on the nonlinear one
+        models = [
+            _mln_pairwise(output_rectify=True, output_clamp_max=0.3),
+            _linear_net(
+                [[0.0, 0.0, 0.0], [0.10, 0.0, 0.20], [0.0, 0.15, 0.0]],
+                sensory_input_mode="replace",
+            ),
+        ]
+        for model in models:
+            state = torch.tensor([0.25, 0.6, 0.9])  # sensory node already at 0.25
+            inputs = torch.full((1, 1, model.num_layers), 0.25)
+            with torch.no_grad():
+                out = model(inputs, checkpoint_steps=0, initial_state=state)
+            np.testing.assert_allclose(
+                rf.network_step(model, state, [0.25]).numpy(),
+                out[0, :, 0].numpy(),
+                rtol=1e-6,
+                atol=1e-7,
+            )
+
     def test_fixed_point_converges_and_is_a_fixed_point(self):
         model = _mln_pairwise(activation_function=tanh_relu_activation)
         state, info = rf.network_fixed_point(model, [0.3], return_info=True, tol=1e-8)
