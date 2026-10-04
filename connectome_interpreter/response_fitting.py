@@ -352,8 +352,8 @@ class _FreeBlockAdjoint(torch.autograd.Function):
     ``g`` on the free nodes by ``solve_T(g) = (I - M)^-T g``, where ``M`` is the
     Jacobian ``df/dx`` on the free nodes at ``x*``. Applied to one
     differentiable evaluation of ``f`` at the (detached) ``x*``, this gives the
-    gradient of ``x*`` with respect to the model parameters. Written by Claude
-    Opus 5.5.
+    gradient of ``x*`` with respect to the model parameters and the sensory
+    values. Written by Claude Opus 5.5.
     """
 
     @staticmethod
@@ -442,15 +442,21 @@ def _steady_state(
                 g = g.detach().cpu().numpy().astype(np.float64)
                 return torch.as_tensor(lu.solve(g, trans="T"))
 
-    # x_star has no graph, so the parameters are the only gradient path
-    stepped = _clamped_step(model, x_star, sensory_values)
+    # x_star has no graph. The sensory entries go back in with the graph of
+    # sensory_values, so that the step, and with it the implicit gradient,
+    # depends on the sensory values as well as on the parameters. The
+    # sensory-value gradient was added by Claude Opus 5.5.
+    x_in = x_star.clone()
+    x_in[sensory_idx] = sensory_values
+    stepped = _clamped_step(model, x_in, sensory_values)
     return _FreeBlockAdjoint.apply(stepped, solve_T, free_idx)
 
 
 def linear_network_steady_state(model, sensory_values):
     """
     Steady state of a linear network with the sensory nodes clamped, from one
-    linear solve. Differentiable with respect to the model parameters.
+    linear solve. Differentiable with respect to the model parameters and to
+    ``sensory_values`` (when given as a tensor that requires grad).
 
     The fixed-point equation of a linear network is affine in the free nodes,
     so one solve with the step Jacobian (``free_update_matrix()``) gives the
@@ -542,7 +548,8 @@ def nonlinear_network_steady_state(
 ):
     """
     Steady state of a nonlinear network with the sensory nodes clamped.
-    Differentiable with respect to the model parameters.
+    Differentiable with respect to the model parameters and to
+    ``sensory_values`` (when given as a tensor that requires grad).
 
     The fixed point of ``network_step()`` is found with Newton's method,
     without gradients, using the Jacobian from ``free_update_matrix()``. The
@@ -746,17 +753,27 @@ def stability_penalty(model, state=None, margin: float = 1e-4):
         stricter than the exact one. Not available with
         ``divisive_normalization``.
     """
+    rho = _penalty_spectral_radius(model, state)
+    if rho is None:
+        return torch.zeros((), dtype=torch.float32, device=model.all_weights.device)
+    return torch.relu(rho - (1.0 - float(margin))) ** 2
+
+
+def _penalty_spectral_radius(model, state):
+    """
+    The differentiable ``rho`` behind ``stability_penalty()``: the exact
+    spectral radius of ``free_update_matrix()`` up to ``_DENSE_NODE_LIMIT``
+    nodes, the Gershgorin upper bound above. None if there are no free nodes.
+    Written by Claude Opus 5.5.
+    """
     free_idx, _ = _free_and_sensory_indices(model)
     if free_idx.numel() == 0:
-        return torch.zeros((), dtype=torch.float32, device=model.all_weights.device)
+        return None
     state = _operating_state(model, state)
-
     if model.all_weights.shape[0] > _DENSE_NODE_LIMIT:
-        rho = _gershgorin_spectral_radius_bound(model, free_idx, state)
-    else:
-        update = free_update_matrix(model, state)
-        rho = torch.abs(torch.linalg.eigvals(update)).max()
-    return torch.relu(rho - (1.0 - float(margin))) ** 2
+        return _gershgorin_spectral_radius_bound(model, free_idx, state)
+    update = free_update_matrix(model, state)
+    return torch.abs(torch.linalg.eigvals(update)).max()
 
 
 def spectral_radius(model, state=None):
@@ -1040,7 +1057,16 @@ def make_affine_readout_loss(
             amplitude count as much as large ones. Defaults to False.
 
     Returns:
-        callable: ``loss_fn(pred, target)`` returning a scalar tensor.
+        callable: ``loss_fn(pred, target)`` returning a scalar tensor. Each
+        call made with gradients enabled (the training call of each
+        ``train_model`` epoch) appends the loss components to the lists in
+        ``loss_fn.components``: ``"fit_loss"`` (the channel MSE term),
+        ``"readout_scale_penalty"`` and ``"latent_std_penalty"`` (unweighted),
+        and, with ``stability_weight > 0``, ``"stability_rho"`` (the spectral
+        radius the penalty sees; the Gershgorin bound above 256 nodes) and
+        ``"stability_penalty"`` (unweighted). Calls without gradients, such as
+        ``train_model``'s validation pass, are not recorded. The recording was
+        added by Claude Opus 5.5.
     """
     layer_ids = [int(i) for i in layer_ids]
     batches = sorted(set(targets["batch"].tolist()))
@@ -1084,6 +1110,14 @@ def make_affine_readout_loss(
             moments.append((float(t.mean()), float(t.std())))
     order_checked = {"done": moments is None}
     warm = {"state": None}
+    components = {
+        "fit_loss": [],
+        "readout_scale_penalty": [],
+        "latent_std_penalty": [],
+    }
+    if stability_weight > 0:
+        components["stability_rho"] = []
+        components["stability_penalty"] = []
 
     def loss_fn(pred, target):
         channel_masks = [m.to(pred.device) for m in masks]
@@ -1117,12 +1151,18 @@ def make_affine_readout_loss(
             loss = (weights * torch.stack(mses)).mean()
         else:
             loss = torch.stack(mses).mean()
+        record = torch.is_grad_enabled()
+        if record:
+            components["fit_loss"].append(float(loss.detach()))
         scale_penalty, std_penalty = _affine_readout_penalties(
             torch.stack(scales),
             torch.stack(latent_stds),
             scale_soft_limit=scale_soft_limit,
             latent_std_floor=latent_std_floor,
         )
+        if record:
+            components["readout_scale_penalty"].append(float(scale_penalty.detach()))
+            components["latent_std_penalty"].append(float(std_penalty.detach()))
         loss = (
             loss
             + scale_reg_weight * scale_penalty.to(loss.device)
@@ -1133,9 +1173,20 @@ def make_affine_readout_loss(
             if stability_state_fn is not None:
                 state = stability_state_fn(warm["state"])
                 warm["state"] = state
-            penalty = stability_penalty(model, state, margin=stability_margin)
+            rho = _penalty_spectral_radius(model, state)
+            if rho is None:
+                penalty = torch.zeros((), dtype=loss.dtype, device=loss.device)
+            else:
+                penalty = torch.relu(rho - (1.0 - float(stability_margin))) ** 2
+            if record:
+                components["stability_rho"].append(
+                    float("nan") if rho is None else float(rho.detach())
+                )
+                components["stability_penalty"].append(float(penalty.detach()))
             loss = loss.to(penalty.device) + stability_weight * penalty
         return loss
+
+    loss_fn.components = components
 
     return loss_fn
 

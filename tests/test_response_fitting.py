@@ -497,6 +497,22 @@ class TestMakeInitialStateFn(unittest.TestCase):
         self.assertTrue(torch.equal(second, torch.full((3,), 2.0)))
 
 
+def _assert_sensory_gradient_matches_fd(test, solver, model, loss, u0=0.3, h=1e-3):
+    """The implicit gradient of a steady state with respect to the clamped
+    sensory value must match central finite differences. Written by Claude
+    Opus 5.5."""
+    u = torch.tensor([u0], requires_grad=True)
+    (analytic,) = torch.autograd.grad(loss(solver(model, u)), [u])
+    with torch.no_grad():
+        plus = float(loss(solver(model, torch.tensor([u0 + h]))))
+        minus = float(loss(solver(model, torch.tensor([u0 - h]))))
+    fd = (plus - minus) / (2 * h)
+    # the sensory node alone contributes loss-weight * 1; a gradient that
+    # stopped there would miss the free nodes' dependence on the input
+    test.assertGreater(abs(fd - 0.7), 1e-2)
+    np.testing.assert_allclose(float(analytic[0]), fd, rtol=1e-2, atol=1e-4)
+
+
 class TestNonlinearNetworkSteadyState(unittest.TestCase):
     """The implicit-differentiation equilibrium solver (dense backend)."""
 
@@ -552,6 +568,11 @@ class TestNonlinearNetworkSteadyState(unittest.TestCase):
                         param.data[i] -= sign * h
                 fd = (values[0] - values[1]) / (2 * h)
                 np.testing.assert_allclose(float(analytic[i]), fd, rtol=5e-2, atol=2e-3)
+
+    def test_sensory_value_gradient_matches_finite_differences(self):
+        _assert_sensory_gradient_matches_fd(
+            self, rf.nonlinear_network_steady_state, self._model(), self._loss
+        )
 
     def test_tau_gradient_vanishes(self):
         # The equilibrium condition has no tau (the leak cancels at a fixed
@@ -742,6 +763,16 @@ class TestLinearNetworkSteadyStateSparse(unittest.TestCase):
                         param.data[i] -= sign * h
                 fd = (values[0] - values[1]) / (2 * h)
                 np.testing.assert_allclose(float(analytic[i]), fd, rtol=5e-2, atol=2e-3)
+
+    def test_sensory_value_gradient_matches_finite_differences(self):
+        # dense path, then the sparse path on the same model
+        _assert_sensory_gradient_matches_fd(
+            self, rf.linear_network_steady_state, self._model(), self._loss
+        )
+        self._force_sparse_path()
+        _assert_sensory_gradient_matches_fd(
+            self, rf.linear_network_steady_state, self._model(), self._loss
+        )
 
     def test_tau_gradient_is_none(self):
         # The linear equilibrium does not involve tau, so the sparse path (like
@@ -1237,6 +1268,58 @@ class TestMakeAffineReadoutLoss(unittest.TestCase):
         loss_fn(pred, target)
         self.assertTrue(calls[0] is None and calls[1] is not None)
 
+    def test_components_recorded_on_training_calls_only(self):
+        model = _mln_pairwise(activation_function=tanh_relu_activation)
+        _, targets, _ = _toy_targets()
+        loss_fn = rf.make_affine_readout_loss(
+            model,
+            targets,
+            layer_ids=[1, 2],
+            stability_weight=3.0,
+            stability_state_fn=lambda previous: rf.network_fixed_point(
+                model, [0.3], initial_state=previous
+            ),
+        )
+        target = _flat_target_vector(targets)
+        pred = 2.0 * target + 3.0
+        total = float(loss_fn(pred, target))
+        with torch.no_grad():  # e.g. train_model's validation pass
+            loss_fn(pred, target)
+        comps = loss_fn.components
+        self.assertEqual(
+            set(comps),
+            {"fit_loss", "readout_scale_penalty", "latent_std_penalty",
+             "stability_rho", "stability_penalty"},
+        )
+        for key, values in comps.items():
+            self.assertEqual(len(values), 1, key)
+        state = rf.network_fixed_point(model, [0.3])
+        self.assertAlmostEqual(
+            comps["stability_rho"][0], rf.spectral_radius(model, state), places=5
+        )
+        self.assertAlmostEqual(
+            comps["stability_penalty"][0],
+            float(rf.stability_penalty(model, state)),
+            places=8,
+        )
+        # the recorded parts add up to the returned loss (default weights)
+        recombined = (
+            comps["fit_loss"][0]
+            + 1e-2 * comps["readout_scale_penalty"][0]
+            + 30.0 * comps["latent_std_penalty"][0]
+            + 3.0 * comps["stability_penalty"][0]
+        )
+        self.assertAlmostEqual(recombined, total, places=6)
+
+    def test_no_stability_components_without_stability_weight(self):
+        model = _mln_pairwise()
+        _, targets, _ = _toy_targets()
+        loss_fn = rf.make_affine_readout_loss(model, targets, layer_ids=[1, 2])
+        target = _flat_target_vector(targets)
+        loss_fn(target.clone(), target)
+        self.assertNotIn("stability_rho", loss_fn.components)
+        self.assertEqual(len(loss_fn.components["fit_loss"]), 1)
+
 
 # ---------------------------------------------------------------------------
 # Windows & metrics
@@ -1442,3 +1525,6 @@ class TestTrainModelIntegration(unittest.TestCase):
         self.assertEqual(len(history["loss"]), 2)
         for value in history["loss"]:
             self.assertTrue(np.isfinite(value))
+        # one recorded entry per epoch for every component
+        for key, values in loss_fn.components.items():
+            self.assertEqual(len(values), 2, key)
