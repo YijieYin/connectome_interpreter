@@ -79,13 +79,6 @@ def _autograd_jacobian(net, state=None):
     return torch.autograd.functional.jacobian(step_free, state[free_idx].clone())
 
 
-def _gershgorin_bound(net, state=None):
-    free_idx, _ = rf._free_and_sensory_indices(net)
-    return rf._gershgorin_spectral_radius_bound(
-        net, free_idx, rf._operating_state(net, state)
-    )
-
-
 def _linear_net(weights, **kwargs):
     return cin.LinearNetwork(
         all_weights=sps.csr_matrix(np.asarray(weights, dtype=np.float32)),
@@ -545,6 +538,33 @@ class TestNonlinearNetworkSteadyState(unittest.TestCase):
         )
         np.testing.assert_allclose(state.detach().numpy(), iterative.numpy(), atol=1e-5)
 
+    def test_stalled_newton_falls_back_to_iteration(self):
+        # Newton can stall at a kink of the activation; simulate that by
+        # letting the first root() call return its start unchanged. The solver
+        # must iterate towards the fixed point and retry, not raise. Written by
+        # Claude Opus 5.5.
+        model = self._model()
+        real_root = rf.optimize.root
+        calls = []
+
+        def stalling_root(fun, x0, **kwargs):
+            calls.append(np.array(x0))
+            if len(calls) == 1:
+                return mock.Mock(x=np.array(x0), success=False, message="stalled")
+            return real_root(fun, x0, **kwargs)
+
+        with mock.patch.object(rf.optimize, "root", side_effect=stalling_root):
+            state = rf.nonlinear_network_steady_state(model, self.U)
+        self.assertEqual(len(calls), 2)
+        # the retry starts from the iterated state, not from the stalled one
+        self.assertGreater(np.abs(calls[1] - calls[0]).max(), 1e-3)
+        moved = (
+            (rf.network_step(model, state.detach(), self.U) - state.detach())
+            .abs()
+            .max()
+        )
+        self.assertLessEqual(float(moved), 1e-5)
+
     def test_gradient_matches_finite_differences(self):
         model = self._model()
         grads = torch.autograd.grad(
@@ -833,17 +853,15 @@ class TestLinearNetworkSteadyStateSparse(unittest.TestCase):
 
 
 class TestStability(unittest.TestCase):
-    def test_spectral_radius_and_penalty_agree_for_stable_network(self):
+    def test_spectral_radius_below_one_for_stable_network(self):
         net = _stable_linear_net()
         rho = rf.spectral_radius(net)
         self.assertTrue(np.isfinite(rho) and rho < 1.0)
-        self.assertEqual(float(rf.stability_penalty(net, margin=1e-4)), 0.0)
 
-    def test_penalty_positive_for_unstable_network(self):
+    def test_spectral_radius_above_one_for_unstable_network(self):
         # a strong self-excitatory free node pushes the update radius above 1
         net = _linear_net([[0.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 0.0]])
         self.assertGreater(rf.spectral_radius(net), 1.0)
-        self.assertGreater(float(rf.stability_penalty(net)), 0.0)
 
     def test_free_update_matrix_matches_linear_formula(self):
         net = _stable_linear_net()
@@ -855,7 +873,7 @@ class TestStability(unittest.TestCase):
         full = np.diag([(taus - 1.0) / taus] * 3) + (slopes / taus) * weights
         np.testing.assert_allclose(update, full[1:, 1:], rtol=1e-6)
 
-    def test_nonlinear_penalty_uses_state_dependent_gain(self):
+    def test_nonlinear_spectral_radius_uses_state_dependent_gain(self):
         model = _mln_pairwise(activation_function=tanh_relu_activation)
         # gain = 1 - tanh(u)^2: saturation lowers the local gain, so a
         # high-activity operating point is more stable than a low one
@@ -863,14 +881,14 @@ class TestStability(unittest.TestCase):
         high = rf.spectral_radius(model, torch.tensor([5.0, 5.0, 5.0]))
         self.assertLess(high, low)
 
-    def test_penalty_requires_state_for_state_dependent_jacobian(self):
+    def test_spectral_radius_requires_state_for_state_dependent_jacobian(self):
         model = _mln_pairwise(activation_function=tanh_relu_activation)
         with self.assertRaisesRegex(ValueError, "depends on the state"):
-            rf.stability_penalty(model)
+            rf.spectral_radius(model)
 
     def test_sparse_paths_run_on_large_network(self):
         # random sparse net: generic spectrum (the degenerate chain defeats
-        # ARPACK), small weights so even the Gershgorin bound stays below 1
+        # ARPACK), small weights so the network is stable
         n = 300
         rng = np.random.RandomState(0)
         nnz = 4 * n
@@ -894,45 +912,10 @@ class TestStability(unittest.TestCase):
         )
         self.assertLess(abs(rho - reference), 1e-4)
         self.assertLess(rho, 1.0)
-        self.assertEqual(float(rf.stability_penalty(net)), 0.0)
-        bound = float(_gershgorin_bound(net))
-        self.assertLessEqual(rho, bound + 1e-6)
-        self.assertLess(bound, 1.0)
-
-    def test_gershgorin_bound_small_net(self):
-        # bound >= true radius on the dense-regime nets too
-        net = _stable_linear_net()
-        self.assertLessEqual(
-            rf.spectral_radius(net), float(_gershgorin_bound(net)) + 1e-6
-        )
 
     def test_free_update_matrix_refuses_large_network(self):
         with self.assertRaisesRegex(ValueError, "at most 256 nodes"):
             rf.free_update_matrix(_big_linear_chain())
-
-    def test_penalty_is_differentiable(self):
-        # pair-mode gain enters the Jacobian through effective_weights; at a
-        # small positive state the built-in tanh gain is ~0.85, so the strong
-        # self-edge (w_eff = 2 * 2 = 4) makes the update radius
-        # 0.9 + 0.85 * 4/10 > 1. (Not the zero state: there the input sits
-        # exactly on the threshold, where autograd's relu'(0) = 0 applies.)
-        model = cin.MultilayeredNetwork(
-            sps.csr_matrix(np.array([[0.0, 0.0], [0.0, 2.0]], dtype=np.float32)),
-            sensory_indices=[0],
-            num_layers=3,
-            threshold=0.0,
-            idx_to_group={0: "S", 1: "A"},
-            slope_dict={("A", "A"): 2.0},
-            sensory_input_mode="replace",
-            device=CPU,
-        )
-        model.slope.requires_grad_(True)
-        state = torch.tensor([0.1, 0.1])
-        penalty = rf.stability_penalty(model, state)
-        self.assertGreater(float(penalty), 0.0)
-        penalty.backward()
-        self.assertIsNotNone(model.slope.grad)
-        self.assertTrue(torch.isfinite(model.slope.grad).all())
 
 
 # ---------------------------------------------------------------------------
@@ -1028,25 +1011,17 @@ class TestAffineReadout(unittest.TestCase):
         scale, offset = rf.affine_readout_solve(latent, target)
         self.assertEqual(float(scale), 0.0)
 
-    def test_penalties_zero_when_comfortable(self):
-        scale_pen, std_pen = rf._affine_readout_penalties(
-            torch.tensor([0.0]), torch.tensor([1.0])
-        )
-        self.assertEqual(float(scale_pen), 0.0)
-        self.assertEqual(float(std_pen), 0.0)
+    def test_scale_penalty_zero_at_zero_scale(self):
+        self.assertEqual(float(rf._readout_scale_penalty(torch.tensor([0.0]))), 0.0)
 
-    def test_penalties_active_branches_match_formulas(self):
-        scale_pen, std_pen = rf._affine_readout_penalties(
-            torch.tensor([20.0]),
-            torch.tensor([0.005]),
-            scale_soft_limit=10.0,
-            latent_std_floor=0.02,
+    def test_scale_penalty_matches_formula(self):
+        # a soft knee, nonzero for any nonzero scale
+        scale_pen = rf._readout_scale_penalty(
+            torch.tensor([20.0]), scale_soft_limit=10.0
         )
-        # the scale penalty is a soft knee, nonzero for any nonzero scale
         np.testing.assert_allclose(
             float(scale_pen), np.log1p(2.0) ** 2, rtol=1e-5, atol=1e-12
         )
-        np.testing.assert_allclose(float(std_pen), 0.015**2, rtol=1e-5, atol=1e-12)
 
     def test_frame_schema_and_values(self):
         latent = {"L1": np.linspace(0, 1, 50)}
@@ -1095,26 +1070,21 @@ def _flat_target_vector(targets):
 
 class TestMakeAffineReadoutLoss(unittest.TestCase):
     def test_zero_loss_for_affinely_related_prediction(self):
-        model = _mln_pairwise()
         _, targets, windows = _toy_targets()
         loss_fn = rf.make_affine_readout_loss(
-            model,
             targets,
             layer_ids=[1, 2],
             expected_layer_windows={1: windows["A"], 2: windows["B"]},
             ridge=0.0,
             scale_reg_weight=0.0,
-            std_reg_weight=0.0,
         )
         target = _flat_target_vector(targets)
         pred = 2.0 * target + 3.0  # affinely related -> perfect readout fit
         self.assertLess(float(loss_fn(pred, target)), 1e-10)
 
     def test_moment_check_catches_wrong_grouping(self):
-        model = _mln_pairwise()
         _, targets, windows = _toy_targets()
         loss_fn = rf.make_affine_readout_loss(
-            model,
             targets,
             layer_ids=[1, 2],
             # swapped windows: the one-time moment assertion must fire
@@ -1125,12 +1095,11 @@ class TestMakeAffineReadoutLoss(unittest.TestCase):
             loss_fn(target.clone(), target)
 
     def test_normalize_by_target_var_reweights_channels(self):
-        model = _mln_pairwise()
         _, targets, _ = _toy_targets()
-        kwargs = dict(layer_ids=[1, 2], scale_reg_weight=0.0, std_reg_weight=0.0)
-        plain_fn = rf.make_affine_readout_loss(model, targets, **kwargs)
+        kwargs = dict(layer_ids=[1, 2], scale_reg_weight=0.0)
+        plain_fn = rf.make_affine_readout_loss(targets, **kwargs)
         normed_fn = rf.make_affine_readout_loss(
-            model, targets, normalize_by_target_var=True, **kwargs
+            targets, normalize_by_target_var=True, **kwargs
         )
         order = targets[targets["batch"].isin([0])].copy()
         order.loc[:, ["batch"]] = pd.Categorical(order["batch"], categories=[0])
@@ -1156,17 +1125,16 @@ class TestMakeAffineReadoutLoss(unittest.TestCase):
         self.assertGreater(abs(float(got - plain_fn(pred, target))), 1e-4)
 
     def test_normalize_matches_plain_for_equal_variance_channels(self):
-        model = _mln_pairwise()
         _, targets, _ = _toy_targets()
         # force both channels onto the same target values -> equal variance,
         # where the weighting must reduce to the plain channel mean
         vals = targets["value"].to_numpy().copy()
         vals[targets["neuron_idx"] == 2] = vals[targets["neuron_idx"] == 1]
         targets = targets.assign(value=vals)
-        kwargs = dict(layer_ids=[1, 2], scale_reg_weight=0.0, std_reg_weight=0.0)
-        plain_fn = rf.make_affine_readout_loss(model, targets, **kwargs)
+        kwargs = dict(layer_ids=[1, 2], scale_reg_weight=0.0)
+        plain_fn = rf.make_affine_readout_loss(targets, **kwargs)
         normed_fn = rf.make_affine_readout_loss(
-            model, targets, normalize_by_target_var=True, **kwargs
+            targets, normalize_by_target_var=True, **kwargs
         )
         target = _flat_target_vector(targets)
         rng = np.random.RandomState(0)
@@ -1176,149 +1144,40 @@ class TestMakeAffineReadoutLoss(unittest.TestCase):
         )
 
     def test_multi_batch_targets_rejected(self):
-        model = _mln_pairwise()
         _, targets, _ = _toy_targets()
         shifted = targets.copy()
         shifted["batch"] = 1
         with self.assertRaisesRegex(ValueError, "single-batch"):
             rf.make_affine_readout_loss(
-                model, pd.concat([targets, shifted]), layer_ids=[1, 2]
+                pd.concat([targets, shifted]), layer_ids=[1, 2]
             )
 
     def test_unknown_layer_id_rejected(self):
-        model = _mln_pairwise()
         _, targets, _ = _toy_targets()
         with self.assertRaisesRegex(ValueError, "no rows"):
-            rf.make_affine_readout_loss(model, targets, layer_ids=[1, 7])
-
-    def test_stability_optin_with_divnorm_raises_at_build(self):
-        weights = np.array(
-            [[0.0, 0.0, 0.0], [0.4, 0.0, 0.2], [0.0, -0.3, 0.0]], dtype=np.float32
-        )
-        model = cin.MultilayeredNetwork(
-            sps.csr_matrix(weights),
-            sensory_indices=[0],
-            num_layers=3,
-            idx_to_group={0: "S", 1: "A", 2: "B"},
-            divisive_normalization={"A": ["B"]},
-            sensory_input_mode="replace",
-            device=CPU,
-        )
-        _, targets, _ = _toy_targets()
-        with self.assertRaisesRegex(NotImplementedError, "divisive_normalization"):
-            rf.make_affine_readout_loss(
-                model,
-                targets,
-                layer_ids=[1, 2],
-                stability_weight=1.0,
-                stability_state_fn=lambda previous: torch.zeros(3),
-            )
-
-    def test_stability_optin_without_state_fn_raises_at_build(self):
-        # the built-in MultilayeredNetwork gain is state-dependent, so the
-        # linearisation point must be given up front rather than failing on
-        # the first loss call inside train_model
-        _, targets, _ = _toy_targets()
-        with self.assertRaisesRegex(ValueError, "stability_state_fn"):
-            rf.make_affine_readout_loss(
-                _mln_pairwise(), targets, layer_ids=[1, 2], stability_weight=1.0
-            )
-        # a LinearNetwork's gain is state-independent: no state_fn needed
-        loss_fn = rf.make_affine_readout_loss(
-            _stable_linear_net(), targets, layer_ids=[1, 2], stability_weight=1.0
-        )
-        target = _flat_target_vector(targets)
-        self.assertTrue(torch.isfinite(loss_fn(target.clone(), target)))
-
-    def test_stability_weight_zero_skips_linearisation_requirement(self):
-        # a state-dependent model without a state_fn: with the default weight
-        # 0 the factory builds and the loss runs -- backward compatible
-        model = _mln_pairwise(activation_function=tanh_relu_activation)
-        _, targets, _ = _toy_targets()
-        loss_fn = rf.make_affine_readout_loss(model, targets, layer_ids=[1, 2])
-        target = _flat_target_vector(targets)
-        self.assertTrue(torch.isfinite(loss_fn(target.clone(), target)))
-
-    def test_stability_term_added_and_warm_started(self):
-        model = _mln_pairwise(activation_function=tanh_relu_activation)
-        _, targets, _ = _toy_targets()
-        calls = []
-
-        def state_fn(previous):
-            calls.append(previous)
-            return rf.network_fixed_point(model, [0.3], initial_state=previous)
-
-        weight = 7.0
-        loss_fn = rf.make_affine_readout_loss(
-            model,
-            targets,
-            layer_ids=[1, 2],
-            ridge=0.0,
-            scale_reg_weight=0.0,
-            std_reg_weight=0.0,
-            stability_weight=weight,
-            stability_state_fn=state_fn,
-        )
-        target = _flat_target_vector(targets)
-        pred = 2.0 * target + 3.0  # readout part is exactly zero
-        first = float(loss_fn(pred, target))
-        state = rf.network_fixed_point(model, [0.3])
-        expected = weight * float(rf.stability_penalty(model, state))
-        self.assertLess(abs(first - expected), 1e-8)
-        loss_fn(pred, target)
-        self.assertTrue(calls[0] is None and calls[1] is not None)
+            rf.make_affine_readout_loss(targets, layer_ids=[1, 7])
 
     def test_components_recorded_on_training_calls_only(self):
-        model = _mln_pairwise(activation_function=tanh_relu_activation)
         _, targets, _ = _toy_targets()
-        loss_fn = rf.make_affine_readout_loss(
-            model,
-            targets,
-            layer_ids=[1, 2],
-            stability_weight=3.0,
-            stability_state_fn=lambda previous: rf.network_fixed_point(
-                model, [0.3], initial_state=previous
-            ),
-        )
+        loss_fn = rf.make_affine_readout_loss(targets, layer_ids=[1, 2])
         target = _flat_target_vector(targets)
-        pred = 2.0 * target + 3.0
+        pred = 2.0 * target + 3.0 + 0.1 * torch.sin(torch.arange(len(target)) * 1.0)
         total = float(loss_fn(pred, target))
         with torch.no_grad():  # e.g. train_model's validation pass
             loss_fn(pred, target)
         comps = loss_fn.components
         self.assertEqual(
-            set(comps),
-            {"fit_loss", "readout_scale_penalty", "latent_std_penalty",
-             "stability_rho", "stability_penalty"},
+            set(comps), {"fit_loss", "readout_scale_penalty"}
         )
         for key, values in comps.items():
             self.assertEqual(len(values), 1, key)
-        state = rf.network_fixed_point(model, [0.3])
-        self.assertAlmostEqual(
-            comps["stability_rho"][0], rf.spectral_radius(model, state), places=5
-        )
-        self.assertAlmostEqual(
-            comps["stability_penalty"][0],
-            float(rf.stability_penalty(model, state)),
-            places=8,
-        )
+        self.assertGreater(comps["fit_loss"][0], 0.0)
         # the recorded parts add up to the returned loss (default weights)
         recombined = (
             comps["fit_loss"][0]
             + 1e-2 * comps["readout_scale_penalty"][0]
-            + 30.0 * comps["latent_std_penalty"][0]
-            + 3.0 * comps["stability_penalty"][0]
         )
         self.assertAlmostEqual(recombined, total, places=6)
-
-    def test_no_stability_components_without_stability_weight(self):
-        model = _mln_pairwise()
-        _, targets, _ = _toy_targets()
-        loss_fn = rf.make_affine_readout_loss(model, targets, layer_ids=[1, 2])
-        target = _flat_target_vector(targets)
-        loss_fn(target.clone(), target)
-        self.assertNotIn("stability_rho", loss_fn.components)
-        self.assertEqual(len(loss_fn.components["fit_loss"]), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -1500,14 +1359,9 @@ class TestTrainModelIntegration(unittest.TestCase):
         windows = rf.extract_transition_windows(traces, transition_idx, window)
         sensor = rf.ExponentialSensor(tau_ms=5.0, dt_ms=1.0)
         loss_fn = rf.make_affine_readout_loss(
-            model,
             targets,
             layer_ids=[1, 2],
             expected_layer_windows={1: windows["A"], 2: windows["B"]},
-            stability_weight=1.0,
-            stability_state_fn=lambda prev: rf.network_fixed_point(
-                model, [np.log(0.3 + 0.17)], initial_state=prev
-            ),
         )
         trained_model, history, *_ = cin.train_model(
             model,

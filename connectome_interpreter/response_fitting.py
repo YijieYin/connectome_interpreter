@@ -19,10 +19,12 @@ from .activation_maximisation import (
 from .utils import pytorch_sparse_to_scipy
 
 # Up to this many nodes, the steady-state and stability functions use exact
-# dense computations; above it, sparse ones. The dense eigendecomposition in
-# stability_penalty runs every training step and takes ~20 ms at 256 nodes but
-# ~240 ms at 800 nodes (CPU).
+# dense computations; above it, sparse ones.
 _DENSE_NODE_LIMIT = 256
+
+# Steps of plain iteration that _newton_fixed_point_dense runs before retrying
+# Newton when the first attempt stalls.
+_FALLBACK_ITERATION_STEPS = 200_000
 
 # GCaMP6f decay time constant in ms (literature range ~200-500 ms)
 GCAMP6F_TAU_MS = 300.0
@@ -228,7 +230,7 @@ def _operating_state(model, state):
     )
 
 
-def _step_linearisation(model, state, create_graph: bool = False):
+def _step_linearisation(model, state):
     """
     Per-node derivatives of one network step at ``state``, by autograd. Written
     by Claude Fable 5.1.
@@ -253,14 +255,10 @@ def _step_linearisation(model, state, create_graph: bool = False):
         model (MultilayeredNetwork or LinearNetwork): The network. Must not use
             ``divisive_normalization``.
         state (torch.Tensor): State of all nodes, shape (n_nodes,).
-        create_graph (bool, optional): Keep the autograd graph from ``d_u``
-            and ``d_prev`` back to the model parameters, so that a quantity
-            built from the Jacobian (e.g. ``stability_penalty()``) can be
-            differentiated. Defaults to False.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ``(d_u, d_prev,
-        mask)``, each of shape (n_nodes,).
+        mask)``, each of shape (n_nodes,), without gradients.
 
     Raises:
         NotImplementedError: If the model uses ``divisive_normalization``.
@@ -278,8 +276,6 @@ def _step_linearisation(model, state, create_graph: bool = False):
     _check_linearisable(model)
     device = model.all_weights.device
     state = torch.as_tensor(state, dtype=torch.float32, device=device).reshape(-1, 1)
-    # without trainable parameters there is nothing to keep a graph for
-    create_graph = create_graph and any(p.requires_grad for p in model.parameters())
     with torch.enable_grad():
         # u is formed from a detached copy of the state and x_prev is its own
         # leaf, so that d/dx_prev is the direct dependence only
@@ -300,7 +296,6 @@ def _step_linearisation(model, state, create_graph: bool = False):
             y,
             (u, x_prev),
             torch.ones_like(y),
-            create_graph=create_graph,
             allow_unused=True,
         )
         d_u, d_prev = (torch.zeros_like(y) if g is None else g for g in grads)
@@ -495,7 +490,10 @@ def _newton_fixed_point_dense(
     """
     Solve for the fixed point of ``network_step()`` with Newton's method
     (``scipy.optimize.root``, method ``"hybr"``), using the Jacobian from
-    ``free_update_matrix()``. Raises if the result is not a fixed point to
+    ``free_update_matrix()``. If Newton stalls, which happens when a node sits
+    at a kink of the activation such as the rectification threshold, the
+    network is iterated towards its fixed point (``network_fixed_point()``) and
+    Newton is retried from there. Raises if the result is not a fixed point to
     within ``fp_tol``. Written by Claude Opus 5.5.
     """
     device = model.all_weights.device
@@ -534,6 +532,20 @@ def _newton_fixed_point_dense(
     solution = optimize.root(residual, start, jac=jacobian, method="hybr")
     state = full_state(solution.x)
     moved = float((_clamped_step(model, state, sensory_values) - state).abs().max())
+    if moved > fp_tol:
+        iterated = network_fixed_point(
+            model,
+            sensory_values,
+            initial_state=state,
+            max_steps=_FALLBACK_ITERATION_STEPS,
+            tol=fp_tol,
+        )
+        start = iterated[free_idx].cpu().numpy().astype(np.float64)
+        solution = optimize.root(residual, start, jac=jacobian, method="hybr")
+        state = full_state(solution.x)
+        moved = float(
+            (_clamped_step(model, state, sensory_values) - state).abs().max()
+        )
     if moved > fp_tol:
         raise RuntimeError(
             f"Newton equilibrium solve did not reach a fixed point of "
@@ -629,7 +641,7 @@ def make_initial_state_fn(
     return initial_state_fn
 
 
-def free_update_matrix(model, state=None, create_graph: Optional[bool] = None):
+def free_update_matrix(model, state=None):
     """
     Jacobian of one network step, restricted to the free (non-sensory) nodes.
 
@@ -638,7 +650,7 @@ def free_update_matrix(model, state=None, create_graph: Optional[bool] = None):
     that is ``diag((tau - 1) / tau) + (gain / tau) * W``, with the rows of the
     nodes at the output clamp or below the rectification threshold zeroed.
     The network is stable around ``state`` if the spectral radius of this
-    matrix is below 1.
+    matrix is below 1. Computed without gradients.
 
     Args:
         model (MultilayeredNetwork or LinearNetwork): The network, with at most
@@ -646,9 +658,6 @@ def free_update_matrix(model, state=None, create_graph: Optional[bool] = None):
         state (torch.Tensor, optional): State at which to linearise. May be
             omitted only when the Jacobian does not depend on the state (a
             ``LinearNetwork`` with the built-in activation). Defaults to None.
-        create_graph (bool, optional): Keep the autograd graph back to the
-            model parameters, see ``_step_linearisation()``. Defaults to None:
-            keep it when gradients are enabled.
 
     Returns:
         torch.Tensor: Square matrix over the free nodes.
@@ -663,59 +672,14 @@ def free_update_matrix(model, state=None, create_graph: Optional[bool] = None):
             f"free_update_matrix is dense and supports at most "
             f"{_DENSE_NODE_LIMIT} nodes; got {n_nodes}."
         )
-    if create_graph is None:
-        create_graph = torch.is_grad_enabled()
-    W = model.effective_weights.to_dense()
     free_idx, _ = _free_and_sensory_indices(model)
-    if free_idx.numel() == 0:
-        return torch.zeros((0, 0), dtype=W.dtype, device=W.device)
-    d_u, d_prev, mask = _step_linearisation(
-        model, _operating_state(model, state), create_graph=create_graph
-    )
-    update = mask.view(-1, 1) * (torch.diag(d_prev) + d_u.view(-1, 1) * W)
-    return update.index_select(0, free_idx).index_select(1, free_idx)
-
-
-def _gershgorin_spectral_radius_bound(model, free_idx, state):
-    """
-    Upper bound on the spectral radius of the update matrix ``M`` from the
-    Gershgorin circle theorem: ``max_i (|M_ii| + sum_{j != i} |M_ij|)``.
-    Computed from the sparse weights and the per-node derivatives of
-    ``_step_linearisation()``; differentiable.
-    """
-    weights = model.effective_weights.coalesce()
-    idx = weights.indices()
-    post, pre = idx[0], idx[1]
-    vals = weights.values()
-    n = weights.shape[0]
-    device = vals.device
-
-    d_u, d_prev, mask = _step_linearisation(
-        model, state, create_graph=torch.is_grad_enabled()
-    )
-    scale = mask * d_u  # per post-synaptic node
-
-    free_mask = torch.zeros(n, dtype=torch.bool, device=device)
-    free_mask[free_idx] = True
-    edge_free = free_mask[post] & free_mask[pre]
-    post_f = post[edge_free]
-    m_vals = scale[post_f] * vals[edge_free]
-    diag_edge = post_f == pre[edge_free]
-
-    diag_from_w = torch.zeros(n, dtype=m_vals.dtype, device=device)
-    if torch.any(diag_edge):
-        diag_from_w = diag_from_w.index_add(0, post_f[diag_edge], m_vals[diag_edge])
-    m_diag = mask * d_prev + diag_from_w
-
-    offdiag_abs = torch.zeros(n, dtype=m_vals.dtype, device=device)
-    off_edge = ~diag_edge
-    if torch.any(off_edge):
-        offdiag_abs = offdiag_abs.index_add(
-            0, post_f[off_edge], torch.abs(m_vals[off_edge])
-        )
-
-    gershgorin = torch.abs(m_diag) + offdiag_abs
-    return gershgorin[free_idx].max()
+    d_u, d_prev, mask = _step_linearisation(model, _operating_state(model, state))
+    with torch.no_grad():
+        W = model.effective_weights.to_dense()
+        if free_idx.numel() == 0:
+            return torch.zeros((0, 0), dtype=W.dtype, device=W.device)
+        update = mask.view(-1, 1) * (torch.diag(d_prev) + d_u.view(-1, 1) * W)
+        return update.index_select(0, free_idx).index_select(1, free_idx)
 
 
 def _spectral_radius_sparse(model, free_idx, state):
@@ -728,52 +692,6 @@ def _spectral_radius_sparse(model, free_idx, state):
     else:
         eigenvalues = spla.eigs(update, k=1, which="LM", return_eigenvectors=False)
     return float(np.abs(eigenvalues).max())
-
-
-def stability_penalty(model, state=None, margin: float = 1e-4):
-    """
-    Differentiable penalty ``relu(rho - (1 - margin)) ** 2`` on the spectral
-    radius ``rho`` of ``free_update_matrix()``. It is zero for a stable network
-    and can be added to a ``train_model`` loss (see
-    ``make_affine_readout_loss()``).
-
-    Args:
-        model (MultilayeredNetwork or LinearNetwork): The network.
-        state (torch.Tensor, optional): State at which to linearise; see
-            ``free_update_matrix()``. Defaults to None.
-        margin (float, optional): Required distance of ``rho`` below 1.
-            Defaults to 1e-4.
-
-    Returns:
-        torch.Tensor: Scalar penalty.
-
-    Note:
-        Up to 256 nodes, ``rho`` is the exact spectral radius. Above that, it is
-        the Gershgorin upper bound, which is conservative, so the penalty is
-        stricter than the exact one. Not available with
-        ``divisive_normalization``.
-    """
-    rho = _penalty_spectral_radius(model, state)
-    if rho is None:
-        return torch.zeros((), dtype=torch.float32, device=model.all_weights.device)
-    return torch.relu(rho - (1.0 - float(margin))) ** 2
-
-
-def _penalty_spectral_radius(model, state):
-    """
-    The differentiable ``rho`` behind ``stability_penalty()``: the exact
-    spectral radius of ``free_update_matrix()`` up to ``_DENSE_NODE_LIMIT``
-    nodes, the Gershgorin upper bound above. None if there are no free nodes.
-    Written by Claude Opus 5.5.
-    """
-    free_idx, _ = _free_and_sensory_indices(model)
-    if free_idx.numel() == 0:
-        return None
-    state = _operating_state(model, state)
-    if model.all_weights.shape[0] > _DENSE_NODE_LIMIT:
-        return _gershgorin_spectral_radius_bound(model, free_idx, state)
-    update = free_update_matrix(model, state)
-    return torch.abs(torch.linalg.eigvals(update)).max()
 
 
 def spectral_radius(model, state=None):
@@ -912,24 +830,13 @@ def affine_readout_solve(latent, target, ridge: float = 1e-4):
     return scale, offset
 
 
-def _affine_readout_penalties(
-    scales,
-    latent_stds,
-    scale_soft_limit: float = 10.0,
-    latent_std_floor: float = 0.02,
-):
+def _readout_scale_penalty(scales, scale_soft_limit: float = 10.0):
     """
-    Penalties that stop the readout from compensating for a vanishing model
-    output: ``mean(log1p(|scale| / scale_soft_limit) ** 2)`` on the readout
-    scales, and ``mean(relu(latent_std_floor - std) ** 2)`` on the standard
-    deviation of the model output.
-
-    Returns:
-        tuple[torch.Tensor, torch.Tensor]: ``(scale_penalty, std_penalty)``.
+    Penalty ``mean(log1p(|scale| / scale_soft_limit) ** 2)`` on the readout
+    scales, which stops the readout from compensating for a vanishing model
+    output.
     """
-    scale_penalty = (torch.log1p(torch.abs(scales) / scale_soft_limit) ** 2).mean()
-    std_penalty = (torch.relu(latent_std_floor - latent_stds) ** 2).mean()
-    return scale_penalty, std_penalty
+    return (torch.log1p(torch.abs(scales) / scale_soft_limit) ** 2).mean()
 
 
 def affine_readout_frame(
@@ -996,18 +903,12 @@ def affine_readout_frame(
 
 
 def make_affine_readout_loss(
-    model,
     targets: pd.DataFrame,
     layer_ids: Sequence[int],
     expected_layer_windows: Optional[Mapping] = None,
     ridge: float = 1e-4,
     scale_soft_limit: float = 10.0,
-    latent_std_floor: float = 0.02,
     scale_reg_weight: float = 1e-2,
-    std_reg_weight: float = 30.0,
-    stability_weight: float = 0.0,
-    stability_margin: float = 1e-4,
-    stability_state_fn: Optional[Callable] = None,
     normalize_by_target_var: bool = False,
 ) -> Callable:
     """
@@ -1016,13 +917,11 @@ def make_affine_readout_loss(
 
     In every evaluation, each channel's model output is mapped to the target
     with ``affine_readout_solve()`` before computing the mean squared error, so
-    the model does not need to match the units of the data. Penalties on the
-    readout stop it from compensating for a vanishing model output, and a
-    stability penalty can be added. Only single-batch targets (``batch == 0``)
-    are supported.
+    the model does not need to match the units of the data. A penalty on the
+    readout scale stops it from compensating for a vanishing model output.
+    Only single-batch targets (``batch == 0``) are supported.
 
     Args:
-        model (MultilayeredNetwork or LinearNetwork): The network being fitted.
         targets (pd.DataFrame): The targets passed to ``train_model``, with
             columns ``batch``, ``neuron_idx``, ``layer`` and ``value``.
         layer_ids (sequence of int): The ``neuron_idx`` of each channel: node
@@ -1036,22 +935,8 @@ def make_affine_readout_loss(
             1e-4.
         scale_soft_limit (float, optional): Readout scale above which the
             scale penalty grows quickly. Defaults to 10.0.
-        latent_std_floor (float, optional): Standard deviation of the model
-            output below which it is penalised. Defaults to 0.02.
         scale_reg_weight (float, optional): Weight of the scale penalty.
             Defaults to 1e-2.
-        std_reg_weight (float, optional): Weight of the standard-deviation
-            penalty. Defaults to 30.0.
-        stability_weight (float, optional): Weight of ``stability_penalty()``.
-            Defaults to 0.0 (no stability penalty).
-        stability_margin (float, optional): ``margin`` of
-            ``stability_penalty()``. Defaults to 1e-4.
-        stability_state_fn (callable, optional): ``fn(previous_state) -> state``
-            giving the state at which to linearise for the stability penalty.
-            It receives its previous result (None on the first call), e.g. to
-            warm-start ``network_fixed_point()``. Required unless the Jacobian
-            does not depend on the state (a ``LinearNetwork`` with the
-            built-in activation). Defaults to None.
         normalize_by_target_var (bool, optional): Weight each channel's error by
             ``mean(target_var) / target_var``, so that channels with small
             amplitude count as much as large ones. Defaults to False.
@@ -1060,13 +945,10 @@ def make_affine_readout_loss(
         callable: ``loss_fn(pred, target)`` returning a scalar tensor. Each
         call made with gradients enabled (the training call of each
         ``train_model`` epoch) appends the loss components to the lists in
-        ``loss_fn.components``: ``"fit_loss"`` (the channel MSE term),
-        ``"readout_scale_penalty"`` and ``"latent_std_penalty"`` (unweighted),
-        and, with ``stability_weight > 0``, ``"stability_rho"`` (the spectral
-        radius the penalty sees; the Gershgorin bound above 256 nodes) and
-        ``"stability_penalty"`` (unweighted). Calls without gradients, such as
-        ``train_model``'s validation pass, are not recorded. The recording was
-        added by Claude Opus 5.5.
+        ``loss_fn.components``: ``"fit_loss"`` (the channel MSE term) and
+        ``"readout_scale_penalty"`` (unweighted). Calls without gradients, such as ``train_model``'s
+        validation pass, are not recorded. The recording was added by Claude
+        Opus 5.5.
     """
     layer_ids = [int(i) for i in layer_ids]
     batches = sorted(set(targets["batch"].tolist()))
@@ -1075,20 +957,6 @@ def make_affine_readout_loss(
             "make_affine_readout_loss supports single-batch targets "
             f"(batch == 0 only); got batches {batches}."
         )
-    if stability_weight < 0:
-        raise ValueError("stability_weight must be >= 0.")
-    if stability_weight > 0:
-        # fail here rather than on the first loss call inside train_model
-        _check_linearisable(model)
-        if stability_state_fn is None and not _linearisation_is_state_independent(
-            model
-        ):
-            raise ValueError(
-                "stability_weight > 0 needs the state at which to linearise, "
-                "since this model's Jacobian depends on the state. Pass "
-                "stability_state_fn=..., e.g. lambda previous: "
-                "network_fixed_point(model, u0, initial_state=previous)."
-            )
 
     # the masks pick out each channel's entries in the order train_model
     # flattens the targets
@@ -1109,15 +977,10 @@ def make_affine_readout_loss(
             )
             moments.append((float(t.mean()), float(t.std())))
     order_checked = {"done": moments is None}
-    warm = {"state": None}
     components = {
         "fit_loss": [],
         "readout_scale_penalty": [],
-        "latent_std_penalty": [],
     }
-    if stability_weight > 0:
-        components["stability_rho"] = []
-        components["stability_penalty"] = []
 
     def loss_fn(pred, target):
         channel_masks = [m.to(pred.device) for m in masks]
@@ -1136,14 +999,13 @@ def make_affine_readout_loss(
                     )
             order_checked["done"] = True
 
-        mses, scales, latent_stds, target_vars = [], [], [], []
+        mses, scales, target_vars = [], [], []
         for mask in channel_masks:
             latent = pred[mask]
             tgt = target[mask]
             scale, offset = affine_readout_solve(latent, tgt, ridge=ridge)
             mses.append(((scale * latent + offset - tgt) ** 2).mean())
             scales.append(scale)
-            latent_stds.append(latent.std())
             target_vars.append(tgt.var(unbiased=False))
         if normalize_by_target_var:
             tvars = torch.stack(target_vars).clamp_min(1e-12)
@@ -1154,37 +1016,12 @@ def make_affine_readout_loss(
         record = torch.is_grad_enabled()
         if record:
             components["fit_loss"].append(float(loss.detach()))
-        scale_penalty, std_penalty = _affine_readout_penalties(
-            torch.stack(scales),
-            torch.stack(latent_stds),
-            scale_soft_limit=scale_soft_limit,
-            latent_std_floor=latent_std_floor,
+        scale_penalty = _readout_scale_penalty(
+            torch.stack(scales), scale_soft_limit=scale_soft_limit
         )
         if record:
             components["readout_scale_penalty"].append(float(scale_penalty.detach()))
-            components["latent_std_penalty"].append(float(std_penalty.detach()))
-        loss = (
-            loss
-            + scale_reg_weight * scale_penalty.to(loss.device)
-            + std_reg_weight * std_penalty.to(loss.device)
-        )
-        if stability_weight > 0:
-            state = None
-            if stability_state_fn is not None:
-                state = stability_state_fn(warm["state"])
-                warm["state"] = state
-            rho = _penalty_spectral_radius(model, state)
-            if rho is None:
-                penalty = torch.zeros((), dtype=loss.dtype, device=loss.device)
-            else:
-                penalty = torch.relu(rho - (1.0 - float(stability_margin))) ** 2
-            if record:
-                components["stability_rho"].append(
-                    float("nan") if rho is None else float(rho.detach())
-                )
-                components["stability_penalty"].append(float(penalty.detach()))
-            loss = loss.to(penalty.device) + stability_weight * penalty
-        return loss
+        return loss + scale_reg_weight * scale_penalty.to(loss.device)
 
     loss_fn.components = components
 
