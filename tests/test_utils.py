@@ -2,9 +2,30 @@ import unittest
 
 import numpy as np
 import pandas as pd
+import torch
 from scipy.sparse import coo_matrix
 
-from connectome_interpreter.utils import modify_coo_matrix
+from connectome_interpreter.utils import modify_coo_matrix, pytorch_sparse_to_scipy
+
+
+class TestPytorchSparseToScipy(unittest.TestCase):
+    def test_round_trip_values_and_formats(self):
+        dense = np.array([[0.0, 1.5], [-2.0, 0.0]], dtype=np.float32)
+        tensor = torch.tensor(dense).to_sparse()
+        for fmt in ("csr", "csc", "coo"):
+            out = pytorch_sparse_to_scipy(tensor, scipy_format=fmt)
+            self.assertEqual(out.format, fmt)
+            np.testing.assert_array_equal(out.toarray(), dense)
+        with self.assertRaises(ValueError):
+            pytorch_sparse_to_scipy(tensor, scipy_format="lil")
+
+    def test_accepts_tensor_that_requires_grad(self):
+        # e.g. a network's effective_weights while its slopes are trainable
+        values = torch.tensor([1.5, -2.0], requires_grad=True)
+        indices = torch.tensor([[0, 1], [1, 0]])
+        tensor = torch.sparse_coo_tensor(indices, values, (2, 2))
+        out = pytorch_sparse_to_scipy(tensor)
+        np.testing.assert_array_equal(out.toarray(), [[0.0, 1.5], [-2.0, 0.0]])
 
 
 class TestModifyCooMatrix(unittest.TestCase):
