@@ -18,7 +18,7 @@ from .activation_maximisation import (
 )
 from .utils import pytorch_sparse_to_scipy
 
-# Up to this many nodes, the steady-state and stability functions use exact
+# Up to this many nodes, the steady-state and Jacobian functions use exact
 # dense computations; above it, sparse ones.
 _DENSE_NODE_LIMIT = 256
 
@@ -195,7 +195,7 @@ def _check_linearisable(model):
     """
     if model.divisive_normalization is not None:
         raise NotImplementedError(
-            "Jacobian-based analysis (steady states, stability) does not "
+            "Jacobian-based analysis (steady states) does not "
             "support divisive_normalization: with it a node's activation "
             "depends on other nodes' states, not only on its own input. Use "
             "network_fixed_point() for the steady state."
@@ -680,46 +680,6 @@ def free_update_matrix(model, state=None):
             return torch.zeros((0, 0), dtype=W.dtype, device=W.device)
         update = mask.view(-1, 1) * (torch.diag(d_prev) + d_u.view(-1, 1) * W)
         return update.index_select(0, free_idx).index_select(1, free_idx)
-
-
-def _spectral_radius_sparse(model, free_idx, state):
-    """
-    Spectral radius of the update matrix of a large network, via ARPACK.
-    """
-    update = _sparse_update_matrix(model, free_idx, state)
-    if free_idx.numel() <= 2:
-        eigenvalues = np.linalg.eigvals(update.toarray())
-    else:
-        eigenvalues = spla.eigs(update, k=1, which="LM", return_eigenvectors=False)
-    return float(np.abs(eigenvalues).max())
-
-
-def spectral_radius(model, state=None):
-    """
-    Spectral radius of ``free_update_matrix()``, without gradients. Below 1
-    means the network is stable around ``state``.
-
-    Args:
-        model (MultilayeredNetwork or LinearNetwork): The network.
-        state (torch.Tensor, optional): State at which to linearise; see
-            ``free_update_matrix()``. Defaults to None.
-
-    Returns:
-        float: The spectral radius (0.0 if there are no free nodes).
-
-    Note:
-        Up to 256 nodes this uses a dense eigendecomposition, above that ARPACK
-        (``scipy.sparse.linalg.eigs``). Both are exact.
-    """
-    with torch.no_grad():
-        free_idx, _ = _free_and_sensory_indices(model)
-        if free_idx.numel() == 0:
-            return 0.0
-        state = _operating_state(model, state)
-        if model.all_weights.shape[0] > _DENSE_NODE_LIMIT:
-            return _spectral_radius_sparse(model, free_idx, state)
-        update = free_update_matrix(model, state)
-        return float(torch.abs(torch.linalg.eigvals(update)).max().detach().cpu())
 
 
 class ExponentialSensor:

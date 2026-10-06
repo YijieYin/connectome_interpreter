@@ -326,7 +326,9 @@ class TestStepLinearisation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "depends on the state"):
             rf.free_update_matrix(_mln_node_mode())
         with self.assertRaisesRegex(ValueError, "depends on the state"):
-            rf.spectral_radius(_mln_pairwise(activation_function=tanh_relu_activation))
+            rf.free_update_matrix(
+                _mln_pairwise(activation_function=tanh_relu_activation)
+            )
 
     def test_coupled_activation_rejected(self):
         # an activation that mixes nodes has no per-node derivative; the probe
@@ -364,7 +366,7 @@ class TestStepLinearisation(unittest.TestCase):
             divisive_normalization={"A": ["B"]},
         )
         with self.assertRaisesRegex(NotImplementedError, "divisive_normalization"):
-            rf.spectral_radius(linear)
+            rf.free_update_matrix(linear)
         # the linear solve would silently use the unmodulated slopes (the
         # modulation lives in activation_function), so it refuses too
         with self.assertRaisesRegex(NotImplementedError, "divisive_normalization"):
@@ -853,16 +855,6 @@ class TestLinearNetworkSteadyStateSparse(unittest.TestCase):
 
 
 class TestStability(unittest.TestCase):
-    def test_spectral_radius_below_one_for_stable_network(self):
-        net = _stable_linear_net()
-        rho = rf.spectral_radius(net)
-        self.assertTrue(np.isfinite(rho) and rho < 1.0)
-
-    def test_spectral_radius_above_one_for_unstable_network(self):
-        # a strong self-excitatory free node pushes the update radius above 1
-        net = _linear_net([[0.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 0.0]])
-        self.assertGreater(rf.spectral_radius(net), 1.0)
-
     def test_free_update_matrix_matches_linear_formula(self):
         net = _stable_linear_net()
         update = rf.free_update_matrix(net).detach().numpy()
@@ -873,45 +865,15 @@ class TestStability(unittest.TestCase):
         full = np.diag([(taus - 1.0) / taus] * 3) + (slopes / taus) * weights
         np.testing.assert_allclose(update, full[1:, 1:], rtol=1e-6)
 
-    def test_nonlinear_spectral_radius_uses_state_dependent_gain(self):
+    def test_nonlinear_jacobian_uses_state_dependent_gain(self):
         model = _mln_pairwise(activation_function=tanh_relu_activation)
         # gain = 1 - tanh(u)^2: saturation lowers the local gain, so a
-        # high-activity operating point is more stable than a low one
-        low = rf.spectral_radius(model, torch.zeros(3))
-        high = rf.spectral_radius(model, torch.tensor([5.0, 5.0, 5.0]))
-        self.assertLess(high, low)
+        # high-activity operating point has a smaller spectral radius
+        def radius(state):
+            update = rf.free_update_matrix(model, state)
+            return float(torch.abs(torch.linalg.eigvals(update)).max())
 
-    def test_spectral_radius_requires_state_for_state_dependent_jacobian(self):
-        model = _mln_pairwise(activation_function=tanh_relu_activation)
-        with self.assertRaisesRegex(ValueError, "depends on the state"):
-            rf.spectral_radius(model)
-
-    def test_sparse_paths_run_on_large_network(self):
-        # random sparse net: generic spectrum (the degenerate chain defeats
-        # ARPACK), small weights so the network is stable
-        n = 300
-        rng = np.random.RandomState(0)
-        nnz = 4 * n
-        weights = sps.coo_matrix(
-            (
-                rng.uniform(-0.1, 0.1, nnz).astype(np.float32),
-                (rng.randint(1, n, nnz), rng.randint(0, n, nnz)),
-            ),
-            shape=(n, n),
-        ).tocsr()
-        net = cin.LinearNetwork(
-            all_weights=weights,
-            sensory_indices=[0],
-            num_layers=3,
-            tanh_steepness=1.0,
-            device=CPU,
-        )
-        rho = rf.spectral_radius(net)  # ARPACK path (n > _DENSE_NODE_LIMIT)
-        reference = float(
-            torch.abs(torch.linalg.eigvals(_autograd_jacobian(net))).max()
-        )
-        self.assertLess(abs(rho - reference), 1e-4)
-        self.assertLess(rho, 1.0)
+        self.assertLess(radius(torch.tensor([5.0, 5.0, 5.0])), radius(torch.zeros(3)))
 
     def test_free_update_matrix_refuses_large_network(self):
         with self.assertRaisesRegex(ValueError, "at most 256 nodes"):
