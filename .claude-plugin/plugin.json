@@ -1,0 +1,11 @@
+{
+  "name": "connectome-interpreter",
+  "description": "Skill for analysing Drosophila connectomes (FAFB, maleCNS, BANC) with the connectome_interpreter Python package: effective connectivity, path-finding, contextual receptive fields, and a differentiable rate model.",
+  "author": {
+    "name": "Yijie Yin"
+  },
+  "homepage": "https://connectome-interpreter.readthedocs.io",
+  "repository": "https://github.com/YijieYin/connectome_interpreter",
+  "license": "MIT",
+  "skills": "./connectome_interpreter/skills"
+}

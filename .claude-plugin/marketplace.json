@@ -1,0 +1,14 @@
+{
+  "name": "connectome-interpreter",
+  "description": "Agent skill for the connectome_interpreter Python package.",
+  "owner": {
+    "name": "Yijie Yin"
+  },
+  "plugins": [
+    {
+      "name": "connectome-interpreter",
+      "source": "./",
+      "description": "Skill for analysing Drosophila connectomes with the connectome_interpreter Python package."
+    }
+  ]
+}

@@ -49,6 +49,13 @@ To facilitate neural circuit interpretation, we maintain a [list of cell types w
 - **Everyone has edit access** — please help make the list more comprehensive and correct, and check that the publications you care about are cited correctly. Handle with care.
 - When adding multiple entries to one cell (e.g. several papers per cell type), separate them with `; ` (semicolon + space) for programmatic access.
 
+# Using with AI agents
+
+The package ships an [Agent Skill](connectome_interpreter/skills/connectome-interpreter/SKILL.md) that teaches coding agents (e.g. Claude Code) the analysis workflow, the datasets, and the interpretation caveats. Install it either way:
+
+- Claude Code plugin: `/plugin marketplace add YijieYin/connectome_interpreter`, then `/plugin install connectome-interpreter@connectome-interpreter`.
+- From the pip-installed package (e.g. on HPC): `python -m connectome_interpreter.install_skill` (copies it to `~/.claude/skills/`; `--dest` for another agent's skills folder). Re-run after upgrading.
+
 <!--
 # Structure-function relationships
 

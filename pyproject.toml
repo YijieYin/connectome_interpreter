@@ -40,7 +40,7 @@ plot_layered_paths = ["pyvis"]
 version = {attr = "connectome_interpreter._version.__version__"}
 
 [tool.setuptools.package-data]
-"connectome_interpreter" = ["data/*/*"]
+"connectome_interpreter" = ["data/*/*", "skills/*/*.md", "skills/*/references/*.md"]
 
 [tool.setuptools.packages.find]
 where = ["."]
