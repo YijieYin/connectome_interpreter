@@ -7,6 +7,7 @@ Install it with `python -m connectome_interpreter.install_skill`.
 
 from ._version import __version__
 from .activation_maximisation import *
+from .response_fitting import *
 from .compress_paths import *
 from .external_map import *
 from .path_finding import *

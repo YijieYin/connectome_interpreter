@@ -26,7 +26,6 @@ from .utils import (
     scipy_sparse_to_pytorch,
 )
 
-
 # Default box for a pair-mode gain. The gain is dimensionless (w_eff = m * w), so
 # a fixed box is meaningful across edges of any weight. 0 is a safe lower bound
 # because dL/dm = w * dL/dw_eff is nonzero there, so a zeroed edge can recover.
@@ -130,6 +129,7 @@ class _NetworkBase(nn.Module):
         tau: float = 10,
         tau_dict: Optional[dict] = None,
         tau_log_scale: bool = False,
+        tau_max: Optional[float] = None,
         sensory_input_mode: str = "add",
         device: Optional[torch.device] = None,
         incoming_weight_budget: Optional[float] = None,
@@ -230,6 +230,12 @@ class _NetworkBase(nn.Module):
         # When True, tau_param stores log(tau) so optimisation steps act
         # multiplicatively on tau; effective_tau exponentiates it back.
         self.tau_log_scale = tau_log_scale
+        if tau_max is not None and tau_max <= 1.0:
+            raise ValueError(
+                "tau_max must be > 1 (effective_tau is clamped to >= 1), "
+                f"got {tau_max}."
+            )
+        self.tau_max = tau_max
         self.sensory_input_mode = sensory_input_mode
 
         # slope_dict is dual-format: cell-type keys (node mode, legacy per-post
@@ -474,9 +480,7 @@ class _NetworkBase(nn.Module):
                 # would silently flip excitation/inhibition. The incoming-weight
                 # budget's projection additionally relies on m >= 0 for its
                 # row-L1 accounting (|m * w| = m * |w|).
-                raise ValueError(
-                    f"slope_bounds for pair {pair} must be non-negative."
-                )
+                raise ValueError(f"slope_bounds for pair {pair} must be non-negative.")
             if float(lower) > float(upper):
                 lower = upper
             lower_values.append(float(lower))
@@ -667,9 +671,9 @@ class _NetworkBase(nn.Module):
                 "never come under it. Raise the budget or make those edges trainable."
             )
 
-        infeasible = torch.where(
-            checkable & (frozen_row_l1 + lower_l1 > budget + tol)
-        )[0]
+        infeasible = torch.where(checkable & (frozen_row_l1 + lower_l1 > budget + tol))[
+            0
+        ]
         if infeasible.numel() > 0:
             raise ValueError(
                 f"incoming_weight_budget={budget} is infeasible for post-node "
@@ -754,11 +758,19 @@ class _NetworkBase(nn.Module):
             self.slope.copy_(before_step + step / self.slope_update_scale)
 
     def project_parameter_bounds_(self) -> None:
-        # only pair-mode slope has bounds to project onto
-        if not self.slope_is_pairwise:
-            return
+        """Pull the bounded parameters back onto their bounds after an optimizer
+        step: pair-mode slopes onto [lower, upper], tau onto [1, tau_max] (in
+        log space with tau_log_scale). A parameter sitting exactly on a bound
+        still receives its gradient through the clamp in effective_slope /
+        effective_tau, so it can move back inside later; one left strictly
+        outside the bound would get a zero gradient from then on. The tau
+        projection was written by Claude Fable 5.1."""
         with torch.no_grad():
-            self.slope.copy_(self.effective_slope)
+            if self.slope_is_pairwise:
+                self.slope.copy_(self.effective_slope)
+            if self.tau_param is not None:
+                lower, upper = self._tau_param_bounds()
+                self.tau_param.clamp_(min=lower, max=upper)
 
     def project_incoming_budget_(self) -> Optional[torch.Tensor]:
         """Pull every non-sensory row back under ``incoming_weight_budget``.
@@ -855,12 +867,82 @@ class _NetworkBase(nn.Module):
 
     @property
     def effective_tau(self):
+        """The time constants in use: ``tau_param`` bounded to [1, tau_max],
+        exponentiated first under tau_log_scale. The ``tau_max`` bound was
+        written by Claude Fable 5, its handling in the parameter's dtype by
+        Claude Fable 5.1."""
         if self.tau_param is None:
             return self.tau
+        lower, upper = self._tau_param_bounds()
+        clamped = torch.clamp(self.tau_param, min=lower, max=upper)
         if getattr(self, "tau_log_scale", False):
             # tau_param holds log(tau); exponentiate back to ms
-            return torch.clamp(torch.exp(self.tau_param), min=1.0)
-        return torch.clamp(self.tau_param, min=1.0)  # tau < 1 is physically meaningless
+            return torch.exp(clamped)
+        return clamped  # tau < 1 is physically meaningless
+
+    def _tau_param_bounds(self):
+        """The bounds of ``tau_param``, [1, tau_max] or their logs under
+        tau_log_scale, as tensors in the parameter's dtype. The bounds are
+        applied in log space so that a parameter projected onto log(tau_max)
+        is exactly on the bound: exp(log(tau_max)) can round above tau_max in
+        float32. They are tensors rather than Python floats so that the clamp
+        compares the parameter with its bound in the same precision; compared
+        in double, a float32 parameter on the bound can appear beyond it by
+        rounding and lose its gradient. Written by Claude Fable 5.1."""
+        tau_max = getattr(self, "tau_max", None)
+        if getattr(self, "tau_log_scale", False):
+            lower = 0.0
+            upper = None if tau_max is None else float(np.log(tau_max))
+        else:
+            lower, upper = 1.0, tau_max
+
+        def as_tensor(value):
+            if value is None:
+                return None
+            return torch.tensor(
+                value, dtype=self.tau_param.dtype, device=self.tau_param.device
+            )
+
+        return as_tensor(lower), as_tensor(upper)
+
+    def node_parameter(self, name: str):
+        """
+        Per-node values of a parameter that is stored per group, as used in the
+        forward pass. If the parameter is not set, the model's default
+        (``tanh_steepness``, ``default_bias`` or ``tau``) is used. Written by
+        Claude Fable 5.
+
+        Args:
+            name (str): ``"slope"``, ``"bias"`` or ``"tau"``.
+
+        Returns:
+            torch.Tensor: Shape (n_nodes,). For ``"slope"`` with pairwise slopes
+            this is all ones, since those slopes are part of
+            ``effective_weights``.
+        """
+        n_nodes = self.all_weights.shape[0]
+        device = self.all_weights.device
+
+        def _fill(value):
+            return torch.full(
+                (n_nodes,), float(value), dtype=torch.float32, device=device
+            )
+
+        if name == "slope":
+            if self.slope_is_pairwise:
+                return torch.ones(n_nodes, dtype=torch.float32, device=device)
+            if self.slope is None or self.indices is None:
+                return _fill(self.tanh_steepness)
+            return self.effective_slope[self.indices]
+        if name == "bias":
+            if self.raw_biases is None or self.indices is None:
+                return _fill(self.default_bias)
+            return self.biases[self.indices]
+        if name == "tau":
+            if self.tau_param is None or self.indices is None:
+                return _fill(self.tau)
+            return self.effective_tau[self.indices]
+        raise ValueError(f"Unknown parameter name: {name!r}")
 
     def _apply_sensory_input(self, state: torch.Tensor, input_at_layer: torch.Tensor):
         # Each call retains one (num_neurons, batch) clone in the autograd graph.
@@ -1108,6 +1190,13 @@ class LinearNetwork(_NetworkBase):
         tau (float, optional): Time constant. Higher tau results in slower changes.
             Minimum 1, where the activation at the current time step is solely
             determined by the current input. Defaults to 10.
+        tau_max (float, optional): Upper bound on the time constants, in the
+            same units as ``tau``. Useful when slow time constants are not
+            constrained by the data and would otherwise keep growing during
+            training. ``train_model`` projects the tau parameters onto
+            ``[1, tau_max]`` after every optimizer step, so a tau that reaches
+            the bound stays on it, with a live gradient, rather than beyond it.
+            Defaults to None (no bound).
         device (torch.device, optional): Device for computation.
     """
 
@@ -1579,6 +1668,13 @@ class MultilayeredNetwork(_NetworkBase):
         tau (float, optional): Time constant. Higher tau results in slower changes.
             Minimum 1, where the activation at the current time step is solely
             determined by the current input. Defaults to 10.
+        tau_max (float, optional): Upper bound on the time constants, in the
+            same units as ``tau``. Useful when slow time constants are not
+            constrained by the data and would otherwise keep growing during
+            training. ``train_model`` projects the tau parameters onto
+            ``[1, tau_max]`` after every optimizer step, so a tau that reaches
+            the bound stays on it, with a live gradient, rather than beyond it.
+            Defaults to None (no bound).
         device (torch.device, optional): Device for computation.
         output_clamp_max (float, optional): Upper clamp applied to non-sensory
             activations after each layer in :meth:`forward`. None disables it
@@ -1611,7 +1707,6 @@ class MultilayeredNetwork(_NetworkBase):
         super().__init__(*args, **kwargs)
         self.output_clamp_max = output_clamp_max
         self.output_rectify = output_rectify
-
 
     def activation_function(
         self,
@@ -2062,6 +2157,28 @@ def training_mode(
         )
 
 
+def _targets_for_batches(targets: pd.DataFrame, batch_indices) -> pd.DataFrame:
+    """
+    The rows of ``targets`` whose ``batch`` is in ``batch_indices``, ordered by
+    the position of their batch in ``batch_indices`` (rows of one batch keep
+    their order) and with ``batch`` renumbered to that position. This is the
+    order in which ``train_model`` flattens the targets, and so the order of
+    the ``pred`` and ``target`` vectors a custom ``activation_loss_fn``
+    receives. Written by Claude Fable 5.1.
+
+    Args:
+        targets (pd.DataFrame): Targets with a ``batch`` column.
+        batch_indices (sequence of int): The batches to keep, in order.
+
+    Returns:
+        pd.DataFrame: The selected rows, with ``batch`` renumbered from 0.
+    """
+    position = {b: i for i, b in enumerate(batch_indices)}
+    selected = targets[targets["batch"].isin(list(position))].copy()
+    selected["batch"] = selected["batch"].map(position)
+    return selected.sort_values(by="batch", kind="stable")
+
+
 def train_model(
     model: MultilayeredNetwork,
     inputs: torch.Tensor,
@@ -2080,7 +2197,7 @@ def train_model(
     rescale_slope_updates: bool = False,
     checkpoint_steps: int = 50,
     activation_loss_fn: Union[str, Callable] = "mse",
-    initial_state: Optional[torch.Tensor] = None,
+    initial_state: Optional[Union[torch.Tensor, Callable]] = None,
     target_node_groups: Optional[dict] = None,
     extra_parameters: Optional[List[torch.nn.Parameter]] = None,
     input_transform: Optional[Callable] = None,
@@ -2122,11 +2239,17 @@ def train_model(
         activation_loss_fn (str or callable, optional): Loss function for activations.
             Either "mae", "mse" (default), or a callable with signature fn(pred:
             torch.Tensor, target: torch.Tensor) -> torch.Tensor returning a scalar loss.
-        initial_state (torch.Tensor, optional): Initial full-network state for each
-            batch. Shape can be (nodes,), (batch, nodes), or (nodes, batch). Sensory
-            nodes are still overwritten by the first input sample. When 2-D, it is
-            split alongside ``inputs`` (same batch axis) into per-stimulus train and
-            validation states.
+        initial_state (torch.Tensor or callable, optional): Initial full-network
+            state for each batch. Shape can be (nodes,), (batch, nodes), or
+            (nodes, batch). Sensory nodes are still overwritten by the first
+            input sample. When 2-D, it is split alongside ``inputs`` (same batch
+            axis) into per-stimulus train and validation states. Can also be a
+            callable ``fn(model) -> state``, which is called at the start of
+            every epoch, e.g. to start from the current model's steady state
+            (see ``response_fitting.make_initial_state_fn``). Its result is
+            split in the same way and used as returned, so detach it inside the
+            callable if it should not carry gradients. The callable form was
+            written by Claude Opus 5.5.
         target_node_groups (dict, optional): Fit group (e.g. cell-type) averages
             instead of individual nodes. Maps ``group_id -> sequence of member node
             indices``. When provided, the ``targets`` DataFrame's ``neuron_idx``
@@ -2153,7 +2276,7 @@ def train_model(
             every forward pass (train and validation), before the targets are
             gathered. Used to append a fixed observation model to the dynamics --
             e.g. a causal sensor/indicator convolution along the time axis (see
-            ``sensor_kernel.make_sensor_output_transform``) so the fit compares a
+            ``response_fitting.ExponentialSensor``) so the fit compares a
             forward-modelled measurement, not the raw latent, to the data. Must
             preserve the shape and be differentiable wrt ``outputs``. Note this
             retains a second copy of the full output in the autograd graph: at 139k
@@ -2194,23 +2317,8 @@ def train_model(
         train_inputs = inputs[train_indices]
         val_inputs = inputs[val_indices]
 
-        train_targets = targets[targets["batch"].isin(train_indices)].copy()
-        train_targets.loc[:, ["batch"]] = pd.Categorical(
-            train_targets["batch"], categories=list(train_indices)
-        )
-        train_targets = train_targets.sort_values(by="batch")
-        # change to local batch indices
-        batch2local_batch = {b: i for i, b in enumerate(train_indices)}
-        train_targets.loc[:, ["batch"]] = train_targets.batch.map(batch2local_batch)
-
-        val_targets = targets[targets["batch"].isin(val_indices)].copy()
-        val_targets.loc[:, ["batch"]] = pd.Categorical(
-            val_targets["batch"], categories=list(val_indices)
-        )
-        val_targets = val_targets.sort_values(by="batch")
-        # change to local batch indices
-        batch2local_batch = {b: i for i, b in enumerate(val_indices)}
-        val_targets.loc[:, ["batch"]] = val_targets.batch.map(batch2local_batch)
+        train_targets = _targets_for_batches(targets, train_indices)
+        val_targets = _targets_for_batches(targets, val_indices)
 
         return (
             train_inputs,
@@ -2342,15 +2450,17 @@ def train_model(
 
         # Per-stimulus initial states are split alongside the inputs so each half
         # keeps the states belonging to its own batch entries.
-        train_initial_state = initial_state
-        val_initial_state = initial_state
-        if initial_state is not None and torch.as_tensor(initial_state).dim() == 2:
-            st = torch.as_tensor(initial_state)
+        def split_initial_state(state):
+            if state is None or torch.as_tensor(state).dim() != 2:
+                return state, state
+            st = torch.as_tensor(state)
             axis = 0 if st.shape[0] == inputs.shape[0] else 1
             train_idx_t = torch.as_tensor(train_indices, device=st.device)
             val_idx_t = torch.as_tensor(val_indices, device=st.device)
-            train_initial_state = st.index_select(axis, train_idx_t)
-            val_initial_state = st.index_select(axis, val_idx_t)
+            return st.index_select(axis, train_idx_t), st.index_select(axis, val_idx_t)
+
+        if not callable(initial_state):
+            train_initial_state, val_initial_state = split_initial_state(initial_state)
 
         batch_idx = torch.tensor(
             train_targets["batch"].astype(int).values,
@@ -2404,12 +2514,19 @@ def train_model(
 
         for epoch in tqdm(range(num_epochs)):
             optimizer.zero_grad()
+            # a callable initial_state is re-evaluated every epoch
+            if callable(initial_state):
+                train_initial_state, val_initial_state = split_initial_state(
+                    initial_state(model)
+                )
             # Forward pass. The transform is re-applied each epoch so a
             # differentiable transform (driven by extra_parameters) gets gradients.
             outputs = model(
-                train_inputs
-                if input_transform is None
-                else input_transform(train_inputs),
+                (
+                    train_inputs
+                    if input_transform is None
+                    else input_transform(train_inputs)
+                ),
                 checkpoint_steps=checkpoint_steps,
                 initial_state=train_initial_state,
             )  # shape: (train_num, num_neurons, num_layers)
@@ -2497,9 +2614,11 @@ def train_model(
             if has_validation:
                 with torch.no_grad():
                     val_outputs = model(
-                        val_inputs
-                        if input_transform is None
-                        else input_transform(val_inputs),
+                        (
+                            val_inputs
+                            if input_transform is None
+                            else input_transform(val_inputs)
+                        ),
                         initial_state=val_initial_state,
                     )
                     if output_transform is not None:

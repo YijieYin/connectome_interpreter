@@ -2006,8 +2006,8 @@ def pytorch_sparse_to_scipy(sparse_tensor, scipy_format="csr"):
     assert sparse_tensor.is_sparse, "Input tensor must be sparse"
 
     # Extract indices and values
-    indices = sparse_tensor._indices().cpu().numpy()
-    values = sparse_tensor._values().cpu().numpy()
+    indices = sparse_tensor._indices().detach().cpu().numpy()
+    values = sparse_tensor._values().detach().cpu().numpy()
     shape = sparse_tensor.shape
 
     # Create scipy COO matrix

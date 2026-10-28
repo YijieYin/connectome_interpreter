@@ -7,6 +7,7 @@ import pandas as pd
 import torch
 from scipy.sparse import csr_matrix
 
+from connectome_interpreter.activation_maximisation import _targets_for_batches
 from connectome_interpreter.activation_maximisation import (
     LinearNetwork,
     MultilayeredNetwork,
@@ -1815,7 +1816,9 @@ class TestLinearNetwork(unittest.TestCase):
         self.assertIn("ambiguous", str(ctx.exception))
 
         # a 1-D initial_state is unambiguous and still accepted
-        output = model(inputs, initial_state=torch.tensor([7.0, 2.0], device=self.device))
+        output = model(
+            inputs, initial_state=torch.tensor([7.0, 2.0], device=self.device)
+        )
         self.assertEqual(tuple(output.shape), (2, 2, 1))
 
     def test_output_flags_are_multilayered_only(self):
@@ -4394,7 +4397,9 @@ class TestIncomingWeightBudget(unittest.TestCase):
         scale = model.project_incoming_budget_()
         self.assertTrue(torch.allclose(model.slope, before))
         np.testing.assert_allclose(scale.cpu().numpy(), np.ones(4), atol=1e-6)
-        np.testing.assert_allclose(self._row_l1(model).numpy()[1:], [0.4, 0.6, 0.9], atol=1e-6)
+        np.testing.assert_allclose(
+            self._row_l1(model).numpy()[1:], [0.4, 0.6, 0.9], atol=1e-6
+        )
 
     def test_projection_lands_the_row_exactly_on_the_budget(self):
         model = self._model(budget=1.0)
@@ -4738,7 +4743,9 @@ class TestIncomingWeightBudget(unittest.TestCase):
     def test_train_model_reports_nothing_when_the_budget_never_binds(self):
         model = self._model(budget=1.0)
         inputs = torch.zeros((1, 1, 2), device=self.device)
-        targets = pd.DataFrame([{"batch": 0, "neuron_idx": 3, "layer": 0, "value": 0.0}])
+        targets = pd.DataFrame(
+            [{"batch": 0, "neuron_idx": 3, "layer": 0, "value": 0.0}]
+        )
         _, history, *_ = train_model(
             model,
             inputs,
@@ -4817,6 +4824,246 @@ class TestTauLogScale(unittest.TestCase):
         np.testing.assert_allclose(
             model.effective_tau.detach().cpu().numpy(), [1.0, 1.0], rtol=1e-6
         )
+
+
+class TestTauMax(unittest.TestCase):
+    """tau_max upper-bounds effective_tau so fitted taus cannot drift
+    arbitrarily slow (an unidentified slow mode otherwise absorbs drift)."""
+
+    def setUp(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.weights = csr_matrix(np.array([[0.0, 0.0], [0.5, 0.0]], dtype=np.float32))
+        self.idx_to_group = {0: "A", 1: "B"}
+
+    def _model(self, model_class=MultilayeredNetwork, **kwargs):
+        return model_class(
+            self.weights,
+            sensory_indices=[0],
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+            **kwargs,
+        ).to(self.device)
+
+    def test_effective_tau_clamped_at_tau_max_log_scale(self):
+        model = self._model(
+            tau_dict={"A": 4.0, "B": 16.0}, tau_log_scale=True, tau_max=8.0
+        )
+        np.testing.assert_allclose(
+            model.effective_tau.detach().cpu().numpy(), [4.0, 8.0], rtol=1e-5
+        )
+
+    def test_effective_tau_clamped_at_tau_max_linear_scale(self):
+        model = self._model(tau_dict={"A": 4.0, "B": 16.0}, tau_max=8.0)
+        np.testing.assert_allclose(
+            model.effective_tau.detach().cpu().numpy(), [4.0, 8.0], rtol=1e-6
+        )
+
+    def test_no_tau_max_leaves_tau_unbounded(self):
+        model = self._model(tau_dict={"A": 4.0, "B": 21101.0})
+        np.testing.assert_allclose(
+            model.effective_tau.detach().cpu().numpy(), [4.0, 21101.0], rtol=1e-6
+        )
+
+    def test_drift_above_bound_stays_clamped(self):
+        model = self._model(
+            tau_dict={"A": 4.0, "B": 4.0}, tau_log_scale=True, tau_max=8.0
+        )
+        with torch.no_grad():
+            model.tau_param.add_(float(np.log(10.0)))  # 4 -> 40, both over
+        np.testing.assert_allclose(
+            model.effective_tau.detach().cpu().numpy(), [8.0, 8.0], rtol=1e-5
+        )
+
+    def test_tau_max_applies_to_linear_network(self):
+        model = self._model(
+            model_class=LinearNetwork, tau_dict={"A": 4.0, "B": 16.0}, tau_max=8.0
+        )
+        np.testing.assert_allclose(
+            model.effective_tau.detach().cpu().numpy(), [4.0, 8.0], rtol=1e-6
+        )
+
+    def test_tau_max_at_or_below_one_raises(self):
+        for bad in (1.0, 0.5, -3.0):
+            with self.assertRaises(ValueError):
+                self._model(tau_dict={"A": 4.0, "B": 16.0}, tau_max=bad)
+
+    def test_projection_pulls_tau_back_onto_the_bound(self):
+        # an optimizer step that overshoots a bound is projected back onto it,
+        # after which the raw parameter equals the effective tau
+        for log_scale, overshoot in ((False, 36.0), (True, float(np.log(10.0)))):
+            model = self._model(
+                tau_dict={"A": 4.0, "B": 4.0}, tau_log_scale=log_scale, tau_max=8.0
+            )
+            with torch.no_grad():
+                model.tau_param.add_(overshoot)  # both over the bound
+            model.project_parameter_bounds_()
+            projected = torch.exp(model.tau_param) if log_scale else model.tau_param
+            np.testing.assert_allclose(
+                projected.detach().cpu().numpy(), [8.0, 8.0], rtol=1e-5
+            )
+            np.testing.assert_allclose(
+                model.effective_tau.detach().cpu().numpy(), [8.0, 8.0], rtol=1e-5
+            )
+
+    def test_projection_also_enforces_the_lower_bound(self):
+        model = self._model(tau_dict={"A": 4.0, "B": 4.0}, tau_log_scale=True)
+        with torch.no_grad():
+            model.tau_param.sub_(10.0)  # tau -> 2e-4, below the floor of 1
+        model.project_parameter_bounds_()
+        np.testing.assert_allclose(
+            model.tau_param.detach().cpu().numpy(), [0.0, 0.0], atol=1e-7
+        )
+
+    def test_tau_on_the_bound_keeps_its_gradient(self):
+        # on the bound the clamp still passes the gradient (inclusive), so a
+        # pinned tau can move back inside; strictly beyond it the gradient is
+        # zero. Log scale with a large tau_max is the hard case: exp(log(tau_max))
+        # rounds above tau_max in float32, so the bound is applied in log space.
+        inputs = torch.full((1, 1, 2), 0.5, device=self.device)
+        for log_scale in (False, True):
+            for tau_max in (8.0, 8000.0):
+                model = self._model(
+                    tau_dict={"A": 4.0, "B": 4.0},
+                    tau_log_scale=log_scale,
+                    tau_max=tau_max,
+                )
+                with torch.no_grad():
+                    model.tau_param.add_(float(np.log(1e4)) if log_scale else 1e4)
+                model.project_parameter_bounds_()
+                model.tau_param.requires_grad_(True)
+                model(inputs, checkpoint_steps=0)[0, 1, :].sum().backward()
+                self.assertNotEqual(float(model.tau_param.grad[1]), 0.0)
+
+    def test_train_model_keeps_tau_param_inside_the_bounds(self):
+        model = self._model(
+            tau_dict={"A": 4.0, "B": 7.9}, tau_log_scale=True, tau_max=8.0
+        )
+        inputs = torch.full((4, 1, 2), 0.5, device=self.device)
+        targets = pd.DataFrame(
+            [{"batch": i, "neuron_idx": 1, "layer": 1, "value": 0.0} for i in range(4)]
+        )
+        train_model(
+            model,
+            inputs,
+            targets,
+            num_epochs=5,
+            wandb=False,
+            train_fraction=1.0,
+            train_slopes=False,
+            train_biases=False,
+            train_divisive_strength=False,
+            train_tau=True,
+            learning_rate=1.0,
+            checkpoint_steps=0,
+        )
+        self.assertLessEqual(float(model.tau_param.max()), float(np.log(8.0)) + 1e-6)
+        self.assertGreaterEqual(float(model.tau_param.min()), 0.0)
+
+
+class TestTargetsForBatches(unittest.TestCase):
+    """_targets_for_batches gives the order in which train_model flattens the
+    targets, which a custom activation_loss_fn relies on."""
+
+    def test_selects_orders_and_renumbers(self):
+        targets = pd.DataFrame(
+            {
+                "batch": [2, 0, 2, 1, 0],
+                "neuron_idx": [1, 1, 2, 1, 2],
+                "layer": [0, 0, 0, 0, 0],
+                "value": [0.2, 0.0, 0.22, 0.1, 0.02],
+            }
+        )
+        ordered = _targets_for_batches(targets, [2, 0])
+        # batch 2 becomes local batch 0 and comes first, batch 1 is dropped,
+        # and the rows of one batch keep their order
+        self.assertEqual(ordered["batch"].astype(int).tolist(), [0, 0, 1, 1])
+        self.assertEqual(ordered["value"].tolist(), [0.2, 0.22, 0.0, 0.02])
+        self.assertEqual(len(_targets_for_batches(targets, [])), 0)
+
+
+class TestCallableInitialState(unittest.TestCase):
+    """train_model(initial_state=callable) re-evaluates the t=0 state each
+    epoch from the current model instead of freezing one tensor."""
+
+    def setUp(self):
+        self.weights = csr_matrix(np.array([[0.0, 0.0], [0.5, 0.0]], dtype=np.float32))
+        self.idx_to_group = {0: "A", 1: "B"}
+
+    def _fixtures(self, num_batches=6):
+        model = MultilayeredNetwork(
+            self.weights,
+            sensory_indices=[0],
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+            device=torch.device("cpu"),
+        )
+        inputs = torch.rand(num_batches, 1, 2)
+        targets = pd.DataFrame(
+            [
+                {"batch": i, "neuron_idx": 1, "layer": 1, "value": 0.5}
+                for i in range(num_batches)
+            ]
+        )
+        return model, inputs, targets
+
+    def _train(self, model, inputs, targets, initial_state, train_fraction=1.0):
+        return train_model(
+            model,
+            inputs,
+            targets,
+            num_epochs=4,
+            wandb=False,
+            train_fraction=train_fraction,
+            train_slopes=True,
+            train_biases=False,
+            train_divisive_strength=False,
+            train_tau=False,
+            checkpoint_steps=0,
+            initial_state=initial_state,
+        )
+
+    def test_called_once_per_epoch_with_the_model(self):
+        model, inputs, targets = self._fixtures()
+        calls = []
+
+        def state_fn(m):
+            calls.append(m)
+            return torch.zeros(2)
+
+        self._train(model, inputs, targets, state_fn)
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all(m is model for m in calls))
+
+    def test_constant_callable_matches_fixed_tensor(self):
+        state = torch.tensor([0.2, 0.1])
+        model_a, inputs, targets = self._fixtures()
+        model_b = MultilayeredNetwork(
+            self.weights,
+            sensory_indices=[0],
+            num_layers=2,
+            idx_to_group=self.idx_to_group,
+            device=torch.device("cpu"),
+        )
+        self._train(model_a, inputs, targets, state)
+        self._train(model_b, inputs, targets, lambda m: state)
+        np.testing.assert_allclose(
+            model_a.slope.detach().numpy(), model_b.slope.detach().numpy()
+        )
+
+    def test_callable_reused_for_validation_forward(self):
+        model, inputs, targets = self._fixtures()
+        calls = []
+
+        def state_fn(m):
+            calls.append(m)
+            return torch.zeros(2)
+
+        _, history, *_ = self._train(
+            model, inputs, targets, state_fn, train_fraction=0.5
+        )
+        # once per epoch, shared by the train and validation forwards
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(history["val_loss"]), 4)
 
 
 class TestRescaleSlopeUpdatesInTrainModel(unittest.TestCase):
