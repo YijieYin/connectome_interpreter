@@ -24,6 +24,7 @@ def compute_flow_hitting_time(
     flow_seed_idx: np.ndarray[int],
     flow_steps: int,
     flow_thre: float,
+    quiet: bool = False,
 ):
     """
     Compute hitting time for all cells in conn_df.
@@ -35,6 +36,7 @@ def compute_flow_hitting_time(
         flow_seed_idx (np.ndarray): Array of seed cell indices.
         flow_steps (int): Number of steps for flow calculation.
         flow_thre (float): Threshold for activation in flow calculation.
+        quiet (bool): Whether to suppress output messages.
 
     Returns:
         pd.DataFrame:
@@ -68,9 +70,10 @@ def compute_flow_hitting_time(
             "Input must be a sparse matrix or a DataFrame with columns 'pre', 'post', and 'weight'."
         )
 
-    print(
-        f"Computing hitting time for {len(set(conn_df.pre)|set(conn_df.post))} cells... May take a while."
-    )
+    if not quiet:
+        print(
+            f"Computing hitting time for {len(set(conn_df.pre)|set(conn_df.post))} cells... May take a while."
+        )
     edges = conn_df[["pre", "post", "weight"]]
     edges.columns = ["source", "target", "weight"]
     model = BayesianTraversalModel(
@@ -118,6 +121,7 @@ def find_instance_flow(
     save_prefix: Optional[str] = "flow_",
     flow_steps: int = 20,
     flow_thre: float = 0.1,
+    quiet: bool = False,
 ) -> pd.DataFrame:
     """
     Get the hitting time for all cell groups. The hitting time is computed using the
@@ -140,6 +144,7 @@ def find_instance_flow(
             calculation.
         flow_steps (int): Number of steps for flow calculation.
         flow_thre (float): Threshold for flow calculation.
+        quiet (bool): Whether to suppress output messages.
 
     Returns:
         pd.DataFrame:
@@ -184,14 +189,15 @@ def find_instance_flow(
                 f"Please check the flow_seed_groups: {flow_seed_groups}."
             )
         flow_df = compute_flow_hitting_time(
-            inprop, flow_seed_idx, flow_steps, flow_thre
+            inprop, flow_seed_idx, flow_steps, flow_thre, quiet=quiet
         )
         # add cell group to flow_df
         # note: this only includes indices in flow_seed_idx, which could in theory be a
         # subset of cells in a cell type
         flow_df["cell_group"] = flow_df["idx"].map(idx_to_group)
         if save_flow:
-            print(f"Saving hitting time to {flow_file_name}")
+            if not quiet:
+                print(f"Saving hitting time to {flow_file_name}")
             flow_df.to_csv(flow_file_name, index=False)
 
     flow_type_df = (
@@ -206,7 +212,8 @@ def find_instance_flow(
     )
     if not os.path.exists(flow_type_file_name):
         if save_flow:
-            print(f"Saving flow group hitting time to {flow_type_file_name}")
+            if not quiet:
+                print(f"Saving flow group hitting time to {flow_type_file_name}")
             flow_type_df.to_csv(flow_type_file_name, index=False)
 
     return flow_type_df
@@ -225,6 +232,7 @@ def layered_el(
     flow_thre: float = 0.1,
     flow: pd.DataFrame | None = None,
     percentile: Optional[float] = None,
+    quiet: bool = False,
 ):
     """
     Similar to `el_within_n_steps` but using filter_paths_to_cumsum and layers based
@@ -254,6 +262,7 @@ def layered_el(
             If None, the flow hitting time is computed from `inprop` and `idx_to_group`.
         percentile (float, optional): Percentile to use when `combining_method` is
             'percentile'. Must be between 0 and 100. Defaults to None.
+        quiet (bool): Whether to suppress output messages.
 
     Returns:
         tuple:
@@ -273,8 +282,8 @@ def layered_el(
     # get edge list, both grouped by idx_to_group, and with raw indices
     all_paths = []
     rawel = []
-    for i in tqdm(range(n)):
-        paths = find_paths_of_length(inprop, inidx, outidx, i + 1)
+    for i in tqdm(range(n), disable=quiet):
+        paths = find_paths_of_length(inprop, inidx, outidx, i + 1, quiet=quiet)
         if paths is None or paths.shape[0] == 0:
             continue
         rawel.append(paths)
@@ -296,12 +305,12 @@ def layered_el(
         w_filter = 0
         for i in range(len(all_paths)):
             thre_step = thre_step_min
-            w_all_i = effective_conn_from_paths(all_paths[i])
+            w_all_i = effective_conn_from_paths(all_paths[i], quiet=quiet)
             w_all += w_all_i.sum().sum()
-            all_paths[i] = filter_paths(all_paths[i], thre_step_min)
+            all_paths[i] = filter_paths(all_paths[i], thre_step_min, quiet=quiet)
             if all_paths[i] is None or all_paths[i].shape[0] == 0:
                 continue
-            w_filter_i = effective_conn_from_paths(all_paths[i])
+            w_filter_i = effective_conn_from_paths(all_paths[i], quiet=quiet)
             w_filter += w_filter_i.sum().sum()
     else:
         all_paths, w_filter, w_all, thre_step = filter_all_paths_to_cumsum(
@@ -331,6 +340,7 @@ def layered_el(
             save_flow=False,
             flow_steps=flow_steps,
             flow_thre=flow_thre,
+            quiet=quiet,
         )
     else:
         # use provided flow hitting time
