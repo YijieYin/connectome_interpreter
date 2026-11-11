@@ -23,6 +23,7 @@ from connectome_interpreter.compress_paths import (
     effective_conn_from_paths_cpu,
     effconn_without_loops,
     signed_conn_by_path_length_data,
+    signed_effective_conn_from_paths,
     conn_by_path_length_data,
     connectivity_summary,
 )
@@ -1964,6 +1965,117 @@ class TestEffectiveConnFromPaths(unittest.TestCase):
         self.assertIsNone(
             effective_conn_from_paths(self.rand_paths.iloc[0:0].copy(), quiet=True)
         )
+
+
+class TestSignedEffectiveConnFromPaths(unittest.TestCase):
+    """Tests for signed_effective_conn_from_paths, against a dense numpy reference."""
+
+    def setUp(self):
+        rng = np.random.default_rng(3)
+        self.size = 50
+        n_edges = 400
+        self.paths = pd.DataFrame(
+            {
+                "pre": rng.integers(0, self.size, n_edges),
+                "post": rng.integers(0, self.size, n_edges),
+                "weight": rng.random(n_edges, dtype=np.float32),
+                "layer": rng.integers(1, 4, n_edges),
+            }
+        ).drop_duplicates(["pre", "post", "layer"])
+        self.signs = {i: int(rng.choice([1, -1])) for i in range(self.size)}
+
+        # dense reference: e = e @ E + i @ I, i = e @ I + i @ E. Multiplied with
+        # torch rather than numpy: numpy's dense matmul can abort the process on
+        # Windows when MKL and torch's OpenMP are both loaded.
+        e = i = None
+        for layer in sorted(self.paths.layer.unique()):
+            el = self.paths[self.paths.layer == layer]
+            mats = {}
+            for s in (1, -1):
+                sub = el[el.pre.map(self.signs) == s]
+                mat = torch.zeros((self.size, self.size), dtype=torch.float64)
+                mat[sub.pre.to_numpy(), sub.post.to_numpy()] = torch.as_tensor(
+                    sub.weight.to_numpy(dtype=np.float64)
+                )
+                mats[s] = mat
+            if e is None:
+                e, i = mats[1], mats[-1]
+            else:
+                e, i = e @ mats[1] + i @ mats[-1], e @ mats[-1] + i @ mats[1]
+        self.ref_e, self.ref_i = e.numpy(), i.numpy()
+
+    def _assert_matches_ref(self, out, ref):
+        dense = np.zeros((self.size, self.size))
+        dense[out.index.to_numpy()[:, None], out.columns.to_numpy()[None, :]] = (
+            out.to_numpy()
+        )
+        np.testing.assert_allclose(dense, ref, rtol=1e-4, atol=1e-6)
+
+    def test_matches_reference(self):
+        cases = [dict(use_gpu=False)]
+        if torch.cuda.is_available():
+            # chunk_size=7 forces several chunks; density_threshold 1.0 keeps chunks
+            # sparse, 0.0 makes them dense
+            cases += [
+                dict(use_gpu=True, chunk_size=c, density_threshold=d)
+                for c in (7, 10_000)
+                for d in (1.0, 0.0)
+            ]
+        for kwargs in cases:
+            with self.subTest(**kwargs):
+                exc, inh = signed_effective_conn_from_paths(
+                    self.paths.copy(), idx_to_nt=self.signs, quiet=True, **kwargs
+                )
+                self._assert_matches_ref(exc, self.ref_e)
+                self._assert_matches_ref(inh, self.ref_i)
+
+    def test_sign_column(self):
+        paths = self.paths.copy()
+        paths["sign"] = paths.pre.map(self.signs)
+        exc, inh = signed_effective_conn_from_paths(paths, quiet=True)
+        self._assert_matches_ref(exc, self.ref_e)
+        self._assert_matches_ref(inh, self.ref_i)
+
+    def test_all_excitatory_matches_unsigned(self):
+        for use_gpu in [False] + ([True] if torch.cuda.is_available() else []):
+            with self.subTest(use_gpu=use_gpu):
+                exc, inh = signed_effective_conn_from_paths(
+                    self.paths.copy(),
+                    idx_to_nt={i: 1 for i in range(self.size)},
+                    use_gpu=use_gpu,
+                    chunk_size=7,
+                    quiet=True,
+                )
+                unsigned = effective_conn_from_paths(
+                    self.paths.copy(), use_gpu=use_gpu, chunk_size=7, quiet=True
+                )
+                assert_frame_equal(
+                    exc.sort_index().sort_index(axis=1),
+                    unsigned.sort_index().sort_index(axis=1),
+                )
+                self.assertEqual(len(inh), 0)
+
+    def test_output_threshold_and_root(self):
+        thresh = 0.05
+        n_layers = self.paths.layer.nunique()
+        for use_gpu in [False] + ([True] if torch.cuda.is_available() else []):
+            with self.subTest(use_gpu=use_gpu):
+                kwargs = dict(
+                    idx_to_nt=self.signs, wide=False, use_gpu=use_gpu, quiet=True
+                )
+                full = signed_effective_conn_from_paths(self.paths.copy(), **kwargs)
+                out = signed_effective_conn_from_paths(
+                    self.paths.copy(), output_threshold=thresh, root=True, **kwargs
+                )
+                for f, o in zip(full, out):
+                    expected = f[f.weight.abs() > thresh].copy()
+                    expected["weight"] = expected.weight ** (1 / n_layers)
+                    cols = ["pre", "post", "weight"]
+                    assert_frame_equal(
+                        o.sort_values(cols[:2]).reset_index(drop=True)[cols],
+                        expected.sort_values(cols[:2]).reset_index(drop=True)[cols],
+                        rtol=1e-6,
+                    )
 
 
 class TestEffconnWithoutLoops(unittest.TestCase):

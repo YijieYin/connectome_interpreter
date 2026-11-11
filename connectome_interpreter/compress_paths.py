@@ -2236,6 +2236,9 @@ def signed_conn_by_path_length_data(
     wide: bool = True,
     quiet: bool = False,
     percentile: Optional[float] = None,
+    chunk_size: int = 2000,
+    use_gpu: bool = True,
+    output_threshold: float = 0,
 ):
     """Calculates the signed connectivity from all of inidx to outidx within `n` hops,
     grouped by inidx_map and outidx_map, aggregated by `combining_method`. The sign of
@@ -2263,6 +2266,12 @@ def signed_conn_by_path_length_data(
         quiet (bool, optional): If True, suppresses progress output. Defaults to False.
         percentile (float, optional): Percentile to use when `combining_method` is
             'percentile'. Must be between 0 and 100. Defaults to None.
+        chunk_size (int, optional): Number of rows to process in each chunk when using
+            GPU. Defaults to 2000.
+        use_gpu (bool, optional): Whether to use GPU for computation. Defaults to True.
+            If GPU is not available, it will fall back to CPU.
+        output_threshold (float, optional): Drop connections whose absolute weight is
+            below this value. Defaults to 0 (keep everything).
 
     Returns:
         List[pd.DataFrame], List[pd.DataFrame]:
@@ -2302,6 +2311,10 @@ def signed_conn_by_path_length_data(
                 paths,
                 wide=wide,
                 idx_to_nt=group_to_sign,
+                chunk_size=chunk_size,
+                use_gpu=use_gpu,
+                output_threshold=output_threshold,
+                quiet=quiet,
             )
         eees.append(exc)
         iiis.append(inh)
@@ -2361,202 +2374,254 @@ def effective_conn_from_paths(
             A DataFrame summarizing the effective connectivity between presynaptic and
             postsynaptic groups.
     """
-    # --------------------------------------------------------------------- #
-    # 0. preliminaries
-    # --------------------------------------------------------------------- #
     if len(paths) == 0:
         if not quiet:
             print("No paths found, returning None.")
         return None
 
+    global_ids = _set_local_indices(paths)
+    layers = sorted(paths.layer.unique())
+    ((rows, cols, vals),) = _layered_matmul(
+        [[_layer_edges(paths[paths.layer == layer])] for layer in layers],
+        m=len(global_ids),
+        use_gpu=_resolve_use_gpu(use_gpu, quiet),
+        chunk_size=chunk_size,
+        density_threshold=density_threshold,
+        output_threshold=output_threshold,
+    )
+    return _triplets_to_df(rows, cols, vals, global_ids, root, len(layers), wide)
+
+
+def _set_local_indices(paths: pd.DataFrame) -> np.ndarray:
+    """Add 'pre_idx' and 'post_idx' columns to `paths` (in place), numbering every
+    neuron in 'pre' or 'post' from 0 to m-1. Returns the array mapping each local index
+    back to its neuron label.
+    """
     local_idx_dict = {
         idx: i for i, idx in enumerate(set(paths.pre).union(set(paths.post)))
     }
-    local_to_global_idx = {i: idx for idx, i in local_idx_dict.items()}
-
     paths.loc[:, ["pre_idx"]] = paths.pre.map(local_idx_dict)
     paths.loc[:, ["post_idx"]] = paths.post.map(local_idx_dict)
 
-    m = len(local_idx_dict)
-    # Array version of local_to_global_idx, so the final index -> neuron mapping is a
-    # vectorised take rather than a dict lookup per row. For non-numeric labels keep
-    # object dtype: a fixed-width numpy string array would make pandas materialise a
-    # fresh str per output row, whereas an object array just shares references.
-    # Built via pd.Index rather than np.array so the dtype matches what .map() used to
-    # give: int64 rather than platform-dependent int32, and object (not fixed-width
-    # unicode) for string labels.
-    global_ids = pd.Index([local_to_global_idx[i] for i in range(m)]).to_numpy()
+    # An array (rather than a dict) so that mapping indices back to labels is a
+    # vectorised take. Built via pd.Index so the dtype matches what .map() gives:
+    # int64 rather than platform-dependent int32, and object (not fixed-width
+    # unicode, which would materialise a fresh str per output row) for strings.
+    global_ids = pd.Index(list(local_idx_dict)).to_numpy()
     if global_ids.dtype.kind not in "biufcO":
         global_ids = global_ids.astype(object)
+    return global_ids
 
-    layers = sorted(paths.layer.unique())
 
-    if use_gpu:
-        if torch is not None and torch.cuda.is_available():
-            pass
-        else:
-            use_gpu = False
-            if not quiet:
-                print("GPU not available, using CPU instead.")
+def _resolve_use_gpu(use_gpu: bool, quiet: bool) -> bool:
+    """Return `use_gpu`, downgraded to False if CUDA is not available."""
+    if use_gpu and not torch.cuda.is_available():
+        if not quiet:
+            print("GPU not available, using CPU instead.")
+        return False
+    return use_gpu
+
+
+def _layer_edges(el: pd.DataFrame):
+    """(pre_idx, post_idx, weight) arrays of an edge list."""
+    return (
+        el.pre_idx.to_numpy(dtype=np.int64),
+        el.post_idx.to_numpy(dtype=np.int64),
+        el.weight.to_numpy(dtype=np.float32),
+    )
+
+
+def _triplets_to_df(rows, cols, vals, global_ids, root, n_layers, wide):
+    """Turn (row, col, value) arrays of local indices into an edge list with columns
+    'pre_idx', 'post_idx', 'weight', 'pre' and 'post', optionally pivoted wide."""
+    result_el = pd.DataFrame({"pre_idx": rows, "post_idx": cols, "weight": vals})
+    result_el["pre"] = global_ids[rows]
+    result_el["post"] = global_ids[cols]
+    if root:
+        result_el["weight"] = result_el.weight ** (1 / n_layers)
+    if wide:
+        result_el = result_el.pivot(index="pre", columns="post", values="weight")
+        result_el.fillna(0, inplace=True)
+    return result_el
+
+
+def _layered_matmul(
+    layer_edges,
+    m: int,
+    use_gpu: bool,
+    chunk_size: int,
+    density_threshold: float,
+    output_threshold: float,
+):
+    """Multiply a sequence of (m, m) connectivity matrices, one per layer, and return
+    the non-zero entries of the product.
+
+    Each layer has k channels: k=1 for plain connectivity, k=2 for excitatory (0) and
+    inhibitory (1) connectivity. Channels combine like signs: the product of channel a
+    with channel b is added to channel (a + b) % k. For k=2 this gives
+    e = e @ E + i @ I and i = e @ I + i @ E.
+
+    On GPU, the rows of the product are computed `chunk_size` at a time. Each chunk
+    starts as a sparse tensor and is made dense once its density exceeds
+    `density_threshold`.
+
+    Args:
+        layer_edges (list): One entry per layer, in order. Each entry is a list of k
+            (pre_idx, post_idx, weight) array triplets, one per channel.
+        m (int): Size of the matrices.
+        use_gpu (bool): Whether to compute on GPU (assumed available).
+        chunk_size (int): Number of rows per chunk on GPU.
+        density_threshold (float): Density above which a chunk is made dense.
+        output_threshold (float): Drop entries whose absolute value is not above
+            this. 0 keeps everything.
+
+    Returns:
+        list: For each channel, a (rows, cols, vals) triplet of numpy arrays.
+    """
+    k = len(layer_edges[0])
+
+    def combine(state, mats, matmul, add):
+        new = [None] * k
+        for a in range(k):
+            for b in range(k):
+                prod = matmul(state[a], mats[b])
+                c = (a + b) % k
+                new[c] = prod if new[c] is None else add(new[c], prod)
+        return new
 
     if not use_gpu:
-        csr = None
-        for layer in layers:
-            el = paths[paths.layer == layer]
-            layer_csr = csr_matrix(
-                (el.weight, (el.pre_idx.values, el.post_idx.values)),
-                shape=(m, m),
-                dtype=np.float32,
-            )  # sparse matrix of the shape all_elements, all_elements
-            csr = layer_csr if csr is None else csr @ layer_csr
 
-        coo = csr.tocoo()
-        all_rows, all_cols, all_vals = coo.row, coo.col, coo.data
-        if output_threshold > 0:
-            keep = np.abs(all_vals) > output_threshold
-            all_rows, all_cols, all_vals = (
-                all_rows[keep],
-                all_cols[keep],
-                all_vals[keep],
+        def to_csr(edges):
+            r, c, w = edges
+            return csr_matrix((w, (r, c)), shape=(m, m), dtype=np.float32)
+
+        state = [to_csr(e) for e in layer_edges[0]]
+        for layer in layer_edges[1:]:
+            state = combine(
+                state,
+                [to_csr(e) for e in layer],
+                lambda x, y: x @ y,
+                lambda x, y: x + y,
             )
 
-    else:
-        device = torch.device("cuda")
-        with torch.no_grad():
-            chunk_size = min(chunk_size, m)
-            num_of_chunks = math.ceil(m / chunk_size)
+        out = []
+        for s in state:
+            coo = s.tocoo()
+            r, c, v = coo.row, coo.col, coo.data
+            if output_threshold > 0:
+                keep = np.abs(v) > output_threshold
+                r, c, v = r[keep], c[keep], v[keep]
+            out.append((r, c, v))
+        return out
 
-            # Pre-compute the sparse matrix for every layer except the first, once.
-            # The first layer is handled per chunk below, so its full matrix is never
-            # needed.
-            layer_mats = {}
-            for layer in layers[1:]:
-                layer_el = paths[paths.layer == layer]
-                idx = torch.as_tensor(
-                    np.vstack((layer_el.pre_idx.values, layer_el.post_idx.values)),
-                    device=device,
-                    dtype=torch.long,
+    device = torch.device("cuda")
+
+    def sparse(r, c, w, shape):
+        return torch.sparse_coo_tensor(
+            torch.as_tensor(np.vstack((r, c)), device=device, dtype=torch.long),
+            torch.as_tensor(w, device=device, dtype=torch.float32),
+            shape,
+            dtype=torch.float32,
+            device=device,
+        ).coalesce()
+
+    def maybe_densify(x):
+        if x.is_sparse:
+            x = x.coalesce()
+            if x._nnz() / (x.shape[0] * x.shape[1]) > density_threshold:
+                x = x.to_dense()
+        return x
+
+    def add(x, y):
+        if x.is_sparse and y.is_sparse:
+            return x + y
+        return (x.to_dense() if x.is_sparse else x) + (
+            y.to_dense() if y.is_sparse else y
+        )
+
+    def matmul(x, layer_mat):
+        # torch.sparse.mm needs the sparse operand first: x @ L = (L^T @ x^T)^T
+        return torch.sparse.mm(layer_mat.t(), x.t()).t()
+
+    out_rows = [[] for _ in range(k)]
+    out_cols = [[] for _ in range(k)]
+    out_vals = [[] for _ in range(k)]
+
+    with torch.no_grad():
+        chunk_size = min(chunk_size, m)
+        num_of_chunks = math.ceil(m / chunk_size)
+
+        # Every layer except the first, as full sparse matrices. The first layer is
+        # sliced per chunk below, so its full matrix is never needed.
+        layer_mats = [[sparse(*e, (m, m)) for e in layer] for layer in layer_edges[1:]]
+
+        # Sort the first layer by pre_idx once, so each chunk's slice is a
+        # searchsorted rather than a boolean mask over the whole edge list.
+        first = []
+        for r, c, w in layer_edges[0]:
+            order = np.argsort(r, kind="stable")
+            first.append((r[order], c[order], w[order]))
+
+        for i in range(num_of_chunks):
+            start_idx = i * chunk_size
+            end_idx = min((i + 1) * chunk_size, m)
+            bounds = [
+                (
+                    np.searchsorted(r, start_idx, side="left"),
+                    np.searchsorted(r, end_idx, side="left"),
                 )
-                val = torch.as_tensor(
-                    layer_el.weight.to_numpy(dtype=np.float32, copy=True),
-                    device=device,
+                for r, _, _ in first
+            ]
+            if all(lo == hi for lo, hi in bounds):
+                continue  # no first-layer sources in this chunk
+
+            # one (end_idx - start_idx, m) matrix per channel; rows are chunk-local
+            state = [
+                maybe_densify(
+                    sparse(
+                        r[lo:hi] - start_idx,
+                        c[lo:hi],
+                        w[lo:hi],
+                        (end_idx - start_idx, m),
+                    )
                 )
-                layer_mats[layer] = torch.sparse_coo_tensor(
-                    idx, val, (m, m), dtype=torch.float32, device=device
-                ).coalesce()
+                for (r, c, w), (lo, hi) in zip(first, bounds)
+            ]
+            for mats in layer_mats:
+                state = [maybe_densify(x) for x in combine(state, mats, matmul, add)]
+                torch.cuda.empty_cache()
 
-            # Sort the first layer by pre_idx once, so each chunk's slice is a
-            # searchsorted rather than a boolean mask over the whole edge list.
-            first_el = paths[paths.layer == layers[0]]
-            first_pre = first_el.pre_idx.values.astype(np.int64)
-            order = np.argsort(first_pre, kind="stable")
-            first_pre = first_pre[order]
-            first_post = first_el.post_idx.values.astype(np.int64)[order]
-            first_weight = first_el.weight.values.astype(np.float32)[order]
-            del first_el, order
-
-            # Collect (row, col, value) triplets as numpy arrays rather than
-            # DataFrames: 20 bytes per non-zero, and one concatenation at the end.
-            chunk_rows, chunk_cols, chunk_vals = [], [], []
-
-            for i in range(num_of_chunks):
-                start_idx = i * chunk_size
-                end_idx = min((i + 1) * chunk_size, m)
-                current_chunk_size = end_idx - start_idx
-
-                lo = np.searchsorted(first_pre, start_idx, side="left")
-                hi = np.searchsorted(first_pre, end_idx, side="left")
-                if lo == hi:
-                    continue  # no first-layer sources in this chunk
-
-                idx = torch.as_tensor(
-                    np.vstack(
-                        (
-                            # pre_idx between 0 and current_chunk_size
-                            first_pre[lo:hi] - start_idx,
-                            # post_idx between 0 and m, the number of nodes in the paths
-                            first_post[lo:hi],
-                        )
-                    ),
-                    device=device,
-                    dtype=torch.long,
-                )
-                val = torch.as_tensor(
-                    first_weight[lo:hi], device=device, dtype=torch.float32
-                )
-                mat = torch.sparse_coo_tensor(
-                    idx,
-                    val,
-                    (current_chunk_size, m),
-                    dtype=torch.float32,
-                    device=device,
-                ).coalesce()
-                if (mat._nnz() / (current_chunk_size * m)) > density_threshold:
-                    mat = mat.to_dense()
-
-                for layer in layers[1:]:
-                    mat = torch.sparse.mm(
-                        layer_mats[layer].t(), mat.t()
-                    ).t()  # shape (current_chunk_size, m)
-                    # if mat isn't dense:
-                    if mat.is_sparse:
-                        if (mat._nnz() / (current_chunk_size * m)) > density_threshold:
-                            mat = mat.to_dense()
-                    torch.cuda.empty_cache()
-
+            for ch, mat in enumerate(state):
                 if mat.is_sparse:
-                    mat = mat.coalesce()
                     rows, cols = mat.indices()
                     vals = mat.values()
                     if output_threshold > 0:
                         keep = torch.abs(vals) > output_threshold
                         rows, cols, vals = rows[keep], cols[keep], vals[keep]
                 else:
-                    if output_threshold > 0:
-                        rows, cols = torch.nonzero(
-                            torch.abs(mat) > output_threshold, as_tuple=True
-                        )
-                    else:
-                        rows, cols = torch.nonzero(mat, as_tuple=True)
+                    rows, cols = torch.nonzero(
+                        torch.abs(mat) > output_threshold, as_tuple=True
+                    )
                     vals = mat[rows, cols]
+                # shift chunk-local rows back to the global local-index space
+                out_rows[ch].append(rows.cpu().numpy() + start_idx)
+                out_cols[ch].append(cols.cpu().numpy())
+                out_vals[ch].append(vals.cpu().numpy())
 
-                # rows are chunk-local; shift back to the global local-index space
-                chunk_rows.append(rows.cpu().numpy() + start_idx)
-                chunk_cols.append(cols.cpu().numpy())
-                chunk_vals.append(vals.cpu().numpy())
+            del state, mat, rows, cols, vals
+            torch.cuda.empty_cache()
 
-                del mat, rows, cols, vals
-                # free up memory
-                torch.cuda.empty_cache()
+    def cat(arrays, dtype):
+        return np.concatenate(arrays) if arrays else np.empty(0, dtype=dtype)
 
-        if not chunk_rows:
-            if not quiet:
-                print("No effective connections found, returning None.")
-            return None
-
-        all_rows = np.concatenate(chunk_rows)
-        all_cols = np.concatenate(chunk_cols)
-        all_vals = np.concatenate(chunk_vals)
-        del chunk_rows, chunk_cols, chunk_vals
-
-    result_el = pd.DataFrame(
-        {"pre_idx": all_rows, "post_idx": all_cols, "weight": all_vals}
-    )
-    result_el["pre"] = global_ids[result_el.pre_idx.to_numpy()]
-    result_el["post"] = global_ids[result_el.post_idx.to_numpy()]
-    del all_rows, all_cols, all_vals
-
-    if root:
-        result_el["weight"] = result_el.weight ** (1 / len(layers))
-    # --------------------------------------------------------------------- #
-    # 4. back to edge-list, group, pivot
-    # --------------------------------------------------------------------- #
-
-    if wide:
-        result_el = result_el.pivot(index="pre", columns="post", values="weight")
-        result_el.fillna(0, inplace=True)
-
-    return result_el
+    return [
+        (
+            cat(out_rows[ch], np.int64),
+            cat(out_cols[ch], np.int64),
+            cat(out_vals[ch], np.float32),
+        )
+        for ch in range(k)
+    ]
 
 
 def effective_conn_from_paths_cpu(
@@ -2630,25 +2695,46 @@ def signed_effective_conn_from_paths(
     paths,
     wide: bool = True,
     idx_to_nt: dict = None,
+    chunk_size: int = 2000,
+    density_threshold: float = 0.2,
+    use_gpu: bool = True,
+    root: bool = False,
+    output_threshold: float = 0,
+    quiet: bool = False,
 ):
-    """Calculate the *signed* effective connectivity between (groups of)
-    neurons based only on the provided `paths` between neurons. This function
-    runs on CPU, and doesn't expect a big connectivity matrix as input.
+    """Calculate the *signed* effective connectivity from the paths DataFrame (which
+    could be an output of `find_paths_of_length()`), from the 'pre' in the earliest
+    layer to the 'post' in the latest layer. A path's sign is the product of the signs
+    of its connections, so e.g. two inhibitory steps make an excitatory path.
 
     Args:
         paths (pd.DataFrame): A dataframe representing the paths between
             neurons, with columns 'pre', 'post', 'weight', 'layer', and
             optionally 'sign'.
-        wide (bool, optional): Whether to pivot the output dataframe to a wide
-            format. Defaults to True.
+        wide (bool, optional): Whether to pivot the output dataframes to a wide
+            format. Defaults to True. As in `effective_conn_from_paths()`, set this to
+            False when there are many distinct sources *and* targets.
         idx_to_nt (dict, optional): A dictionary mapping neuron indices
             (values in columns `pre` and `post`) to 1 (excitatory) / -1
-            (inhibitory). Defaults to None.
+            (inhibitory). Required if `paths` has no 'sign' column. Defaults to None.
+        chunk_size (int, optional): Number of rows to process in each chunk when using
+            GPU. Defaults to 2000.
+        density_threshold (float, optional): Threshold for converting sparse matrices
+            to dense on GPU. Defaults to 0.2.
+        use_gpu (bool, optional): Whether to use GPU for computation. Defaults to True.
+            If GPU is not available, it will fall back to CPU.
+        root (bool, optional): If True, take the n-th root of the weights, where n is
+            the number of layers. Defaults to False.
+        output_threshold (float, optional): Drop connections whose absolute weight is
+            below this value. Defaults to 0 (keep everything). See
+            `effective_conn_from_paths()`.
+        quiet (bool, optional): If True, suppress informational messages. Defaults to
+            False.
 
     Returns:
-        list:
-            A list of two dataframes representing the effective connectivity between
-        groups of neurons, one for effective excitation, the other inhibition.
+        tuple:
+            Two dataframes representing the effective connectivity between neurons:
+            effective excitation, and effective inhibition.
     """
 
     if ("sign" not in paths.columns) & (idx_to_nt is None):
@@ -2657,95 +2743,37 @@ def signed_effective_conn_from_paths(
             "idx_to_nt must be provided."
         )
 
-    # setting local indices
-    # it will get confusing if we didn't use the same mapping for all layers
-    # though it is true that this would increase the size of the matrix being
-    # multiplied
-    local_idx_dict = {
-        idx: i for i, idx in enumerate(set(paths.pre).union(set(paths.post)))
-    }
-    local_to_global_idx = {i: idx for idx, i in local_idx_dict.items()}
-    paths.loc[:, ["pre_idx"]] = paths.pre.map(local_idx_dict)
-    paths.loc[:, ["post_idx"]] = paths.post.map(local_idx_dict)
+    global_ids = _set_local_indices(paths)
 
     # make sure sign is in the column:
     if "sign" not in paths.columns:
-        if any(~paths.pre.isin(idx_to_nt)):
+        if not quiet and any(~paths.pre.isin(idx_to_nt)):
             print(
                 "Warning: some neurons are not in idx_to_nt. Their outputs "
                 "will be ignored"
             )
         paths.loc[:, ["sign"]] = paths.pre.map(idx_to_nt)
 
-    # matmul with sparse matrices
-    for i, layer in enumerate(sorted(paths.layer.unique())):
-        if i == 0:
-            initial_el_e = paths[(paths.layer == layer) & (paths.sign == 1)]
-            initial_el_i = paths[(paths.layer == layer) & (paths.sign == -1)]
-            csr_e = csr_matrix(
-                (
-                    initial_el_e.weight,
-                    (
-                        initial_el_e.pre_idx.values,
-                        initial_el_e.post_idx.values,
-                    ),
-                ),
-                shape=(len(local_idx_dict), len(local_idx_dict)),
-            )
-            csr_i = csr_matrix(
-                (
-                    initial_el_i.weight,
-                    (
-                        initial_el_i.pre_idx.values,
-                        initial_el_i.post_idx.values,
-                    ),
-                ),
-                shape=(len(local_idx_dict), len(local_idx_dict)),
-            )
-
-        else:
-            el_e = paths[(paths.layer == layer) & (paths.sign == 1)]
-            el_i = paths[(paths.layer == layer) & (paths.sign == -1)]
-            this_csr_e = csr_matrix(
-                (el_e.weight, (el_e.pre_idx.values, el_e.post_idx.values)),
-                shape=(len(local_idx_dict), len(local_idx_dict)),
-            )
-            this_csr_i = csr_matrix(
-                (el_i.weight, (el_i.pre_idx.values, el_i.post_idx.values)),
-                shape=(len(local_idx_dict), len(local_idx_dict)),
-            )
-            # e = ee + ii
-            # make sure csr_e is not modified in place, so that we can use it
-            # for csr_i
-            csr_e_new = csr_e @ this_csr_e + csr_i @ this_csr_i
-            # i = ie + ei
-            csr_i = csr_e @ this_csr_i + csr_i @ this_csr_e
-            # now modify csr_e
-            csr_e = csr_e_new
-
-    coo_e = csr_e.tocoo()
-    coo_i = csr_i.tocoo()
-
-    # make dataframe based on the connectivity matrix
-    result_el_e = pd.DataFrame(
-        {"pre_idx": coo_e.row, "post_idx": coo_e.col, "weight": coo_e.data}
+    layers = sorted(paths.layer.unique())
+    # channel 0: excitatory, channel 1: inhibitory
+    exc, inh = _layered_matmul(
+        [
+            [
+                _layer_edges(paths[(paths.layer == layer) & (paths.sign == sign)])
+                for sign in (1, -1)
+            ]
+            for layer in layers
+        ],
+        m=len(global_ids),
+        use_gpu=_resolve_use_gpu(use_gpu, quiet),
+        chunk_size=chunk_size,
+        density_threshold=density_threshold,
+        output_threshold=output_threshold,
     )
-    result_el_i = pd.DataFrame(
-        {"pre_idx": coo_i.row, "post_idx": coo_i.col, "weight": coo_i.data}
+    return (
+        _triplets_to_df(*exc, global_ids, root, len(layers), wide),
+        _triplets_to_df(*inh, global_ids, root, len(layers), wide),
     )
-    # change back to the global names
-    result_el_e.loc[:, ["pre"]] = result_el_e.pre_idx.map(local_to_global_idx)
-    result_el_e.loc[:, ["post"]] = result_el_e.post_idx.map(local_to_global_idx)
-    result_el_i.loc[:, ["pre"]] = result_el_i.pre_idx.map(local_to_global_idx)
-    result_el_i.loc[:, ["post"]] = result_el_i.post_idx.map(local_to_global_idx)
-
-    if wide:
-        result_el_e = result_el_e.pivot(index="pre", columns="post", values="weight")
-        result_el_e.fillna(0, inplace=True)
-        result_el_i = result_el_i.pivot(index="pre", columns="post", values="weight")
-        result_el_i.fillna(0, inplace=True)
-
-    return result_el_e, result_el_i
 
 
 def effconn_without_loops(
